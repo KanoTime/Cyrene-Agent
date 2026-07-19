@@ -92,7 +92,7 @@
     </div>
     <div class="chat__file-tags" id="file-tags"></div>
     <form class="chat__input" id="composer">
-      <input type="file" id="file-input" accept=".txt,.md,.json,.csv,.log" multiple style="display:none" />
+      <input type="file" id="file-input" accept=".txt,.md,.json,.csv,.log,.png,.jpg,.jpeg,.gif,.bmp,.webp" multiple style="display:none" />
       <button type="button" class="chat__attach" id="attach-btn" aria-label="上传文件" title="上传文件">📎</button>
       <button type="button" class="chat__sticker-btn" id="sticker-picker-btn" aria-label="表情包" title="表情包">😀</button>
       <textarea
@@ -108,6 +108,16 @@
       <div class="sticker-picker__grid" id="sticker-picker-grid"></div>
     </div>
   </div>
+  <dialog class="image-preview-dialog" id="image-preview-dialog" aria-labelledby="image-preview-dialog-name">
+    <div class="image-preview-dialog__surface">
+      <button type="button" class="image-preview-dialog__close" id="image-preview-dialog-close" aria-label="关闭图片预览" title="关闭图片预览" autofocus>×</button>
+      <div class="image-preview-dialog__media">
+        <img class="image-preview-dialog__image" id="image-preview-dialog-image" alt="" />
+        <p class="image-preview-dialog__error" id="image-preview-dialog-error" hidden>图片无法加载，请关闭后重新粘贴。</p>
+      </div>
+      <p class="image-preview-dialog__name" id="image-preview-dialog-name"></p>
+    </div>
+  </dialog>
   <script type="module" src="./main.ts"></script>
   <div class="dropdown-menu" id="mode-dropdown">
     <div class="dm-opt is-active" data-value="collab">🛠️ 协作</div>
