@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { IPC } from "../shared/ipc-channels";
+import { isSupportedClipboardImageMime, type ClipboardImagePayload } from "../shared/clipboard-images";
 import type { UiTheme } from "../shared/ui-theme";
 import type { UiFont } from "../shared/ui-font";
 import type { DocumentIndexProgress } from "../main/rag/document-index-queue";
@@ -51,6 +52,22 @@ const chatApi = {
     }
     if (paths.length === 0) return [];
     return ipcRenderer.invoke(IPC.CHAT_INGEST_FILES, paths);
+  },
+  /** 剪贴板图片通常没有 File.path；在 preload 读取字节后交给 main 安全落盘。 */
+  ingestClipboardImages: async (files: File[]): Promise<unknown[]> => {
+    const images: ClipboardImagePayload[] = await Promise.all(files.map(async (file) => {
+      const mime = file.type.toLowerCase();
+      if (!isSupportedClipboardImageMime(mime)) {
+        throw new Error("剪贴板中包含不支持的图片格式");
+      }
+      return {
+        name: file.name,
+        mime,
+        bytes: new Uint8Array(await file.arrayBuffer()),
+      };
+    }));
+    if (images.length === 0) return [];
+    return ipcRenderer.invoke(IPC.CHAT_INGEST_CLIPBOARD_IMAGES, images);
   },
   processDocuments: (filePaths: string[], query: string) =>
     ipcRenderer.invoke(IPC.CHAT_PROCESS_DOCUMENTS, { filePaths, query }),

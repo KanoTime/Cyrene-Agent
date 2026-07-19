@@ -20,6 +20,7 @@ export const IPC = {
   CHAT_IS_MAXIMIZED: "chat:is-maximized",
   CHAT_SEND_MESSAGE: "chat:send-message",
   CHAT_INGEST_FILES: "chat:ingest-files",
+  CHAT_INGEST_CLIPBOARD_IMAGES: "chat:ingest-clipboard-images",
   CHAT_PROCESS_DOCUMENTS: "chat:process-documents",
   CHAT_DOCUMENT_INDEX_PROGRESS: "chat:document-index-progress",
   CHAT_CANCEL_DOCUMENT_INDEX: "chat:cancel-document-index",

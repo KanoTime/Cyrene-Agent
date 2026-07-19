@@ -10,6 +10,7 @@ import { normalizeDefaultChatMode, type DefaultChatMode } from "../../shared/pre
 import { canUseMinimaxStreamingEarly, extractEarlyTtsSegment } from "../../shared/tts-early-playback";
 import { getStickerSrcForId } from "./sticker-src";
 import { formatAttachmentTagDetail, getAttachmentIcon } from "./attachment-labels";
+import { collectPastedImageFiles } from "./clipboard-images";
 import { resolveAsset } from "../../shared/renderer-base";
 import { hydrateActiveCharacterIdentity } from "../ui/active-character";
 import {
@@ -110,6 +111,7 @@ interface ChatApi {
     isMaximized: () => Promise<boolean>;
     sendMessage: (messages: Array<{ role: "user" | "model"; content: string }>, style: string) => Promise<ChatReplyPayload>;
     ingestDroppedFiles: (files: File[]) => Promise<Attachment[]>;
+    ingestClipboardImages: (files: File[]) => Promise<Attachment[]>;
     processDocuments: (filePaths: string[], query: string) => Promise<Attachment[]>;
     onDocumentIndexProgress?: (callback: (progress: DocumentIndexProgress) => void) => () => void;
     cancelDocumentIndex: (jobId: string) => Promise<boolean>;
@@ -252,11 +254,17 @@ const chatRail = document.getElementById("chat-rail") as HTMLElement | null;
 const chatRailNew = document.getElementById("chat-rail-new") as HTMLButtonElement | null;
 const chatRailList = document.getElementById("chat-rail-list") as HTMLElement | null;
 const chatRailEmpty = document.getElementById("chat-rail-empty") as HTMLElement | null;
+const imagePreviewDialog = document.getElementById("image-preview-dialog") as HTMLDialogElement;
+const imagePreviewDialogImage = document.getElementById("image-preview-dialog-image") as HTMLImageElement;
+const imagePreviewDialogName = document.getElementById("image-preview-dialog-name") as HTMLElement;
+const imagePreviewDialogError = document.getElementById("image-preview-dialog-error") as HTMLElement;
+const imagePreviewDialogClose = document.getElementById("image-preview-dialog-close") as HTMLButtonElement;
 
 // 旧版 localStorage key——首次启动时检测到老数据会迁移到主进程 chats 存储再清掉。
 const LEGACY_STORAGE_KEY = "cyrene.chat.history.v1";
 const FRONTEND_REPLY_TIMEOUT_MS = 35000;
 let activeCharacterName = "活动角色";
+let imagePreviewReturnTarget: HTMLElement | null = null;
 
 /**
  * Avatar source per role. Empty string = use the gradient placeholder
@@ -1120,6 +1128,69 @@ function createMessageBubble(text?: string): HTMLElement {
   return item;
 }
 
+function openImagePreview(previewUrl: string, name: string, trigger: HTMLElement): void {
+  imagePreviewReturnTarget = trigger;
+  imagePreviewDialogName.textContent = name;
+  imagePreviewDialogError.hidden = true;
+  imagePreviewDialogImage.hidden = false;
+  imagePreviewDialogImage.alt = name;
+  imagePreviewDialogImage.src = previewUrl;
+
+  if (!imagePreviewDialog.open) imagePreviewDialog.showModal();
+  imagePreviewDialogClose.focus();
+}
+
+function createImagePreviewTrigger(
+  previewUrl: string,
+  name: string,
+  className: string,
+  onImageLoad?: () => void,
+): HTMLButtonElement {
+  const preview = document.createElement("button");
+  preview.type = "button";
+  preview.className = `image-preview-trigger ${className}`;
+  preview.title = "查看完整图片";
+  preview.setAttribute("aria-label", `预览图片：${name}`);
+
+  const image = document.createElement("img");
+  image.src = previewUrl;
+  image.alt = name;
+  image.draggable = false;
+  image.decoding = "async";
+  image.addEventListener("load", () => onImageLoad?.());
+  image.addEventListener("error", () => {
+    preview.classList.add("is-error");
+    preview.disabled = true;
+    preview.textContent = "图片无法预览";
+  });
+
+  const hint = document.createElement("span");
+  hint.className = "image-preview-trigger__hint";
+  hint.textContent = "查看原图";
+  hint.setAttribute("aria-hidden", "true");
+
+  preview.addEventListener("click", () => openImagePreview(previewUrl, name, preview));
+  preview.append(image, hint);
+  return preview;
+}
+
+function createUnavailableImagePreview(className: string): HTMLElement {
+  const preview = document.createElement("div");
+  preview.className = `${className} is-error`;
+  preview.textContent = "图片无法预览";
+  return preview;
+}
+
+imagePreviewDialogClose.addEventListener("click", () => imagePreviewDialog.close());
+imagePreviewDialog.addEventListener("close", () => {
+  imagePreviewReturnTarget?.focus();
+  imagePreviewReturnTarget = null;
+});
+imagePreviewDialogImage.addEventListener("error", () => {
+  imagePreviewDialogImage.hidden = true;
+  imagePreviewDialogError.hidden = false;
+});
+
 function getLastBubbleForMessage(messageId: string): HTMLElement | null {
   const row = messagesEl.querySelector(`[data-msg-id="${messageId}"]`);
   if (!row) return null;
@@ -1158,25 +1229,16 @@ function renderMessageAttachments(body: HTMLElement, attachments: MessageAttachm
     if (att.kind === "image") {
       const card = document.createElement("div");
       card.className = "msg__image-card";
-      const preview = document.createElement("div");
-      preview.className = "msg__image-preview";
-      if (att.previewUrl) {
-        const img = document.createElement("img");
-        img.src = att.previewUrl;
-        img.alt = att.name;
-        img.draggable = false;
-        img.addEventListener("load", () => {
-          messagesEl.scrollTop = messagesEl.scrollHeight;
-        });
-        img.addEventListener("error", () => {
-          preview.classList.add("is-error");
-          preview.textContent = "图片无法预览";
-        });
-        preview.appendChild(img);
-      } else {
-        preview.classList.add("is-error");
-        preview.textContent = "图片无法预览";
-      }
+      const preview = att.previewUrl
+        ? createImagePreviewTrigger(
+          att.previewUrl,
+          att.name,
+          "msg__image-preview",
+          () => {
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          },
+        )
+        : createUnavailableImagePreview("msg__image-preview");
       const name = document.createElement("div");
       name.className = "msg__image-name";
       name.textContent = att.name;
@@ -3335,6 +3397,13 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
+inputEl.addEventListener("paste", (event) => {
+  const images = collectPastedImageFiles(event.clipboardData?.items ?? []);
+  if (images.length === 0) return;
+  event.preventDefault();
+  void ingestClipboardImages(images);
+});
+
 
 /* ===== File upload ===== */
 const fileInput = document.getElementById("file-input") as HTMLInputElement | null;
@@ -3357,53 +3426,106 @@ async function ingestDroppedFiles(files: File[]): Promise<void> {
     fileInput!.value = "";
   }
 }
-	
-	function updateFileTags(): void {
-	  const container = document.getElementById("file-tags");
-	  if (!container) return;
-	  container.innerHTML = "";
-	  if (attachedFiles.length === 0) {
-	    attachBtn?.classList.remove("has-file");
-	    return;
-	  }
-	  attachBtn?.classList.add("has-file");
-	  attachedFiles.forEach((f, i) => {
-	    const tag = document.createElement("div");
-	    tag.className = "chat__file-tag";
-	    const label = document.createElement("span");
-	    const icon = getAttachmentIcon(f.kind);
-	    const detail = formatAttachmentTagDetail(f);
-	    label.textContent = `${icon} ${f.name} ${detail}`;
-	    const btn = document.createElement("button");
-	    btn.type = "button";
-	    btn.className = "file-tag-remove";
-	    btn.textContent = "×";
-	    btn.addEventListener("click", () => {
-	      attachedFiles.splice(i, 1);
-	      updateFileTags();
-	    });
-	    tag.appendChild(label);
-	    tag.appendChild(btn);
-	    container.appendChild(tag);
-	  });
-	}
-	
-	attachBtn?.addEventListener("click", () => {
-	  fileInput?.click();
-	});
-	
-	fileInput?.addEventListener("change", () => {
-	  if (fileInput.files && fileInput.files.length > 0) {
-	    void ingestDroppedFiles(Array.from(fileInput.files));
-	  }
-	});
-	
-	function removeAttachedFiles(): void {
-	  attachedFiles = [];
-	  attachBtn?.classList.remove("has-file");
-	  const container = document.getElementById("file-tags");
-	  if (container) container.innerHTML = "";
-	}
+
+async function ingestClipboardImages(files: File[]): Promise<void> {
+  if (files.length === 0) return;
+  attachBtn!.disabled = true;
+  try {
+    const results = await window.chat!.ingestClipboardImages(files);
+    if (results && results.length > 0) attachedFiles = [...attachedFiles, ...results];
+    updateFileTags();
+  } catch (err: unknown) {
+    window.alert("粘贴图片失败：" + ((err as Error)?.message || String(err)));
+  } finally {
+    attachBtn!.disabled = false;
+    inputEl.focus();
+  }
+}
+
+function removeAttachedFile(index: number): void {
+  attachedFiles.splice(index, 1);
+  updateFileTags();
+  inputEl.focus();
+}
+
+function createDraftImageAttachment(attachment: Attachment, index: number): HTMLElement {
+  const tile = document.createElement("div");
+  tile.className = "chat__draft-image";
+
+  if (attachment.previewUrl) {
+    tile.appendChild(createImagePreviewTrigger(
+      attachment.previewUrl,
+      attachment.name,
+      "chat__draft-image-preview",
+    ));
+  } else {
+    tile.appendChild(createUnavailableImagePreview("chat__draft-image-preview"));
+  }
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "chat__draft-image-remove";
+  remove.textContent = "×";
+  remove.title = `移除 ${attachment.name}`;
+  remove.setAttribute("aria-label", `移除图片：${attachment.name}`);
+  remove.addEventListener("click", (event) => {
+    event.stopPropagation();
+    removeAttachedFile(index);
+  });
+  tile.appendChild(remove);
+  return tile;
+}
+
+function createFileAttachmentTag(attachment: Attachment, index: number): HTMLElement {
+  const tag = document.createElement("div");
+  tag.className = "chat__file-tag";
+  const label = document.createElement("span");
+  const icon = getAttachmentIcon(attachment.kind);
+  const detail = formatAttachmentTagDetail(attachment);
+  label.textContent = `${icon} ${attachment.name} ${detail}`;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "file-tag-remove";
+  remove.textContent = "×";
+  remove.title = `移除 ${attachment.name}`;
+  remove.setAttribute("aria-label", `移除文件：${attachment.name}`);
+  remove.addEventListener("click", () => removeAttachedFile(index));
+  tag.append(label, remove);
+  return tag;
+}
+
+function updateFileTags(): void {
+  const container = document.getElementById("file-tags");
+  if (!container) return;
+  container.replaceChildren();
+  if (attachedFiles.length === 0) {
+    attachBtn?.classList.remove("has-file");
+    return;
+  }
+  attachBtn?.classList.add("has-file");
+  attachedFiles.forEach((attachment, index) => {
+    container.appendChild(attachment.kind === "image"
+      ? createDraftImageAttachment(attachment, index)
+      : createFileAttachmentTag(attachment, index));
+  });
+}
+
+attachBtn?.addEventListener("click", () => {
+  fileInput?.click();
+});
+
+fileInput?.addEventListener("change", () => {
+  if (fileInput.files && fileInput.files.length > 0) {
+    void ingestDroppedFiles(Array.from(fileInput.files));
+  }
+});
+
+function removeAttachedFiles(): void {
+  attachedFiles = [];
+  attachBtn?.classList.remove("has-file");
+  const container = document.getElementById("file-tags");
+  if (container) container.replaceChildren();
+}
 
 /* ===== Drag & drop ===== */
 const chatEl = document.querySelector(".chat") as HTMLElement | null;

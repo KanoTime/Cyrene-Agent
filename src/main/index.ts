@@ -37,6 +37,7 @@ import {
 } from "./rag";
 import { getEmbeddingProvider, getSceneEmbeddingProvider } from "./rag/embedding";
 import { describePendingAttachment } from "./rag/file-ingest";
+import { persistClipboardImages } from "./chat/clipboard-image-store";
 import { cancelDocumentIndexJob, configureDocumentIndexQueue, enqueueDocumentIndexJob } from "./rag/document-index-queue";
 import { retrieveQueuedDocumentChunks, runDocumentIndexJob } from "./rag/document-index-worker";
 import { processDocumentIndexRequest } from "./rag/document-index-ipc";
@@ -50,6 +51,7 @@ import { getAdapter, buildVendorUrl, getAdapterForConfig, createSseReader } from
 import type { VendorConfig } from "./orchestrator/vendors";
 import { getCapability, getCapabilityOrOpenAI } from "./orchestrator/vendors/capabilities";
 import type { VisionConfig } from "./orchestrator/vision-captioner";
+import { VISION_TEST_IMAGE } from "./orchestrator/vision-test-image";
 import { toolRegistry, type ToolDefinition } from "./orchestrator/tool-registry";
 import { filterToolsForChannelConversation } from "./channels/channel-tool-isolation";
 import { buildToolCatalog, scopeToolSystemRules } from "./orchestrator/tool-catalog";
@@ -3346,6 +3348,24 @@ ipcMain.handle(IPC.CHAT_INGEST_FILES, async (_event, paths: unknown) => {
   }
 });
 
+ipcMain.handle(IPC.CHAT_INGEST_CLIPBOARD_IMAGES, async (_event, payload: unknown) => {
+  try {
+    const attachmentsRoot = path.join(requireActiveCharacterState().chatsRoot, "attachments");
+    const stored = await persistClipboardImages(attachmentsRoot, payload);
+    return stored.map((image) => {
+      const attachment = describePendingAttachment(image.filePath);
+      if (attachment.kind !== "image") {
+        throw new Error("剪贴板图片保存后无法识别为图片附件");
+      }
+      return { ...attachment, name: image.name, mime: image.mime };
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn("[Cyrene] ingestClipboardImages ERROR:", message);
+    throw new Error(`无法导入剪贴板图片：${message}`);
+  }
+});
+
 ipcMain.handle(IPC.CHAT_PROCESS_DOCUMENTS, async (event, payload: unknown) => {
   const filePaths = payload && typeof payload === "object" && Array.isArray((payload as { filePaths?: unknown }).filePaths)
     ? (payload as { filePaths: unknown[] }).filePaths.filter((p): p is string => typeof p === "string")
@@ -3669,19 +3689,17 @@ ipcMain.handle(IPC.SETTINGS_TEST_CONNECTION, async (_event, cfg: { provider: str
 
 /**
  * 测试视觉模型连通性。
- * 用一张 4x4 纯红 PNG（100 字节 base64）做测试图——纯色位图所有视觉模型都能识别，
+ * 用一张纯红 PNG 做测试图——纯色位图所有视觉模型都能识别，
  * 比 SVG 兼容性好（SVG 是矢量，部分模型不支持）。
  * 验连通性（HTTP 2xx + 有内容返回）而非对答案——模型可能只说"一张红色图片"也算成功。
  */
-const VISION_TEST_IMAGE_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAEklEQVR4nGP4z8DwHxkzkC4AADxAH+HggXe0AAAAAElFTkSuQmCC";
-
 ipcMain.handle(IPC.SETTINGS_TEST_VISION, async (_event, cfg: { baseUrl: string; apiKey: string; model: string }) => {
   const start = Date.now();
   console.log("[Cyrene] test vision: model=" + cfg.model + " url=" + cfg.baseUrl);
   try {
     const { captionImage } = await import("./orchestrator/vision-captioner");
     const result = await captionImage(
-      { base64: VISION_TEST_IMAGE_BASE64, mime: "image/png" },
+      VISION_TEST_IMAGE,
       "这张图是什么颜色？用一个词回答。",
       { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
     );
