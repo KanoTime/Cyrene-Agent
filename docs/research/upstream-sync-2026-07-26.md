@@ -587,6 +587,10 @@ CITA 的演进提交：
 - GPT-SoVITS 多语种参数、角色 Voice Profile 和微信语音卡片继续保留。
 - 主动状态改为写入当前角色的状态目录，避免重新退化成全局
   `userData/proactive-state.json`。
+- 社交上下文 Store 会随 Active Character 切换到对应角色的
+  `social-context/chat-social-atoms.json`，不会在角色间复用内存缓存或磁盘文件。
+- Chat 与状态面板标题头像使用 Active Character 的头像；昔涟专属状态/心情图片
+  只在昔涟激活时使用，其他角色显示中性的语义图标。
 - 截图代码随主仓进入代码库，但现有 UI 入口和快捷键仍保持关闭，等待 macOS 专项验收。
 - 私仓仍在使用的 opener bubble 渲染组件被保留；主仓已移除的旧 desire engine
   不再恢复，主动触发改接新 proactive trigger。
@@ -606,10 +610,12 @@ CITA 的演进提交：
 
 已完成的自动验证：
 
-- `npm test`：236 个测试文件、1653 个测试全部通过。
+- `npm test`：236 个测试文件、1655 个测试全部通过。
 - `npm run build`：skills、main、preload、renderer 全部构建成功。
 - 角色架构守卫、历史会话隔离、build options、两阶段工具循环专项测试：
   67 个测试全部通过。
+- Code Review 发现并修复了三项合并缺陷：社交上下文全局存储、非活动角色仍显示
+  昔涟视觉资源、设置导航重复渲染；新增角色切换存储和导航唯一性回归测试。
 - 合并后不存在 Git 冲突标记或未解决冲突。
 
 仍建议在真实凭据、真实模型和真实设备环境中做以下人工验收：

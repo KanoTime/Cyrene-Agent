@@ -5173,7 +5173,7 @@ app.whenReady().then(async () => {
   // Phase 0 重构：抽出到 orchestrator/build-options.ts，三处共用（桌面 / scheduler / bot）
   // deps 函数签名故意宽 (unknown/ReadonlyArray)；这里做一次包装把强类型函数适配进去
   const socialAtomStore = createSocialAtomStore(
-    path.join(app.getPath("userData"), "chat-social-atoms.json"),
+    () => path.join(requireActiveCharacterState().root, "social-context", "chat-social-atoms.json"),
   );
   const socialContextScheduler = createSocialContextScheduler({
     store: socialAtomStore,

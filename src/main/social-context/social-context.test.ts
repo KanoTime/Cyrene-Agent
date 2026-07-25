@@ -1,3 +1,6 @@
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { describe, expect, it } from "vitest";
 import { compileSocialContextBlock } from "./context";
 import { rankSocialAtoms } from "./retrieval";
@@ -88,6 +91,30 @@ describe("social atom store", () => {
     store.applyOperations("chat-a", [{ operation: "add", atom: retry }], 100);
 
     expect(store.listActive("chat-a", 100).map((item) => item.id)).toEqual(["first"]);
+  });
+
+  it("reloads from the active character file when the character changes", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "social-atom-characters-"));
+    let characterId = "cyrene";
+    const store = createSocialAtomStore(
+      () => path.join(root, characterId, "social-context", "atoms.json"),
+    );
+
+    store.applyOperations("chat-a", [{
+      operation: "add",
+      atom: atom("cyrene-only", "昔涟角色的独立事实"),
+    }], 100);
+
+    characterId = "lumen";
+    expect(store.listActive("chat-a", 100)).toEqual([]);
+    store.applyOperations("chat-a", [{
+      operation: "add",
+      atom: atom("lumen-only", "流明角色的独立事实"),
+    }], 100);
+
+    characterId = "cyrene";
+    expect(store.listActive("chat-a", 100).map((item) => item.id)).toEqual(["cyrene-only"]);
+    expect(fs.existsSync(path.join(root, "lumen", "social-context", "atoms.json"))).toBe(true);
   });
 });
 

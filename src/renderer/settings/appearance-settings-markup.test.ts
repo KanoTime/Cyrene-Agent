@@ -11,6 +11,12 @@ function form(id: string): string {
 }
 
 describe("appearance settings markup", () => {
+  it("renders each settings navigation target exactly once", () => {
+    const targets = [...html.matchAll(/data-section="([^"]+)"/g)].map((match) => match[1]);
+    expect(new Set(targets).size).toBe(targets.length);
+    expect(targets).toContain("characters");
+  });
+
 	  it("adds appearance navigation and renames general settings", () => {
 	    expect(html).toContain('data-section="appearance"');
 	    expect(html).toContain('data-section="general"><span><svg class="nav-item__icon"');

@@ -23,16 +23,34 @@ function isActive(atom: SocialAtom, now: number): boolean {
     && (typeof atom.expiresAt !== "number" || atom.expiresAt > now);
 }
 
-export function createSocialAtomStore(filePath?: string): SocialAtomStore {
+export function createSocialAtomStore(
+  filePath?: string | (() => string | undefined),
+): SocialAtomStore {
   let loaded = false;
   let atoms: SocialAtom[] = [];
+  let activeFilePath: string | undefined;
+
+  const resolveFilePath = (): string | undefined => (
+    typeof filePath === "function" ? filePath() : filePath
+  );
+
+  const selectActiveFile = (): string | undefined => {
+    const nextFilePath = resolveFilePath();
+    if (nextFilePath !== activeFilePath) {
+      activeFilePath = nextFilePath;
+      loaded = false;
+      atoms = [];
+    }
+    return activeFilePath;
+  };
 
   const load = (): void => {
+    const selectedFilePath = selectActiveFile();
     if (loaded) return;
     loaded = true;
-    if (!filePath || !fs.existsSync(filePath)) return;
+    if (!selectedFilePath || !fs.existsSync(selectedFilePath)) return;
     try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<SocialAtomFile>;
+      const parsed = JSON.parse(fs.readFileSync(selectedFilePath, "utf8")) as Partial<SocialAtomFile>;
       atoms = Array.isArray(parsed.atoms) ? parsed.atoms : [];
     } catch {
       atoms = [];
@@ -40,15 +58,16 @@ export function createSocialAtomStore(filePath?: string): SocialAtomStore {
   };
 
   const save = (): void => {
-    if (!filePath) return;
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const temporaryPath = `${filePath}.tmp`;
+    const selectedFilePath = selectActiveFile();
+    if (!selectedFilePath) return;
+    fs.mkdirSync(path.dirname(selectedFilePath), { recursive: true });
+    const temporaryPath = `${selectedFilePath}.tmp`;
     fs.writeFileSync(
       temporaryPath,
       JSON.stringify({ schemaVersion: 1, atoms } satisfies SocialAtomFile, null, 2),
       "utf8",
     );
-    fs.copyFileSync(temporaryPath, filePath);
+    fs.copyFileSync(temporaryPath, selectedFilePath);
     fs.rmSync(temporaryPath);
   };
 
@@ -105,6 +124,7 @@ export function createSocialAtomStore(filePath?: string): SocialAtomStore {
     },
 
     replaceForTest(next) {
+      selectActiveFile();
       loaded = true;
       atoms = [...next];
     },
