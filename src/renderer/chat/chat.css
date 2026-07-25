@@ -105,7 +105,7 @@ body {
   text-shadow: 0 0 16px rgba(236, 72, 153, 0.24);
 }
 
-/* 标题栏头像：默认主题显示白线稿 PNG，白调主题切换为黑色线条 SVG。 */
+/* 标题栏头像由 Active Character 提供，主题不得覆盖角色资源。 */
 .chat__name-avatar {
   display: block;
   width: 20px;
@@ -113,11 +113,6 @@ body {
   flex: 0 0 auto;
   border-radius: var(--rb-radius-full);
   object-fit: cover;
-}
-
-[data-ui-theme="pearl-white"] .chat__name-avatar {
-  content: url("/icons/cyrene-avatar-line.svg");
-  display: block;
 }
 
 /* 名字与状态之间的分隔点：弱化，不抢名字 */

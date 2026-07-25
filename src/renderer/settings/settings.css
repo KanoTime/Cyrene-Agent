@@ -128,16 +128,6 @@ body {
 	  margin: 0 auto;
 	}
 
-	[data-ui-theme="pearl-white"] .nav-item__avatar {
-	  content: url("/icons/cyrene-avatar-line.svg");
-	  display: block;
-	}
-
-	[data-ui-theme="pearl-white"] .panel-heading__avatar {
-	  content: url("/icons/cyrene-avatar-line.svg");
-	  display: block;
-	}
-
 .nav-item:hover,
 .nav-item.is-active {
   color: var(--rb-text-strong);
