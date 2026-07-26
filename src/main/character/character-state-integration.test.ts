@@ -63,10 +63,10 @@ describe("Character State Root store integration", () => {
     entityGraph.ingest("我的朋友小鹿是很重要的人");
     expect(fs.existsSync(layout.entityGraphFile)).toBe(true);
 
-    const opener = await import("../opener/desire-engine");
-    const openerState = opener.defaultState();
+    const proactive = await import("../proactive/proactive-state-store");
+    const openerState = proactive.defaultProactiveState();
     openerState.globalDesire = 12;
-    opener.saveState(openerState);
+    proactive.saveProactiveState(openerState);
     expect(fs.readFileSync(layout.proactiveStateFile, "utf8")).toContain('"globalDesire": 12');
   });
 

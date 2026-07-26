@@ -6,8 +6,11 @@ dist/preload/
 dist/renderer/assets
 dist/renderer/call/index.html
 dist/renderer/chat/index.html
+dist/renderer/feeling/
+dist/renderer/screenshot/
 dist/renderer/settings/index.html
 dist/renderer/sidebar/index.html
+dist/renderer/status/
 dist/renderer/sticker-manager/index.html
 dist/renderer/tasks/index.html
 dist/renderer/index.html
@@ -29,6 +32,11 @@ coverage/
 verify-*.js
 verify-*.png
 verify-*.html
+test-output/
+scripts/test-action-gate-anthropic.mjs
+scripts/test-action-gate-contract.mjs
+scripts/test-cita-fc-compare.mjs
+scripts/test-cita-minimax.mjs
 .zcode/
 .worktrees/
 

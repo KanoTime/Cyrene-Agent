@@ -415,7 +415,7 @@ async function synthesizeCallReply(reply: string): Promise<{ audio: Buffer; form
       ? tts.ttsGptsovitsFormat
       : "wav";
 
-  return synthesizeByEngine(tts.ttsEngine, {
+  const result = await synthesizeByEngine(tts.ttsEngine, {
     text: reply,
     speed: tts.ttsSpeed,
     volume: tts.ttsVolume,
@@ -441,6 +441,10 @@ async function synthesizeCallReply(reply: string): Promise<{ audio: Buffer; form
     voiceAudioPath: tts.ttsMimoVoiceAudioPath,
     stylePrompt: tts.ttsMimoStylePrompt,
   });
+  if (result.format === "pcm") {
+    throw new Error("通话 TTS 暂不接受缺少采样率信息的裸 PCM；请改用 wav 或 mp3");
+  }
+  return { audio: result.audio, format: result.format };
 }
 
 /** 天气关键词正则匹配。 */

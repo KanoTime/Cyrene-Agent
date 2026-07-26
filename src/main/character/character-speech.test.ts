@@ -82,6 +82,35 @@ describe("character speech context", () => {
     });
   });
 
+  it("supports a credential-free Mossland character profile and keeps the global API key", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "character-voice-mossland-"));
+    const profilePath = path.join(root, "profile.json");
+    fs.writeFileSync(profilePath, JSON.stringify({
+      schemaVersion: 1,
+      service: "mossland",
+      voiceId: "fixture-mossland-voice",
+      speed: 1.1,
+    }));
+
+    const profile = readVoiceProfile(profilePath, root, false);
+    const global = {
+      ttsEngine: "mossland" as const,
+      ttsMosslandKey: "global-secret",
+      ttsMosslandVoiceId: "previous-character",
+      ttsSpeed: 1,
+      ttsVolume: 1,
+    };
+
+    expect(applyVoiceProfileToTtsSettings(profile, global)).toEqual({
+      status: "available",
+      settings: {
+        ...global,
+        ttsMosslandVoiceId: "fixture-mossland-voice",
+        ttsSpeed: 1.1,
+      },
+    });
+  });
+
   it("rejects credentials and endpoints inside a Character Package Voice Profile", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "character-voice-secret-"));
     const profilePath = path.join(root, "profile.json");

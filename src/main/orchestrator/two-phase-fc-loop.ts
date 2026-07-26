@@ -20,7 +20,7 @@
 //
 //   SOUL_PHASE
 //     1. 构造 soulMessages：[{ role: "system", content: soulSystemBaseContent + 动态 soulToolResultsSummary }, ...conversation]
-//        - 工具结果（role: tool 消息）已在 conversation 中携带，本字段不重复注入
+//        - role:tool 保留协议消息；另注入结构化 ToolExecutionContext 供 Soul 核对本轮事实
 //        - conversation 不含工具阶段自由文本
 //     2. req.messages = soulMessages
 //     3. req.tools 不携带（避免再次进入工具决策）
@@ -45,7 +45,9 @@ import type {
   ToolExecutionResult,
 } from "./vendors/types";
 import type { ToolDefinition } from "./tool-registry";
-import type { ToolCallResult } from "./types";
+import { buildToolExecutionContext } from "./tool-execution-context";
+import type { ToolCallResult, ToolExecutionOutcome } from "./types";
+import type { ApprovedStyleSampling } from "./vendors/style-sampling";
 
 export interface AgentLoopSettings {
   provider: string;
@@ -53,6 +55,7 @@ export interface AgentLoopSettings {
   model: string;
   apiKey: string;
   explicitTransport?: "openai" | "anthropic" | "auto";
+  reasoning?: import("../../shared/reasoning").ReasoningPreference;
 }
 
 /** FC 循环中性事件。CyreneAgent 把它包成 AG-UI BaseEvent。 */
@@ -86,17 +89,16 @@ export interface TwoPhaseFcOptions {
   messages: ChatMessage[];
   /** 工具列表（含未启用时调度层负责过滤；这里传已过滤的）。 */
   tools: ToolDefinition[];
-  /** 明确外部操作意图需要首轮强制选择的工具。 */
-  requiredToolName?: string;
   /** 工具阶段使用的 system prompt（仅含工具调度规则 + 自动生成的工具目录）。 */
   toolSystemContent: string;
-  /** Soul 阶段使用的基础 system prompt（人设 + 环境/记忆/关系/附件）。
-   *  工具结果（role: tool 消息）已在 conversation 中携带，本字段不重复注入。 */
+  /** Soul 阶段使用的基础 system prompt（人设 + 环境/记忆/关系/附件）。 */
   soulSystemBaseContent: string;
   /** 固定 Soul 原文；存在时优先作为第一个 system message。 */
   soulSystemStableContent?: string;
   /** 每轮动态上下文；存在时作为第二个 system message。 */
   soulSystemDynamicContent?: string;
+  /** 只应用到 Soul 阶段最终自然语言回复。 */
+  soulSampling?: ApprovedStyleSampling;
   timeoutMs: number;
   /** two-phase 为默认工具编排；soul-only 用于上层已确认的纯聊天快速路径。 */
   executionMode?: "two-phase" | "soul-only";
@@ -118,9 +120,8 @@ export interface TwoPhaseFcOptions {
   imageCaptionFallback?: () => Promise<ChatMessage[]>;
   /** 工具执行器（封装权限检查 + execute + 异常转 output 字符串）。
    *  由调用方（CyreneAgent）注入。 */
-  executeTool: (tc: ToolCall, runnableToolIds: Set<string>) => Promise<string>;
-  /** 可选：构建 Soul 阶段动态追加的工具结果摘要。
-   *  第一期默认实现是空字符串（依赖 conversation 里的 role: tool 消息）。 */
+  executeTool: (tc: ToolCall, runnableToolIds: Set<string>) => Promise<string | ToolExecutionOutcome>;
+  /** 可选：构建额外的业务摘要；权威执行事实始终由 ToolExecutionContext 注入。 */
   buildSoulToolResultsSummary?: (results: ToolCallResult[]) => string;
   /** 事件回调。 */
   onEvent?: (event: TwoPhaseEvent) => void;
@@ -232,6 +233,19 @@ function buildFallbackReply(toolResults: ToolCallResult[], reason: string): stri
     lines.push("", "（暂无已完成的步骤信息）");
   }
   return lines.join("\n");
+}
+
+function stripTextualToolProtocol(text: string): string {
+  return text
+    .split("]<]minimax[>[").join("")
+    .replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/\[tool_call\][\s\S]*?\[\/tool_call\]/gi, "")
+    .replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, "")
+    .trim();
+}
+
+function buildTextualToolProtocolFallback(toolResults: ToolCallResult[]): string {
+  return "刚才的操作没有生成正常回复，请再试一次。";
 }
 
 function buildToolSpecs(tools: ReadonlyArray<ToolDefinition>): Array<{ name: string; description: string; parameters: object }> {
@@ -460,7 +474,7 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
   let consecutiveTimeouts = 0;
   let usedImageCaptionFallback = false;
   const fallbackState: ModelFallbackState = { activated: false };
-  const completedSideEffects = new Map<string, string>();
+  const completedSideEffects = new Map<string, ToolExecutionOutcome>();
 
   if (options.executionMode === "soul-only") {
     console.log(LOG_PREFIX, "执行模式: soul-only（跳过 TOOL_PHASE）");
@@ -471,6 +485,7 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
       soulSystemBaseContent,
       soulSystemStableContent: options.soulSystemStableContent,
       soulSystemDynamicContent: options.soulSystemDynamicContent,
+      soulSampling: options.soulSampling,
       buildSoulToolResultsSummary,
       allToolResults,
       accInput,
@@ -512,9 +527,6 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
       stream: false,
     };
     if (toolSpecs.length > 0) req = { ...req, tools: toolSpecs };
-    if (round === 0 && options.requiredToolName && runnableToolIds.has(options.requiredToolName)) {
-      req = { ...req, toolChoice: { name: options.requiredToolName } };
-    }
     if (adapter.applyCacheHints) req = adapter.applyCacheHints(req, options.settings);
 
     let callResult: { data: unknown; adapter: ChatVendorAdapter; usedFallback: boolean };
@@ -611,28 +623,53 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
         console.log(LOG_PREFIX, "执行工具:", tc.name, JSON.stringify(args).slice(0, 200));
 
         const signature = sideEffectSignature(tc.name, args);
-        let output = signature ? completedSideEffects.get(signature) : undefined;
-        if (output !== undefined) {
+        let outcome = signature ? completedSideEffects.get(signature) : undefined;
+        if (outcome !== undefined) {
           console.warn(LOG_PREFIX, "跳过重复副作用工具:", tc.name);
         } else {
           try {
-            output = await executeTool(tc, runnableToolIds);
+            const executed = await executeTool(tc, runnableToolIds);
+            outcome = typeof executed === "string"
+              ? { output: executed, status: "succeeded" }
+              : executed;
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
-            output = "[工具执行失败] " + errMsg;
+            outcome = {
+              output: errMsg,
+              status: "failed",
+              errorCode: "E_TOOL_EXECUTION_FAILED",
+            };
             console.error(LOG_PREFIX, "工具执行失败 [" + tc.name + "]:", errMsg);
           }
-          if (signature) completedSideEffects.set(signature, output);
+          if (signature) completedSideEffects.set(signature, outcome);
         }
+        const output = outcome.output;
+        const protocolOutput = outcome.status === "failed"
+          ? "[工具执行失败] " + output
+          : output;
+        console.log(
+          `[ToolExecution/Trace] tool=${tc.name} status=${outcome.status}`
+          + (outcome.errorCode ? ` errorCode=${outcome.errorCode}` : ""),
+        );
+        const resultLog = tc.name.startsWith("music_")
+          ? truncateToolResult(output).slice(0, 500)
+          : `length=${output.length}`;
+        console.log(LOG_PREFIX, "工具结果:", tc.name, resultLog);
 
-        allToolResults.push({ toolId: tc.name, args, output });
-        execResults.push({ toolCall: tc, output: truncateToolResult(output) });
+        allToolResults.push({
+          toolId: tc.name,
+          args,
+          output,
+          status: outcome.status,
+          ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+        });
+        execResults.push({ toolCall: tc, output: truncateToolResult(protocolOutput) });
 
         onEvent?.({
           type: "tool_call_result",
           toolCallId,
           messageId: `${toolCallId}-result`,
-          content: output,
+          content: protocolOutput,
         });
         onEvent?.({ type: "tool_call_end", toolCallId });
       }
@@ -650,6 +687,7 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
           soulSystemBaseContent,
           soulSystemStableContent: options.soulSystemStableContent,
           soulSystemDynamicContent: options.soulSystemDynamicContent,
+          soulSampling: options.soulSampling,
           buildSoulToolResultsSummary,
           allToolResults,
           accInput,
@@ -676,6 +714,7 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
       soulSystemBaseContent,
       soulSystemStableContent: options.soulSystemStableContent,
       soulSystemDynamicContent: options.soulSystemDynamicContent,
+      soulSampling: options.soulSampling,
       buildSoulToolResultsSummary,
       allToolResults,
       accInput,
@@ -702,6 +741,7 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
     soulSystemBaseContent,
     soulSystemStableContent: options.soulSystemStableContent,
     soulSystemDynamicContent: options.soulSystemDynamicContent,
+    soulSampling: options.soulSampling,
     buildSoulToolResultsSummary,
     allToolResults,
     accInput,
@@ -726,6 +766,7 @@ async function runSoulPhase(args: {
   soulSystemBaseContent: string;
   soulSystemStableContent?: string;
   soulSystemDynamicContent?: string;
+  soulSampling: ApprovedStyleSampling | undefined;
   buildSoulToolResultsSummary: (results: ToolCallResult[]) => string;
   allToolResults: ToolCallResult[];
   accInput: number;
@@ -745,6 +786,7 @@ async function runSoulPhase(args: {
     soulSystemBaseContent,
     soulSystemStableContent,
     soulSystemDynamicContent,
+    soulSampling,
     buildSoulToolResultsSummary,
     allToolResults,
     accInput,
@@ -761,13 +803,16 @@ async function runSoulPhase(args: {
   onEvent?.({ type: "step_started", stepName: `soul-phase-${reason}` });
   console.log(LOG_PREFIX, "进入 SOUL_PHASE, reason=" + reason);
 
-  // 动态追加 soulToolResultsSummary（在 baseContent 之后），不重复 conversation 已有的 tool 消息
+  // Soul 同时获得原始 role:tool 协议消息和通用结构化执行事实。
   const soulResultsSummary = buildSoulToolResultsSummary(allToolResults);
-  const finalSystemContent = soulResultsSummary
-    ? soulSystemBaseContent + "\n\n" + soulResultsSummary
-    : soulSystemBaseContent;
+  const executionContext = allToolResults.length > 0 || reason !== "soul_only"
+    ? buildToolExecutionContext(allToolResults)
+    : "";
+  const finalSystemContent = [soulSystemBaseContent, soulResultsSummary, executionContext]
+    .filter(Boolean)
+    .join("\n\n");
   const finalDynamicContent = soulResultsSummary
-    ? [soulSystemDynamicContent, soulResultsSummary].filter(Boolean).join("\n\n")
+    ? [soulSystemDynamicContent, soulResultsSummary, executionContext].filter(Boolean).join("\n\n")
     : soulSystemDynamicContent;
 
   // Soul 请求**不带 tools** 字段
@@ -782,6 +827,7 @@ async function runSoulPhase(args: {
           finalDynamicContent,
         ),
     stream: false,
+    ...(soulSampling ?? {}),
   };
   if (adapter.applyCacheHints) req = adapter.applyCacheHints(req, cfg);
 
@@ -820,7 +866,10 @@ async function runSoulPhase(args: {
       (chat.usage?.cachedInput !== undefined ? " cached=" + chat.usage.cachedInput : "") +
       (callResult.usedFallback ? " backend=fallback" : " backend=primary"),
     );
-    const reply = stripLeakedChatTimeContext(chat.text);
+    const withoutProtocol = stripTextualToolProtocol(chat.text);
+    const reply = stripLeakedChatTimeContext(
+      withoutProtocol || buildTextualToolProtocolFallback(allToolResults),
+    );
     if (chat.usage) {
       const finalInput = accInput + chat.usage.input;
       const finalOutput = accOutput + chat.usage.output;

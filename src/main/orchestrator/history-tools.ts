@@ -10,6 +10,7 @@
 import { addMemory, searchHistoryEntries } from "../rag";
 import { toolRegistry } from "./tool-registry";
 import { getActiveCharacterText } from "../character/active-character";
+import { currentUserTimezone } from "../user-timezone";
 
 const LOG_PREFIX = "[History]";
 
@@ -103,7 +104,7 @@ export function registerRecallHistoryTool(): void {
       const sorted = [...filtered].sort((a, b) => a.createdAt - b.createdAt);
 
       const lines = sorted.map(h => {
-        const date = new Date(h.createdAt).toLocaleString("zh-CN");
+        const date = new Date(h.createdAt).toLocaleString("zh-CN", { timeZone: currentUserTimezone() });
         const role = h.metadata?.role === "user"
           ? "用户"
           : getActiveCharacterText().displayName;
