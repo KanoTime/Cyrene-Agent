@@ -1,0 +1,3 @@
+# Fall back safely when the active package is unhealthy
+
+Startup validates the previously active Character Package before binding it; if unhealthy or missing, the application marks it unavailable, preserves its Character-private State, reports the exact failure, and temporarily activates the validated built-in Cyrene package. Reinstalling or repairing the same Character ID restores access to its state, while failure of the built-in package enters a diagnostic safe mode rather than starting a partial character; this guarantees startup recovery without deleting data or merging failed-character state into Cyrene.

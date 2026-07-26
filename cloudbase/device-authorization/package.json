@@ -1,0 +1,15 @@
+{
+  "name": "cyrene-device-authorization-control",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@cloudbase/node-sdk": "4.0.3"
+  },
+  "overrides": {
+    "axios": "1.18.1"
+  }
+}

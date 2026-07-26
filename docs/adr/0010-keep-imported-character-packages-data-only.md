@@ -1,0 +1,3 @@
+# Keep imported Character Packages data-only
+
+Locally imported Character Packages may contain declarative JSON and Markdown plus images, audio, Live2D resources, stickers, and action mappings, but cannot contain or activate JavaScript, Python, shell scripts, dynamic skills, MCP definitions, or installation commands. Packages may request access to globally configured tools, but application-level permission policy remains authoritative; trusted executable behaviour stays an application extension rather than a character asset, because otherwise importing a character would silently become plugin installation with a much larger security model.

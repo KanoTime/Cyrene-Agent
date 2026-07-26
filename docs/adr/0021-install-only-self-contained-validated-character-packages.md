@@ -1,0 +1,3 @@
+# Install only self-contained validated Character Packages
+
+Installed Character Packages use only relative paths contained under their package root and pass through an isolated staging import that rejects absolute or traversing paths, symlinks, executables, unknown types, excessive file counts and sizes, malformed assets, and invalid Live2D references before an atomic move into application-owned storage. Failed imports leave the registry unchanged; large inference runtimes stay in global services while package-owned reference media remains self-contained, making packages movable and preventing local imports from escaping their storage boundary.

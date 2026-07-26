@@ -1,0 +1,3 @@
+# Assign all legacy character state to Cyrene
+
+On the first character-system startup, an idempotent versioned migration assigns every previously unscoped chat history, memory, relationship log, worldbook state, proactive-message state, and TTS cache to Cyrene’s Character-private State rather than copying it to every character. Existing prompts, worldbooks, Live2D resources, and related paths may initially be exposed through a Cyrene-only compatibility adapter, but other packages can never use that adapter or fall back to those resources; this preserves the verified installation while preventing legacy data from becoming accidental global state.

@@ -1,0 +1,3 @@
+# Require manual local Character Package upgrades
+
+The first version never auto-updates Character Packages: built-ins change only with the application, and user packages upgrade only after the user selects a local folder and confirms the current and target versions, source path, content digest, capability changes, and replaced resource categories. Same-version digest changes are treated as modified content, the previous package is retained until the new version starts successfully, and author metadata is informational rather than proof of identity, preventing an unattended source from replacing a character while inheriting its private state.

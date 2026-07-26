@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
+  "envId": "__YOUR_CLOUDBASE_ENV_ID__",
+  "functionRoot": "cloudbase",
+  "functions": [
+    {
+      "name": "cyrene_device_authorization_control",
+      "dir": "device-authorization",
+      "runtime": "Nodejs20.19",
+      "handler": "entry.main",
+      "timeout": 5,
+      "memorySize": 128,
+      "installDependency": true,
+      "envVariables": {
+        "CYRENE_CONTROL_PLANE_PUBLIC_ORIGIN": "__DISCOVER_BEFORE_DEPLOY__",
+        "CYRENE_DEPLOYMENT_BOOTSTRAP_CODE_HASH": "__GENERATE_BEFORE_DEPLOY__"
+      }
+    }
+  ]
+}

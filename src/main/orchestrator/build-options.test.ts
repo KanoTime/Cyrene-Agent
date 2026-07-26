@@ -1,0 +1,773 @@
+import * as fs from "fs"
+import * as os from "os"
+import * as path from "path"
+import { describe, expect, it, vi } from "vitest"
+import {
+  buildAgentRunOptions,
+  buildChannelSystem,
+  onAgentRunFinished,
+  type BuildOptionsDeps,
+  type OnRunFinishedDeps,
+} from "./build-options"
+import type { SocialAtom } from "../social-context/types"
+
+function createBuildDeps(): BuildOptionsDeps {
+  return {
+    loadModelSettings: () => ({ provider: "test", baseUrl: "https://example.test", model: "m", apiKey: "k" }),
+    loadGeneralSettings: () => ({
+      currentStyleId: "default",
+      customStyle: { diversity: { driver: "model-default" }, repetition: "model-default" },
+      chatSocialContextEnabled: false,
+    }),
+    loadUserProfile: () => ({}),
+    buildEnvironmentContext: () => "ENV",
+    buildSkillCatalog: () => "",
+    buildAutoInjectedSkillContext: () => "",
+    skillRegistry: { getEnabled: () => [] },
+    resolveSlashActivation: () => "",
+    buildToneInjection: async () => "",
+    sceneEmbeddingIndex: null,
+    getSceneEmbeddingProvider: () => null,
+    buildAlwaysOnContext: async () => "ALWAYS",
+    buildRelationshipContext: async () => "RELATIONSHIP",
+    buildSystemPrompt: () => "BASE_SYSTEM",
+    buildToolSystemPrompt: () => "TOOL_SYSTEM",
+    buildSoulSystemBasePrompt: () => "SOUL_SYSTEM_BASE",
+    readStylePrompt: (styleId) => `STYLE_PROMPT:${styleId}`,
+    resolveSoulSampling: () => ({}),
+    toolRegistry: { getEnabled: () => [] },
+    logWorldbookInjection: () => {},
+    normalizeChatMessages: (raw) => raw as never,
+    chatRequestTimeoutMs: 1000,
+    loadActionGateSystemPrompt: () => "",
+    loadNativeFcSystemPrompt: () => "",
+  }
+}
+
+describe("build-options", () => {
+  it("passes the saved reasoning preference into the Agent Runtime", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "DeepSeek（深度求索）",
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-v4-pro",
+      apiKey: "k",
+      reasoning: { mode: "off" },
+    })
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+    }, deps)
+
+    expect(result.options.settings.reasoning).toEqual({ mode: "off" })
+  })
+
+  it("adds a concise WeChat system when the run comes from WeChat", async () => {
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+      channel: "wechat",
+    }, createBuildDeps())
+
+    expect(result.options.soulSystemBaseContent).toContain("你正在通过微信回复用户")
+    expect(result.options.soulSystemBaseContent).toContain("SOUL_SYSTEM_BASE")
+    expect(result.options.soulSystemBaseContent).toContain("RELATIONSHIP")
+    expect(result.options.toolSystemContent).toBe("TOOL_SYSTEM")
+  })
+
+  it("微信结构化 session 保留世界书但不请求桌面个人记忆", async () => {
+    const deps = createBuildDeps()
+    const buildAlwaysOnContext = vi.fn(async () => "WORLD_ONLY")
+    const buildChannelRelationshipContext = vi.fn(async () => "SCOPED_RELATIONSHIP")
+    deps.buildAlwaysOnContext = buildAlwaysOnContext
+    deps.buildChannelRelationshipContext = buildChannelRelationshipContext
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+      channel: "wechat",
+      sessionId: "channel:wechat:session-a",
+    }, deps)
+
+    expect(buildAlwaysOnContext).toHaveBeenCalledWith(
+      "你好",
+      expect.any(Array),
+      { includePersonalMemory: false },
+    )
+    expect(buildChannelRelationshipContext).toHaveBeenCalledWith("channel:wechat:session-a")
+    expect(result.options.soulSystemBaseContent).toContain("WORLD_ONLY")
+    expect(result.options.soulSystemBaseContent).toContain("SCOPED_RELATIONSHIP")
+  })
+
+  it("结构化微信只使用账号绑定者资料，不读取桌面全局资料", async () => {
+    const deps = createBuildDeps()
+    const loadUserProfile = vi.fn(() => ({ nickname: "桌面用户", defaultCity: "上海" }))
+    const loadChannelUserProfile = vi.fn(async () => ({ nickname: "A 用户", defaultCity: "杭州", timezone: "Asia/Shanghai" }))
+    const buildEnvironmentContext = vi.fn(() => "CHANNEL_ENV")
+    deps.loadUserProfile = loadUserProfile
+    deps.loadChannelUserProfile = loadChannelUserProfile
+    deps.buildEnvironmentContext = buildEnvironmentContext
+    const identity = {
+      channel: "wechat" as const,
+      connectionAccountId: "account-a@im.wechat",
+      participantId: "owner-a@im.wechat",
+    }
+
+    await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+      channel: "wechat",
+      sessionId: "channel:wechat:session-a",
+      conversationIdentity: identity,
+    }, deps)
+
+    expect(loadUserProfile).not.toHaveBeenCalled()
+    expect(loadChannelUserProfile).toHaveBeenCalledWith(identity)
+    expect(buildEnvironmentContext).toHaveBeenCalledWith(
+      { provider: "test", model: "m" },
+      expect.objectContaining({ nickname: "A 用户", defaultCity: "杭州" }),
+    )
+  })
+
+  it("does not add channel system for desktop chat", async () => {
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+    }, createBuildDeps())
+
+    expect(result.options.soulSystemBaseContent).not.toContain("你正在通过微信回复用户")
+    expect(result.options.soulSystemBaseContent).not.toContain("你正在通过飞书回复用户")
+  })
+
+  it("messages 不含 system，FC 循环按阶段动态注入", async () => {
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+    }, createBuildDeps())
+
+    // 第一期：原始 messages 不含 system 消息
+    expect(result.options.messages.some((m) => m.role === "system")).toBe(false)
+  })
+
+  it("adds message timestamps and one gap notice to AG-UI chat context", async () => {
+    const deps = createBuildDeps()
+    deps.loadUserProfile = () => ({ timezone: "Asia/Taipei" })
+
+    const result = await buildAgentRunOptions({
+      messages: [
+        { role: "user", content: "今天有点累", at: Date.UTC(2026, 6, 12, 12, 0) },
+        { role: "assistant", content: "早点休息", at: Date.UTC(2026, 6, 12, 12, 2) },
+        { role: "user", content: "我回来啦", at: Date.UTC(2026, 6, 13, 3, 0) },
+      ],
+      style: "01_default.md",
+    }, deps)
+
+    expect(result.options.messages[0].content).toBe("[2026-07-12 20:00, Asia/Taipei]\n今天有点累")
+    expect(result.options.messages[2].content).toBe("[2026-07-13 11:00, Asia/Taipei]\n我回来啦")
+    expect(result.options.soulSystemBaseContent).toContain("[对话时间信息]")
+    expect(result.options.soulSystemBaseContent).toContain("距离上一条有效聊天消息：约 14 小时 58 分钟")
+    expect(result.options.soulSystemBaseContent.match(/距离上一条有效聊天消息/g)).toHaveLength(1)
+    expect(result.options.toolSystemContent).not.toContain("[对话时间信息]")
+  })
+
+  it("toolSystemContent / soulSystemBaseContent 是分开的两套字符串", async () => {
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+    }, createBuildDeps())
+
+    expect(result.options.toolSystemContent).toBe("TOOL_SYSTEM")
+    expect(result.options.soulSystemBaseContent).not.toBe("TOOL_SYSTEM")
+    expect(result.options.soulSystemBaseContent).toContain("SOUL_SYSTEM_BASE")
+  })
+
+  it("固定 Soul 原文作为稳定前缀，动态上下文完整放在后缀", async () => {
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+      channel: "wechat",
+    }, createBuildDeps())
+
+    expect(result.options.soulSystemStableContent).toBe("SOUL_SYSTEM_BASE")
+    expect(result.options.soulSystemDynamicContent).toContain("ENV")
+    expect(result.options.soulSystemDynamicContent).toContain("你正在通过微信回复用户")
+    expect(result.options.soulSystemDynamicContent).toContain("ALWAYS")
+    expect(result.options.soulSystemDynamicContent).toContain("RELATIONSHIP")
+
+    const combined = [
+      result.options.soulSystemStableContent,
+      result.options.soulSystemDynamicContent,
+    ].filter(Boolean).join("\n\n")
+    for (const marker of ["SOUL_SYSTEM_BASE", "ENV", "ALWAYS", "RELATIONSHIP"]) {
+      expect(combined.match(new RegExp(marker, "g"))).toHaveLength(1)
+    }
+  })
+
+  it("桌面入口保持单一 Soul system，不改变提示消息边界", async () => {
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      style: "01_default.md",
+    }, createBuildDeps())
+
+    expect(result.options.soulSystemStableContent).toBeUndefined()
+    expect(result.options.soulSystemDynamicContent).toBeUndefined()
+    expect(result.options.soulSystemBaseContent).toContain("SOUL_SYSTEM_BASE")
+    expect(result.options.soulSystemBaseContent).toContain("ENV")
+  })
+
+  it("builds Chat mode without CITA or tools", async () => {
+    const deps = createBuildDeps()
+    deps.prepareCitaTurn = vi.fn(async () => ({ contextBlock: "unexpected" }))
+    deps.toolRegistry.getEnabled = () => [
+      { id: "music_search" },
+      { id: "weather" },
+    ]
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "陪我聊聊" }],
+      styleId: "lively",
+      executionMode: "chat",
+    }, deps)
+
+    expect(deps.prepareCitaTurn).not.toHaveBeenCalled()
+    expect(result.options.executionMode).toBe("chat")
+    expect(result.options.tools).toEqual([])
+    expect(result.options.citaContextBlock).toBe("")
+    expect(result.options.soulSystemBaseContent).toContain("STYLE_PROMPT:lively")
+    expect(result.options.toolSystemContent).not.toContain("STYLE_PROMPT:lively")
+  })
+
+  it("adds a bounded social background only to enabled Chat runs", async () => {
+    const deps = createBuildDeps()
+    const retrievedAtom: SocialAtom = {
+      id: "atom-1",
+      conversationId: "chat-a",
+      type: "long_term",
+      content: "用户喜欢海边",
+      evidenceTurnId: "old-user",
+      evidenceQuote: "我喜欢海边",
+      createdAt: 1,
+      status: "active",
+    }
+    deps.loadGeneralSettings = () => ({
+      currentStyleId: "default",
+      customStyle: { diversity: { driver: "model-default" }, repetition: "model-default" },
+      chatSocialContextEnabled: true,
+    })
+    deps.buildChatSocialContext = vi.fn(async () => ({
+      contextBlock: "【本轮可用的对话背景】\n- 用户喜欢海边",
+      retrievedAtoms: [retrievedAtom],
+    }))
+    const messages = Array.from({ length: 14 }, (_, index) => ({
+      role: index % 2 === 0 ? "assistant" : "user",
+      content: `message-${index}`,
+      at: index + 1,
+    }))
+
+    const result = await buildAgentRunOptions({
+      messages,
+      executionMode: "chat",
+      sessionId: "chat-a",
+      userTurnId: "user-14",
+      assistantTurnId: "assistant-14",
+    }, deps)
+
+    expect(deps.buildChatSocialContext).toHaveBeenCalledWith({
+      conversationId: "chat-a",
+      query: "message-13",
+    })
+    expect(result.options.messages).toHaveLength(12)
+    expect(result.options.soulSystemBaseContent).toContain("用户喜欢海边")
+    expect(result.options.socialContext).toMatchObject({
+      enabled: true,
+      conversationId: "chat-a",
+      userTurnId: "user-14",
+      assistantTurnId: "assistant-14",
+      retrievedAtoms: [retrievedAtom],
+    })
+  })
+
+  it("omits empty social background and never calls it for Work or disabled Chat", async () => {
+    const emptyDeps = createBuildDeps()
+    emptyDeps.loadGeneralSettings = () => ({
+      currentStyleId: "default",
+      customStyle: { diversity: { driver: "model-default" }, repetition: "model-default" },
+      chatSocialContextEnabled: true,
+    })
+    emptyDeps.buildChatSocialContext = vi.fn(async () => ({
+      contextBlock: "",
+      retrievedAtoms: [],
+    }))
+    const chat = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      executionMode: "chat",
+      sessionId: "chat-a",
+      userTurnId: "user-1",
+      assistantTurnId: "assistant-1",
+    }, emptyDeps)
+    expect(chat.options.soulSystemBaseContent).not.toContain("本轮可用的对话背景")
+
+    const workDeps = createBuildDeps()
+    workDeps.loadGeneralSettings = emptyDeps.loadGeneralSettings
+    workDeps.buildChatSocialContext = vi.fn(async () => ({
+      contextBlock: "unexpected",
+      retrievedAtoms: [],
+    }))
+    await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      executionMode: "work",
+    }, workDeps)
+    expect(workDeps.buildChatSocialContext).not.toHaveBeenCalled()
+
+    const disabledDeps = createBuildDeps()
+    disabledDeps.buildChatSocialContext = vi.fn(async () => ({
+      contextBlock: "unexpected",
+      retrievedAtoms: [],
+    }))
+    await buildAgentRunOptions({
+      messages: [{ role: "user", content: "你好" }],
+      executionMode: "chat",
+    }, disabledDeps)
+    expect(disabledDeps.buildChatSocialContext).not.toHaveBeenCalled()
+  })
+
+  it("honors an explicit Chat mode for channel runs", async () => {
+    const deps = createBuildDeps()
+    deps.prepareCitaTurn = vi.fn(async () => ({ contextBlock: "unexpected" }))
+    deps.toolRegistry.getEnabled = () => [{ id: "weather" }]
+    deps.buildSoulSystemBasePrompt = vi.fn(() => "TALK_SOUL_SYSTEM")
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "今天怎么样" }],
+      style: "01_default.md",
+      channel: "wechat",
+      executionMode: "chat",
+    }, deps)
+
+    expect(deps.prepareCitaTurn).not.toHaveBeenCalled()
+    expect(deps.buildSoulSystemBasePrompt).toHaveBeenCalledWith("chat")
+    expect(result.options.executionMode).toBe("chat")
+    expect(result.options.tools).toEqual([])
+  })
+
+  it("keeps selected style prompt and sampling independent from execution mode", async () => {
+    const deps = createBuildDeps()
+    deps.resolveSoulSampling = ({ styleId }) => (
+      styleId === "sweet"
+        ? { temperature: 0.82, frequencyPenalty: 0.2 }
+        : {}
+    )
+
+    const chat = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "陪我聊聊" }],
+      styleId: "sweet",
+      executionMode: "chat",
+    }, deps)
+    const work = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "查一下天气" }],
+      styleId: "sweet",
+      executionMode: "work",
+    }, deps)
+
+    for (const result of [chat, work]) {
+      expect(result.options.soulSystemBaseContent).toContain("STYLE_PROMPT:sweet")
+      expect(result.options.soulSampling).toEqual({ temperature: 0.82, frequencyPenalty: 0.2 })
+    }
+    expect(chat.options.executionMode).toBe("chat")
+    expect(work.options.executionMode).toBe("work")
+  })
+
+  it("does not locally route an explicit NetEase Cloud search request", async () => {
+    const deps = createBuildDeps()
+    deps.toolRegistry.getEnabled = () => [{ id: "music_search" }]
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "网易云上搜一下左转灯" }],
+      styleId: "default",
+      executionMode: "chat",
+    }, deps)
+
+    expect(result.options).not.toHaveProperty("requiredToolName")
+    expect(result.options).not.toHaveProperty("requiredToolArgs")
+  })
+
+  it("does not locally route daily recommendations or infer continuations", async () => {
+    const deps = createBuildDeps()
+    deps.toolRegistry.getEnabled = () => [
+      { id: "music_get_daily_recommendations" },
+      { id: "music_search" },
+    ]
+
+    const daily = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "看看网易云今日推荐" }],
+      styleId: "default",
+      executionMode: "chat",
+    }, deps)
+    const generic = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "有点无聊，想听歌" }],
+      styleId: "default",
+      executionMode: "chat",
+    }, deps)
+
+    expect(daily.options).not.toHaveProperty("requiredToolName")
+    expect(generic.options).not.toHaveProperty("requiredToolName")
+  })
+
+  it("injects CITA as a separate tool-phase block and preserves the original user message", async () => {
+    const deps = createBuildDeps()
+    deps.prepareCitaTurn = vi.fn(async () => ({
+      contextBlock: "[CITA_CONTEXT]\n{\"focusedContexts\":[{\"contextRef\":\"music-candidate-1\"}]}\n[/CITA_CONTEXT]",
+      contextPackage: {
+        originalQuery: "第二首",
+        contextualizedQuery: "播放当前网易云日推第二首",
+        resolvedReferences: [],
+      },
+    }))
+    const originalUserMessage = { role: "user", content: "第二首" }
+
+    const result = await buildAgentRunOptions({
+      messages: [originalUserMessage],
+      style: "01_default.md",
+      sessionId: "conversation-1",
+    }, deps)
+
+    expect(deps.prepareCitaTurn).toHaveBeenCalledTimes(1)
+    expect(result.options.conversationId).toBe("conversation-1")
+    expect(result.options.messages.at(-1)).toEqual(originalUserMessage)
+    expect(result.options.toolSystemContent).toContain("[CITA_CONTEXT]")
+    expect(result.options.toolSystemContent).toContain("music-candidate-1")
+    expect(result.options.originalQuery).toBe("第二首")
+    expect(result.options.contextualizedQuery).toBe("播放当前网易云日推第二首")
+    expect(result.options.citaContextBlock).toContain("music-candidate-1")
+    expect(result.options).not.toHaveProperty("requiredToolName")
+    expect(result.options).not.toHaveProperty("requiredToolArgs")
+  })
+
+  it("emits no CITA marker when the service is disabled", async () => {
+    const deps = createBuildDeps()
+    deps.prepareCitaTurn = vi.fn(async () => ({ contextBlock: "" }))
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "第二首" }],
+      style: "01_default.md",
+      sessionId: "conversation-1",
+    }, deps)
+
+    expect(result.options.toolSystemContent).not.toContain("[CITA_CONTEXT]")
+  })
+
+  it("puts the enabled Skill catalog into the tool phase so invoke_skill can route", async () => {
+    const deps = createBuildDeps()
+    deps.buildSkillCatalog = () => "SKILL_CATALOG"
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "好无聊" }],
+      style: "01_default.md",
+    }, deps)
+
+    expect(result.options.toolSystemContent).toContain("SKILL_CATALOG")
+    expect(result.options.soulSystemBaseContent).not.toContain("SKILL_CATALOG")
+  })
+
+  it("keeps tool-oriented Skill rules out of Soul but retains reply-only strategy", async () => {
+    const deps = createBuildDeps()
+    deps.buildAutoInjectedSkillContext = () => "AUTO_MUSIC_RULES"
+    deps.buildAutoInjectedSoulContext = () => "SOUL_MUSIC_REPLY_RULES"
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "今日推荐呢" }],
+      style: "01_default.md",
+    }, deps)
+
+    expect(result.options.toolSystemContent).toContain("AUTO_MUSIC_RULES")
+    expect(result.options.soulSystemBaseContent).not.toContain("AUTO_MUSIC_RULES")
+    expect(result.options.soulSystemBaseContent).toContain("SOUL_MUSIC_REPLY_RULES")
+  })
+
+  it("attaches direct image content blocks to the latest user message", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cyrene-image-direct-"))
+    const imagePath = path.join(dir, "图 像.png")
+    fs.writeFileSync(imagePath, Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    ]))
+
+    const result = await buildAgentRunOptions({
+      messages: [
+        { role: "user", content: "上一轮" },
+        { role: "assistant", content: "好的" },
+        { role: "user", content: "请看这张图" },
+      ],
+      style: "01_default.md",
+      imageAttachments: [{ name: "图 像.png", filePath: imagePath, mime: "image/png" }],
+    }, createBuildDeps())
+
+    const latestUser = result.options.messages.at(-1)
+    expect(latestUser?.content).toEqual([
+      { type: "text", text: "请看这张图" },
+      {
+        type: "image_url",
+        image_url: { url: expect.stringMatching(/^data:image\/png;base64,/) },
+      },
+    ])
+    // 第一期：原始 messages 不含 system，所以 messages[0] 就是首条用户消息
+    expect(result.options.messages[0].content).toBe("上一轮")
+  })
+
+  it("builds caption fallback messages for direct image send failures", async () => {
+    const deps = createBuildDeps()
+    deps.captionImageForFallback = async () => ({ ok: true, caption: "画面里有一张安装截图" })
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "这图哪里不对？" }],
+      style: "01_default.md",
+      imageAttachments: [{ name: "setup.png", filePath: "C:\\tmp\\setup.png", mime: "image/png" }],
+    }, deps)
+
+    const fallbackMessages = await result.options.imageCaptionFallback?.()
+    const userMessage = fallbackMessages?.at(-1)
+    expect(userMessage?.content).toContain("这图哪里不对？")
+    expect(userMessage?.content).toContain("setup.png：画面里有一张安装截图")
+    expect(userMessage?.content).not.toContain("image_url")
+  })
+
+  it("has distinct system text for Feishu work chat", () => {
+    expect(buildChannelSystem("feishu")).toContain("你正在通过飞书回复用户")
+    expect(buildChannelSystem("feishu")).toContain("工作上下文")
+  })
+
+  it("records WeChat relationship and memory side effects in the conversation scope", async () => {
+    const recordRelationshipTurn = vi.fn(async () => {})
+    const recordChannelRelationshipTurn = vi.fn(async () => {})
+    const scheduleMemoryWrite = vi.fn()
+    const deps: OnRunFinishedDeps = {
+      loadModelSettings: () => ({ provider: "test", baseUrl: "", model: "", apiKey: "", runtimeSync: "off" }),
+      scheduleMemoryWrite,
+      inferRuntimeState: () => ({ status: "陪伴中" }),
+      runtimeState: { status: "陪伴中", feeling: "温柔", expression: 0, updatedAt: 0 },
+      feelingToExpression: { "温柔": 0 },
+      setRuntimeState: () => {},
+      stickerEmbeddingIndex: null,
+      getEmbeddingProvider: () => null,
+      matchSticker: async () => null,
+      loadStickerSettings: () => ({}),
+      broadcastRuntimeStateChanged: () => {},
+      observeRuntimeState: async () => {},
+      recordRelationshipTurn,
+      recordChannelRelationshipTurn,
+      getChatWindow: () => null,
+    }
+
+    await onAgentRunFinished(
+      { reply: "好呀", toolResults: [] },
+      "今天有点累",
+      deps,
+      "wechat",
+      "channel:wechat:session-a",
+    )
+
+    expect(scheduleMemoryWrite).not.toHaveBeenCalled()
+    expect(recordRelationshipTurn).not.toHaveBeenCalled()
+    expect(recordChannelRelationshipTurn).toHaveBeenCalledWith("channel:wechat:session-a", {
+      userText: "今天有点累",
+      assistantText: "好呀",
+      cyreneFeeling: "温柔",
+      channel: "wechat",
+    })
+  })
+
+  it("uses the latest sticker embedding index when agent run finishes", async () => {
+    const matchSticker = vi.fn(async () => ({ id: "hugtight" }))
+    const send = vi.fn()
+    const latestIndex = [{ id: "hugtight", embedding: [1, 0] }]
+    const deps: OnRunFinishedDeps & { getStickerEmbeddingIndex: () => unknown } = {
+      loadModelSettings: () => ({
+        provider: "test",
+        baseUrl: "",
+        model: "",
+        apiKey: "",
+        runtimeSync: "off",
+        stickerEnabled: true,
+        stickerSimilarityThreshold: 0.55,
+      }),
+      scheduleMemoryWrite: () => {},
+      inferRuntimeState: () => ({ status: "陪伴中" }),
+      runtimeState: { status: "陪伴中", feeling: "温柔", expression: 0, updatedAt: 0 },
+      feelingToExpression: { "温柔": 0 },
+      setRuntimeState: () => {},
+      stickerEmbeddingIndex: null,
+      getStickerEmbeddingIndex: () => latestIndex,
+      getEmbeddingProvider: () => ({ embed: async () => [1, 0] }),
+      matchSticker,
+      loadStickerSettings: () => ({}),
+      broadcastRuntimeStateChanged: () => {},
+      observeRuntimeState: async () => {},
+      recordRelationshipTurn: async () => {},
+      getChatWindow: () => ({
+        isDestroyed: () => false,
+        webContents: {
+          isDestroyed: () => false,
+          send,
+        },
+      }),
+    }
+
+    await onAgentRunFinished({ reply: "来，抱抱你", toolResults: [] }, "今天好累", deps)
+
+    expect(matchSticker).toHaveBeenCalledWith(
+      "来，抱抱你\n今天好累",
+      expect.anything(),
+      latestIndex,
+      0.55,
+    )
+    expect(send).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      name: "cyrene.sticker",
+      value: "hugtight",
+    }))
+  })
+
+  it("does not inherit the global sticker index when the Active Character has no sticker capability", async () => {
+    const matchSticker = vi.fn(async () => ({ id: "cyrene-hugtight" }))
+    const send = vi.fn()
+    const deps: OnRunFinishedDeps & { canUseActiveCharacterStickers: () => boolean } = {
+      loadModelSettings: () => ({
+        provider: "test",
+        baseUrl: "",
+        model: "",
+        apiKey: "",
+        runtimeSync: "off",
+        stickerEnabled: true,
+        stickerSimilarityThreshold: 0.55,
+      }),
+      scheduleMemoryWrite: () => {},
+      inferRuntimeState: () => ({ status: "陪伴中" }),
+      runtimeState: { status: "陪伴中", feeling: "温柔", expression: 0, updatedAt: 0 },
+      feelingToExpression: { "温柔": 0 },
+      setRuntimeState: () => {},
+      stickerEmbeddingIndex: [{ id: "cyrene-hugtight", embedding: [1, 0] }],
+      canUseActiveCharacterStickers: () => false,
+      getEmbeddingProvider: () => ({ embed: async () => [1, 0] }),
+      matchSticker,
+      loadStickerSettings: () => ({}),
+      broadcastRuntimeStateChanged: () => {},
+      observeRuntimeState: async () => {},
+      recordRelationshipTurn: async () => {},
+      getChatWindow: () => ({
+        isDestroyed: () => false,
+        webContents: {
+          isDestroyed: () => false,
+          send,
+        },
+      }),
+    }
+
+    const result = await onAgentRunFinished(
+      { reply: "老师，休息一下吧", toolResults: [] },
+      "今天有点累",
+      deps,
+      "wechat",
+    )
+
+    expect(matchSticker).not.toHaveBeenCalled()
+    expect(result.sticker).toBeNull()
+    expect(send).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      name: "cyrene.sticker",
+      value: null,
+    }))
+  })
+
+  it("does not send document model context into memory or sticker embedding side effects", async () => {
+    const scheduleMemoryWrite = vi.fn()
+    const matchSticker = vi.fn(async () => null)
+    const latestIndex = [{ id: "thinking", embedding: [1, 0] }]
+    const hugeDoc = "超长文档内容".repeat(1000)
+    const latestUserText = [
+      "帮我总结这个 md",
+      "【本轮文件】\n📝 notes.md（附件，内容已注入本轮上下文）",
+      `【文档内容】\n文档 notes.md 内容：\n${hugeDoc}`,
+    ].join("\n\n")
+    const deps: OnRunFinishedDeps = {
+      loadModelSettings: () => ({
+        provider: "test",
+        baseUrl: "",
+        model: "",
+        apiKey: "",
+        runtimeSync: "off",
+        stickerEnabled: true,
+        stickerSimilarityThreshold: 0.55,
+      }),
+      scheduleMemoryWrite,
+      inferRuntimeState: () => ({ status: "陪伴中" }),
+      runtimeState: { status: "陪伴中", feeling: "温柔", expression: 0, updatedAt: 0 },
+      feelingToExpression: { "温柔": 0 },
+      setRuntimeState: () => {},
+      stickerEmbeddingIndex: latestIndex,
+      getEmbeddingProvider: () => ({ embed: async () => [1, 0] }),
+      matchSticker,
+      loadStickerSettings: () => ({}),
+      broadcastRuntimeStateChanged: () => {},
+      observeRuntimeState: async () => {},
+      recordRelationshipTurn: async () => {},
+      getChatWindow: () => null,
+    }
+
+    await onAgentRunFinished({ reply: "总结好了", toolResults: [] }, latestUserText, deps)
+
+    expect(scheduleMemoryWrite).toHaveBeenCalledWith("帮我总结这个 md", "总结好了")
+    expect(matchSticker).toHaveBeenCalledWith(
+      "总结好了\n帮我总结这个 md",
+      expect.anything(),
+      latestIndex,
+      0.55,
+    )
+  })
+
+  it("schedules one social extraction instead of legacy memory for an enabled Chat result", async () => {
+    const scheduleMemoryWrite = vi.fn()
+    const scheduleSocialAtomExtraction = vi.fn()
+    const observeRuntimeState = vi.fn(async () => {})
+    const deps: OnRunFinishedDeps = {
+      loadModelSettings: () => ({ provider: "test", baseUrl: "", model: "", apiKey: "", runtimeSync: "llm" }),
+      scheduleMemoryWrite,
+      scheduleSocialAtomExtraction,
+      inferRuntimeState: () => ({ status: "陪伴中" }),
+      runtimeState: { status: "陪伴中", feeling: "温柔", expression: 0, updatedAt: 0 },
+      feelingToExpression: { "温柔": 0 },
+      setRuntimeState: () => {},
+      stickerEmbeddingIndex: null,
+      getEmbeddingProvider: () => null,
+      matchSticker: async () => null,
+      loadStickerSettings: () => ({}),
+      broadcastRuntimeStateChanged: () => {},
+      observeRuntimeState,
+      recordRelationshipTurn: async () => {},
+      getChatWindow: () => null,
+    }
+    const retrievedAtoms: SocialAtom[] = []
+
+    await onAgentRunFinished({
+      reply: "海风确实很舒服。",
+      toolResults: [],
+      executionMode: "chat",
+      socialContext: {
+        enabled: true,
+        conversationId: "chat-a",
+        userTurnId: "user-1",
+        assistantTurnId: "assistant-1",
+        retrievedAtoms,
+        now: 100,
+      },
+    }, "我喜欢海边。", deps)
+
+    expect(scheduleMemoryWrite).not.toHaveBeenCalled()
+    expect(observeRuntimeState).not.toHaveBeenCalled()
+    expect(scheduleSocialAtomExtraction).toHaveBeenCalledWith({
+      conversationId: "chat-a",
+      userTurn: { id: "user-1", role: "user", text: "我喜欢海边。" },
+      assistantTurn: { id: "assistant-1", role: "assistant", text: "海风确实很舒服。" },
+      retrievedAtoms,
+      now: 100,
+    })
+  })
+})

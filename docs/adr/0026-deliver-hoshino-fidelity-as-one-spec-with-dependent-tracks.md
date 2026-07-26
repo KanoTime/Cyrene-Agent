@@ -1,0 +1,3 @@
+# Deliver Hoshino fidelity as one specification with dependent tracks
+
+The high-fidelity Hoshino experience is one product specification but is delivered through separate dependent tracks: complete the sourced character corpus first, then establish source-language replies with an optional Translation Pass, rebuild and blindly evaluate Hoshino’s text content, add the reusable Affinity Capability, complete the existing TTS preset and voice-quality work in #31, and finally run cross-channel acceptance. This keeps one coherent outcome while preventing evidence collection, persona writing, translation semantics, relationship state, and voice runtime changes from becoming one inseparable implementation ticket.

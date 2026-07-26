@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "fixture.lumen",
+  "version": "1.0.0",
+  "displayName": "流明",
+  "distributionStatus": "redistributable",
+  "compatibility": {
+    "minimumAppVersion": "0.1.0"
+  },
+  "assetProvenance": [
+    {
+      "assetClass": "character-content",
+      "source": "Cyrene-Agent 测试夹具原创内容",
+      "license": "MIT",
+      "distributionStatus": "redistributable"
+    },
+    {
+      "assetClass": "avatar",
+      "source": "Cyrene-Agent 测试夹具原创 SVG",
+      "license": "MIT",
+      "distributionStatus": "redistributable"
+    },
+    {
+      "assetClass": "voice",
+      "source": "Cyrene-Agent 测试夹具原创无密钥 Voice Profile",
+      "license": "MIT",
+      "distributionStatus": "redistributable"
+    }
+  ],
+  "content": {
+    "identity": "content/identity.md",
+    "soul": "content/soul.md",
+    "avatar": "avatar.svg",
+    "examples": "content/examples.md",
+    "toneRules": "content/tone-rules.md",
+    "stylesDirectory": "content/styles",
+    "scenesDirectory": "content/scenes",
+    "phoneIdentity": "content/phone-identity.md",
+    "phoneStyle": "content/phone-style.md"
+  },
+  "speechRecognitionHints": {
+    "aliases": ["Lumen"],
+    "terms": ["棱镜台", "晨光刻度", "Qwen3.5"]
+  },
+  "capabilities": {
+    "worldbook": {
+      "directory": "worldbook"
+    },
+    "voice": {
+      "profile": "voice/profile.json"
+    }
+  }
+}

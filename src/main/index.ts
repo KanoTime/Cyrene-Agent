@@ -1,0 +1,5641 @@
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, dialog, protocol, net, powerMonitor, safeStorage } from "electron";
+import * as path from "path";
+import * as fs from "fs";
+import * as os from "os";
+import { createHash, randomUUID } from "crypto";
+import { pathToFileURL } from "url";
+import { IPC } from "../shared/ipc-channels";
+import type { MobileCallStatus } from "../shared/mobile-call-status";
+import { DesktopDeviceCredentialVault } from "./remote-access/desktop-device-credential-vault";
+import {
+  createDesktopAuthorizationRequest,
+  DesktopDeviceAuthorizationClient,
+} from "./remote-access/desktop-device-authorization-client";
+import { registerDevicePairingIpc } from "./remote-access/device-pairing-ipc";
+import { DesktopAvailabilityCoordinator } from "./remote-access/desktop-availability-coordinator";
+import { DesktopRemoteCallCoordinator } from "./remote-access/desktop-remote-call-coordinator";
+import { normalizeUiTheme, type UiTheme } from "../shared/ui-theme";
+import { DEFAULT_UI_FONT, isSupportedFontFileName, normalizeUiFont, type UiFont } from "../shared/ui-font";
+import { normalizeUiIcon, UI_ICON_PRESETS, type UiIcon } from "../shared/ui-icon";
+import { foldReasoning, normalizeReasoningPreference, type ReasoningPreference } from "../shared/reasoning";
+import { getUiFontResponseHeaders, isSafeUiFontRequest } from "./ui-font-protocol";
+import {
+  normalizeChatSocialContextEnabled,
+  normalizeDefaultChatMode,
+  normalizeMobileMessageSegmentationMode,
+  normalizeProactiveChatMode,
+  normalizeProactiveDeliveryTarget,
+  normalizeSegmentedOutputMode,
+  type DefaultChatMode,
+  type MobileMessageSegmentationMode,
+  type ProactiveChatMode,
+  type ProactiveDeliveryTarget,
+  type SegmentedOutputMode,
+} from "../shared/preferences";
+import {
+  DEFAULT_CUSTOM_STYLE,
+  STYLE_FILE_BY_ID,
+  normalizeCustomStyleConfig,
+  normalizeStyleId,
+  resolveStylePreference,
+  type CustomStyleConfig,
+  type StyleId,
+} from "../shared/style-sampling";
+import { STATUS_KEYWORDS } from "./status-keywords";
+import {
+  addL2MemoryVector,
+  addMemory,
+  buildMemoryContext,
+  deleteImportedDoc,
+  deleteUserMemoryVectors,
+  getEntriesBySource,
+  getGlobalDocumentStorePath,
+  initRAG,
+  isUserMemoryVectorStoreReady,
+  switchEmbeddingModel,
+} from "./rag";
+import { getEmbeddingProvider, getSceneEmbeddingProvider } from "./rag/embedding";
+import { describePendingAttachment } from "./rag/file-ingest";
+import { persistClipboardImages } from "./chat/clipboard-image-store";
+import { cancelDocumentIndexJob, configureDocumentIndexQueue, enqueueDocumentIndexJob } from "./rag/document-index-queue";
+import { retrieveQueuedDocumentChunks, runDocumentIndexJob } from "./rag/document-index-worker";
+import { processDocumentIndexRequest } from "./rag/document-index-ipc";
+import { IMAGE_CAPTION_PROMPT, validateCaptionImagePath } from "./chat/image-caption";
+import { decideImageSendStrategy } from "./chat/image-send-strategy";
+import { buildAlwaysOnContext, buildMemoryInjection, scheduleMemoryWrite } from "./orchestrator";
+import { CyreneAgent } from "./orchestrator/cyrene-agent";
+import { indexConversationTurn } from "./orchestrator/history-tools";
+import { buildToneInjection } from "./orchestrator/tone-injector";
+import { getAdapter, buildVendorUrl, getAdapterForConfig, createSseReader } from "./orchestrator/vendors";
+import type { StructuredOutputRequest, VendorConfig } from "./orchestrator/vendors";
+import {
+  classifyStructuredOutputEndpoint,
+  resolveStructuredOutputProfile,
+} from "./orchestrator/structured-output/profiles";
+import { normalizeFinishReason } from "./orchestrator/structured-output/finish-reason";
+import { testVendorConnection } from "./orchestrator/vendors/test-connection";
+import { migrateLegacyMinimaxDefaults } from "./orchestrator/vendors/minimax-defaults";
+import { getCapability, getCapabilityOrOpenAI } from "./orchestrator/vendors/capabilities";
+import { resolveApprovedStyleSampling } from "./orchestrator/vendors/style-sampling";
+import type { VisionConfig } from "./orchestrator/vision-captioner";
+import { VISION_TEST_IMAGE } from "./orchestrator/vision-test-image";
+import { toolRegistry, type ToolDefinition } from "./orchestrator/tool-registry";
+import { filterToolsForChannelConversation } from "./channels/channel-tool-isolation";
+import { buildToolCatalog, scopeToolSystemRules } from "./orchestrator/tool-catalog";
+import type { ToolRiskLevel } from "./permission";
+import { loadChannelsSettings } from "./channels/settings-store";
+import { channelManager } from "./channels/manager";
+import { canStartProactiveChannelDelivery, sendProactiveChannelMessage } from "./channels/proactive-delivery";
+// 触发 built-in-tools 的副作用注册（fetch_url / run_shell / install_mcp_server）
+import "./orchestrator/built-in-tools";
+// 触发 fs-tools 的副作用注册（read_file / list_dir / write_file / read_image）
+import "./orchestrator/fs-tools";
+import { initMcpManager, addMcpServer, removeMcpServer, listMcpServers, pruneMcpServersByIds } from "./orchestrator/mcp-manager";
+import { syncPlaywrightMcp, PLAYWRIGHT_MCP_ID, REMOVED_BUILTIN_MCP_IDS } from "./sync-mcp-builtin";
+import { buildEnvironmentContext } from "./orchestrator/environment";
+import { initPermissionFromDisk, registerPermissionIpc, getCurrentLevel } from "./permission";
+import { registerChoiceIpc, setChoiceCardSender } from "./user-choice";
+import { initScreenshotIpc, registerScreenshotHotkey, unregisterScreenshotHotkey, replaceScreenshotHotkey, cleanupOnQuit as cleanupScreenshotOnQuit } from "./screenshot/screenshot-manager";
+import { enqueueLLMTask } from "./llm-queue";
+import { compileSocialContextBlock } from "./social-context/context";
+import {
+  buildSocialExtractionPrompt,
+  SOCIAL_EXTRACTION_SCHEMA,
+} from "./social-context/extractor";
+import { rankSocialAtoms } from "./social-context/retrieval";
+import { createSocialContextScheduler } from "./social-context/scheduler";
+import { createSocialAtomStore } from "./social-context/store";
+import { getEmbeddingStatus, downloadEmbeddingModel, deleteEmbeddingModel } from "./embedding-manager";
+import { BUILT_IN_STICKER_DESCRIPTIONS } from "./sticker-descriptions";
+import { buildCachedStickerEmbeddingIndex } from "./sticker-embedding-cache";
+import { matchSticker } from "./sticker-embedder";
+import type { StickerEmbeddingEntry } from "./sticker-embedder";
+import { buildCachedSceneIndex } from "./scene-embedding-cache";
+import type { SceneIndex } from "./scene-embedder";
+import { loadUserStickerManifest, addUserSticker, deleteUserSticker, getAllStickerConfig, isStickerIdTaken, getStickersDir } from "./sticker-storage";
+import { parseLocalStickerFileFromUrl, resolveLocalStickerPath } from "./sticker-protocol";
+import { normalizeWindowVisibilitySettings } from "./window-visibility-settings";
+import { PetWindowMoveController } from "./pet-window-movement";
+import type { StickerConfigItem } from "../shared/sticker-types";
+import { initReranker, getRerankerInstallStatus } from "./rag/reranker";
+import { memoryStore } from "./memory/memory-store"
+import { backupMemoryRagFiles, reconcileMemoryRag } from "./memory/memory-rag-reconciliation";
+import type { L0Profile, L1Profile } from "./memory/memory-types";
+import { broadcastChatsChanged, registerChatsIpc } from "./chats/chats-ipc";
+import * as chatsStore from "./chats/chats-store";
+import { recordUsage, getUsage, flush as flushTokenUsage } from "./token-usage-store";
+import { uploadFile as ttsUploadFile, cloneVoice as ttsCloneVoice, synthesize as ttsSynthesize } from "./tts/minimax-engine";
+import { synthesize as gptsovitsSynthesize } from "./tts/gptsovits-engine";
+import { synthesize as customCloudSynthesize } from "./tts/custom-cloud-engine";
+import { synthesize as mimoSynthesize } from "./tts/mimo-engine";
+import { synthesize as mosslandSynthesize, cloneVoice as mosslandCloneVoice, listVoices as mosslandListVoices } from "./tts/mossland-engine";
+import { synthesizeByEngine } from "./tts/tts-dispatcher";
+import { registerAgUiIpc, type AguiRunInput } from "./agui-bridge";
+import { setWeatherConfig, setSearchConfig, loadTodos, onTodosChange, setDelegateSettings } from "./orchestrator/built-in-tools";
+import { setUserTimezoneConfig } from "./user-timezone";
+import { registerRecallHistoryTool } from "./orchestrator/history-tools";
+import { registerDocumentTools } from "./orchestrator/document-tools";
+import { registerLifeTools, setTranslateConfig } from "./orchestrator/life-tools";
+import { registerTravelTools, setTravelConfig } from "./orchestrator/travel-tools";
+import { registerEmailTools, setEmailConfig } from "./orchestrator/email-tools";
+import { resolveMusicPaths } from "./music/paths";
+import { bootstrapMusicService } from "./music/bootstrap";
+import { installShutdownLatch } from "./music/shutdown-latch";
+import {
+  buildConversationTimeContext,
+  normalizeChatMessagesWithTime,
+  resolveChatContextTimezone,
+  type ChatContextMessage,
+} from "./chat-time-context";
+import { setAsrConfig } from "./asr/volcano-asr-engine";
+import { disposeAsr } from "./asr/asr-service";
+import { localAsrWorker } from "./asr/local-asr-worker-manager";
+import {
+  isCallActive,
+  setCallWindow,
+  registerCallIpc,
+  setCallSettings,
+  startMobileCall,
+  startRemoteMobileCall,
+  assertRemoteMobileCallReadiness,
+  stopCall,
+  stopMobileCall,
+} from "./call/call-manager";
+import { initSkills, skillRegistry, buildAutoInjectedSkillContext, buildAutoInjectedSoulContext, buildSkillCatalog, parseSlashCommand, setSkillEnabled, listSkillsForUi } from "./skills";
+import {
+  isMusicCompanionAvailable,
+  loadMusicCompanionHost,
+} from "./skills/music-companion-host";
+import { initGameBot } from "./game-bot";
+import { initChannels, shutdownChannels, setChannelsConversationLifecycle } from "./channels/init";
+import { getWechatChannelIdentityState } from "./channels/adapters/wechat/wechat-account-runtime";
+import { buildChannelAttachmentInputs } from "./channels/agent-input";
+import { planChannelExecution } from "./channels/channel-execution-plan";
+import { selectChannelHistoryContext } from "./channels/channel-history-context";
+import {
+  buildChannelConversationRelationshipContext,
+  recordChannelConversationRelationship,
+} from "./channels/channel-conversation-state";
+import { shouldUseWechatQwenSoftNoThink } from "./channels/channel-model-policy";
+import { resolveWechatLocalModelFallback } from "./channels/channel-model-fallback";
+import { setDispatcherBuildAndRunAgent, setDispatcherSynthesizeTts, setDispatcherBroadcastChat, setDispatcherLoadGeneralSettings, setDispatcherLoadRecentHistory } from "./channels/dispatcher";
+import { createWindowLifecycleTracker } from "./electron-window-lifecycle";
+import {
+  buildAgentRunOptions,
+  onAgentRunFinished,
+  type BuildOptionsDeps,
+  type OnRunFinishedDeps,
+} from "./orchestrator/build-options";
+import { buildRelationshipContext, recordRelationshipTurn } from "./relationship/relationship-log";
+import { createFeelingScores, smoothFeeling } from "./orchestrator/runtime-state-smoother";
+import { getSchedulerStore } from "./scheduler/scheduler-store";
+import { SchedulerEngine } from "./scheduler/scheduler-engine";
+import { createSchedulerRunner } from "./scheduler/scheduler-runner";
+import { registerSchedulerIpc } from "./scheduler/scheduler-ipc";
+import type { ScheduledTask } from "./scheduler/types";
+import {
+  createProactiveChatService,
+  type ProactiveChatService,
+  type ProactiveCommitInput,
+  type ProactiveCommitResult,
+} from "./proactive/proactive-service";
+import { routeProactiveDelivery } from "./proactive/proactive-delivery-routing";
+import { buildProactiveMessages, type ProactiveHistoryTurn } from "./proactive/proactive-prompt";
+import {
+  createProactiveTrigger,
+  type ProactiveTriggerController,
+} from "./proactive/proactive-trigger";
+import { runProactiveModel } from "./proactive/proactive-model";
+import type { ProactiveCandidate, ProactiveRuntimeSnapshot } from "./proactive/proactive-types";
+import { canCommitProactiveMessage } from "./proactive/proactive-policy";
+import { createDefaultCharacterRuntime, type CharacterRuntime } from "./character/character-runtime";
+import {
+  createElectronCharacterSwitchAdapters,
+  hasUncoordinatedAgentActivity,
+} from "./character/character-electron-switch";
+import { getCharacterBoundActivitySnapshot } from "./character/character-bound-activity";
+import { buildCharacterSafeModeDialog } from "./character/character-safe-mode";
+import {
+  deleteArchivedCharacterState,
+  getCharacterSettingsSnapshot,
+  listArchivedCharacterStates,
+  requestCoordinatedCharacterSwitch,
+  uninstallCharacterPackage,
+} from "./character/character-ipc";
+import { configureActiveCharacterState, requireActiveCharacterState } from "./character/character-state";
+import { resolveGlobalUserDataLayout } from "./character/global-user-data";
+import {
+  configureActiveCharacter,
+  getActiveCharacter,
+  getActiveCharacterPublicIdentity,
+  getActiveCharacterText,
+} from "./character/active-character";
+import { composeCharacterSystemPrompt } from "./character/character-text-context";
+import {
+  prepareLive2dModelJsonForProtocol,
+  resolveCharacterResourceRequest,
+} from "./character/character-resource";
+import { applyVoiceProfileToTtsSettings } from "./character/character-speech";
+
+let characterRuntime: CharacterRuntime | null = null;
+import { loadProactiveState, saveProactiveState } from "./proactive/proactive-state-store";
+import { normalizeCitaSettings } from "./cita/settings";
+import { CitaService, ContextStore, RemoteSemanticEngine } from "./cita";
+import { contextRefRegistry } from "./orchestrator/tool-context";
+
+configureDocumentIndexQueue(runDocumentIndexJob);
+
+async function reconcileUserMemoryIndex(): Promise<void> {
+  if (!isUserMemoryVectorStoreReady()) {
+    console.warn("[Memory/RAG] reconciliation skipped: vector store is not writable");
+    return;
+  }
+  const report = await reconcileMemoryRag({
+    getMemories: () => memoryStore.getAllL2(),
+    getVectors: () => getEntriesBySource("user_memory"),
+    backup: async () => {
+      const state = requireActiveCharacterState();
+      backupMemoryRagFiles({
+        memoryFile: state.memoryFile,
+        vectorFile: path.join(state.ragRoot, "memory-store.json"),
+        backupDir: path.join(path.dirname(state.memoryFile), "reconcile-backups"),
+      }, Date.now(), 3);
+    },
+    addVector: addL2MemoryVector,
+    markSynced: (l2Id, ragId) => memoryStore.markL2SyncStatus(l2Id, "synced", ragId),
+    markSyncFailed: (l2Id, error) => memoryStore.markL2SyncStatus(l2Id, "sync_failed", undefined, error),
+    deleteVectors: (ids) => deleteUserMemoryVectors(ids),
+    warn: (message, error) => console.warn(`[Memory/RAG] ${message}:`, error),
+  });
+  console.log("[Memory/RAG] reconciliation:", report);
+}
+
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let chatWindow: BrowserWindow | null = null;
+let sidebarWindow: BrowserWindow | null = null;
+let tasksWindow: BrowserWindow | null = null;
+let settingsWindow: BrowserWindow | null = null;
+let stickerManagerWindow: BrowserWindow | null = null;
+let callWindow: BrowserWindow | null = null;
+let schedulerEngine: SchedulerEngine | null = null;
+let proactiveChatService: ProactiveChatService | null = null;
+let desktopAvailabilityCoordinator: DesktopAvailabilityCoordinator | null = null;
+let desktopRemoteCallCoordinator: DesktopRemoteCallCoordinator | null = null;
+let normalConversationBusyCount = 0;
+let proactiveScreenLocked = false;
+const live2dWindowLifecycle = createWindowLifecycleTracker<BrowserWindow>("live2d-main", {
+  onClosed: () => { /* no-op：原 setLive2dWindow 已随 opener 子系统一起移除 */ },
+});
+const petWindowMoveController = new PetWindowMoveController(
+  () => mainWindow,
+  ({ x, y }) => {
+    saveGeneralSettings({ petWindowX: x, petWindowY: y });
+  },
+);
+// 聊天窗口当前活跃的会话 id（通过 IPC 由聊天窗口上报）；
+// 设置面板"删除当前会话"差异化提示用。聊天窗口关闭时由 closed 事件置 null。
+let activeChatSessionId: string | null = null;
+
+const isDev = process.env.VITE_DEV === "1";
+
+function appendMinimaxTtsLog(entry: Record<string, unknown>): void {
+  try {
+    const logDir = path.join(app.getPath("userData"), "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logFile = path.join(logDir, "minimax-tts.log");
+    fs.appendFileSync(logFile, JSON.stringify(entry, null, 2) + "\n", "utf8");
+  } catch (err) {
+    console.warn("[TTS MiniMax] 写诊断日志失败:", err);
+  }
+}
+
+function appendGptsovitsTtsLog(entry: Record<string, unknown>): void {
+  try {
+    const logDir = path.join(app.getPath("userData"), "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logFile = path.join(logDir, "gptsovits-tts.log");
+    fs.appendFileSync(logFile, JSON.stringify(entry, null, 2) + "\n", "utf8");
+  } catch (err) {
+    console.warn("[TTS GPT-SoVITS] 写诊断日志失败:", err);
+  }
+}
+
+function appendCustomCloudTtsLog(entry: Record<string, unknown>): void {
+  try {
+    const logDir = path.join(app.getPath("userData"), "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logFile = path.join(logDir, "custom-cloud-tts.log");
+    fs.appendFileSync(logFile, JSON.stringify(entry, null, 2) + "\n", "utf8");
+  } catch (err) {
+    console.warn("[TTS CustomCloud] 写诊断日志失败:", err);
+  }
+}
+
+function appendMimoTtsLog(entry: Record<string, unknown>): void {
+  try {
+    const logDir = path.join(app.getPath("userData"), "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logFile = path.join(logDir, "mimo-tts.log");
+    fs.appendFileSync(logFile, JSON.stringify(entry, null, 2) + "\n", "utf8");
+  } catch (err) {
+    console.warn("[TTS MiMo] 写诊断日志失败:", err);
+  }
+}
+
+function getTtsCacheDir(): string {
+  return requireActiveCharacterState().ttsCacheRoot;
+}
+
+function assertTtsCacheKey(cacheKey: string): string {
+  if (!/^(minimax|gptsovits|custom-cloud|mimo)-[a-f0-9]{64}$/.test(cacheKey)) {
+    throw new Error("非法 TTS 缓存 key");
+  }
+  return cacheKey;
+}
+
+function buildTtsCacheKey(payload: {
+  voiceId: string;
+  text: string;
+  speed?: number;
+  volume?: number;
+  pitch?: number;
+  model?: string;
+  format?: "mp3" | "wav" | "pcm";
+}): string {
+  const source = JSON.stringify({
+    version: 1,
+    engine: "minimax",
+    model: payload.model ?? "speech-2.8-hd",
+    voiceId: payload.voiceId,
+    speed: payload.speed ?? 1,
+    volume: payload.volume ?? 1,
+    pitch: payload.pitch ?? 0,
+    format: payload.format ?? "mp3",
+    text: payload.text,
+  });
+  return "minimax-" + createHash("sha256").update(source, "utf8").digest("hex");
+}
+
+function buildGptsovitsCacheKey(payload: {
+  baseUrl: string;
+  refAudioPath: string;
+  promptText: string;
+  promptLang?: "auto" | "zh" | "en" | "ja";
+  textLang?: "auto" | "zh" | "en" | "ja";
+  text: string;
+  speed?: number;
+  format?: "wav" | "mp3";
+}): string {
+  const source = JSON.stringify({
+    version: 2,
+    engine: "gptsovits",
+    baseUrl: payload.baseUrl,
+    refAudioPath: payload.refAudioPath,
+    promptText: payload.promptText,
+    promptLang: payload.promptLang ?? "zh",
+    textLang: payload.textLang ?? "zh",
+    speed: payload.speed ?? 1,
+    format: payload.format ?? "wav",
+    text: payload.text,
+  });
+  return "gptsovits-" + createHash("sha256").update(source, "utf8").digest("hex");
+}
+
+function buildCustomCloudCacheKey(payload: {
+  endpointUrl: string;
+  voiceId?: string;
+  text: string;
+  speed?: number;
+  volume?: number;
+  format?: "wav" | "mp3";
+}): string {
+  const source = JSON.stringify({
+    version: 1,
+    engine: "custom-cloud",
+    endpointUrl: payload.endpointUrl,
+    voiceId: payload.voiceId ?? "",
+    speed: payload.speed ?? 1,
+    volume: payload.volume ?? 1,
+    format: payload.format ?? "mp3",
+    text: payload.text,
+  });
+  return "custom-cloud-" + createHash("sha256").update(source, "utf8").digest("hex");
+}
+
+function buildMimoCacheKey(payload: {
+  voiceAudioPath?: string;
+  text: string;
+  stylePrompt?: string;
+}): string {
+  const source = JSON.stringify({
+    version: 1,
+    engine: "mimo",
+    model: "mimo-v2.5-tts-voiceclone",
+    voiceAudioPath: payload.voiceAudioPath ?? "",
+    stylePrompt: payload.stylePrompt ?? "",
+    format: "wav",
+    text: payload.text,
+  });
+  return "mimo-" + createHash("sha256").update(source, "utf8").digest("hex");
+}
+
+/** Mossland cache key：voice_id + model + format + text 哈希。
+ *  因为 Mossland 没有"参考音频路径"作为天然 key 源，用 voice_id + model 区分。 */
+function buildMosslandCacheKey(payload: {
+  voiceId?: string;
+  text: string;
+  model?: string;
+  format?: "mp3" | "wav" | "pcm";
+}): string {
+  const source = JSON.stringify({
+    version: 1,
+    engine: "mossland",
+    model: payload.model ?? "moss-tts",
+    voiceId: payload.voiceId ?? "",
+    format: payload.format ?? "mp3",
+    text: payload.text,
+  });
+  return "mossland-" + createHash("sha256").update(source, "utf8").digest("hex");
+}
+
+function getTtsCachePath(cacheKey: string, format: "mp3" | "wav" | "pcm" = "mp3"): string {
+  const safeKey = assertTtsCacheKey(cacheKey);
+  const ext = format === "wav" ? "wav" : format === "pcm" ? "pcm" : "mp3";
+  return path.join(getTtsCacheDir(), `${safeKey}.${ext}`);
+}
+
+// 单个厂商的可缓存配置：用户切到别的厂商再切回来，这三个字段从这里恢复。
+interface ProviderProfile {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  displayName?: string;
+  /**
+   * 用户在 settings 显式指定的 transport；"auto" = 按 baseUrl 启发式 + capabilities fallback。
+   * resolveTransport() 负责把 "auto" 解析为具体 transport。
+   * 不存 = 等价于 "auto"。
+   */
+  explicitTransport?: "openai" | "anthropic" | "auto";
+  /**
+   * 用户保存的推理偏好（source of truth）。顶层 ModelSettings.reasoning 是当前厂商镜像。
+   * 当前模型不支持某个 effort 时仍保留 user preference，
+   * 实际请求时由 resolveEffectiveReasoning 决定 effective config。
+   */
+  reasoning?: ReasoningPreference;
+}
+
+/**
+ * 厂商名变更映射：旧 providerName → 新 providerName。
+ *
+ * 触发时机：UI 上为了对齐"英文名（中文公司名）"格式重命名了 preset 后，
+ * 已存盘的 model-settings.json 里 provider 字段（以及 perProvider 字典的键）
+ * 仍是旧名；normalize 阶段做一次性迁移，把旧名的 perProvider 数据搬到新名下，
+ * provider 字段也改写为新名。迁移后写盘一次即清除痕迹。
+ *
+ * 后续如果再次重命名，**只追加键值对**，不要删除老条目，避免回归。
+ */
+const PROVIDER_RENAMES: Record<string, string> = {
+  "MiniMax": "MiniMax（稀宇科技）",
+  "DeepSeek": "DeepSeek（深度求索）",
+  "智谱 GLM": "GLM（智谱）",
+  "通义千问（DashScope）": "Qwen（通义千问）",
+};
+
+/**
+ * 把 perProvider 字典 + currentProvider 字段一起套用 PROVIDER_RENAMES。
+ * - 旧名 → 新名：直接搬数据；如果新名已存在数据，旧名的不覆盖（保护"已用新名存过"的情况）。
+ * - 不在映射表里的键：原样保留。
+ */
+function migrateProviderRenames(
+  currentProvider: string,
+  perProvider: Record<string, ProviderProfile>,
+): { provider: string; perProvider: Record<string, ProviderProfile> } {
+  const next: Record<string, ProviderProfile> = {};
+  for (const [key, value] of Object.entries(perProvider)) {
+    const newKey = PROVIDER_RENAMES[key] ?? key;
+    if (next[newKey]) {
+      // 新名已经有数据（说明用户已经在新名下存过），旧名的本地副本保留为最近一次更新优先：
+      // 这里取保守路线 → 不覆盖 next[newKey]，旧名直接丢弃。
+      console.log("[Cyrene] provider rename: drop legacy", key, "→ kept", newKey);
+      continue;
+    }
+    if (newKey !== key) {
+      console.log("[Cyrene] provider rename:", key, "→", newKey);
+    }
+    next[newKey] = value;
+  }
+  const newProvider = PROVIDER_RENAMES[currentProvider] ?? currentProvider;
+  return { provider: newProvider, perProvider: next };
+}
+
+interface ModelSettings {
+  mode: "auto" | "manual";
+  provider: string;
+  // 用户给模型起的自定义昵称，留空时状态栏用厂商 shortName。
+  displayName?: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  /**
+   * 当前厂商的 explicitTransport 镜像（顶层字段是 perProvider[currentProvider] 的视图）。
+   * 详见 ProviderProfile.explicitTransport。
+   */
+  explicitTransport?: "openai" | "anthropic" | "auto";
+  /**
+   * 当前厂商 reasoning 偏好的顶层镜像（与 explicitTransport 同思路）。
+   * 真值在 perProvider[currentProvider].reasoning；顶层字段是 view。
+   * 保存的是用户 preference（不覆盖）；effective config 由 capability 决定。
+   */
+  reasoning?: ReasoningPreference;
+  // 按厂商缓存：currentProvider 之外的厂商配置也保留在这里，切回来时回填。
+  // 真值（source of truth）是 perProvider；顶层 baseUrl/model/apiKey 是当前厂商那一份的展开镜像，
+  // 仅为兼容现有 main 进程里大量直接读 settings.baseUrl 等代码而保留。
+  perProvider: Record<string, ProviderProfile>;
+  runtimeSync: "off" | "local" | "llm";
+  stickerEnabled: boolean;
+  stickerSize: StickerSize;
+  stickerSimilarityThreshold: number;
+  rerankerMode: "light" | "standard" | "none";
+  embeddingModel: "minilm" | "bgem3";
+  // 视觉模型配置（可选）。undefined 或未启用 = 不支持看图，read_image 诚实拒绝。
+  vision?: VisionModelConfig;
+  /** 主模型是否多模态。true 时图片直发主模型（direct），vision 配置保留但忽略。 */
+  multimodal: boolean;
+}
+
+/** 视觉模型配置（独立视觉模型，非多模态直发场景）。全空 = 未启用。 */
+interface VisionModelConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+
+interface UserProfile {
+  nickname: string;
+  callPreference: string;
+  birthday: string;
+  timezone: string;
+  avatarPath: string;
+  /** 默认城市（用于天气等需要地理定位的工具，没填则模型会问用户） */
+  defaultCity: string;
+  /** 性别：secret(保密) | male(男) | female(女) */
+  gender: string;
+}
+
+interface GeneralSettings {
+  citaEnabled: boolean;
+  citaSemanticEngine: "remote";
+  /** Chat 模式的轻量社交上下文；默认关闭，开启后每轮最多多一次异步抽取调用。 */
+  chatSocialContextEnabled: boolean;
+  musicEnabled: boolean;
+  musicVolume: number;
+  soundEnabled: boolean;
+  soundVolume: number;
+  petAlwaysOnTop: boolean;
+  petVisible: boolean;
+  /** 桌宠缩放因子：1.0=默认，0.5~2.0，窗口与模型同步等比缩放。 */
+  petZoom: number;
+  /** 桌宠窗口 X 坐标，未保存时为 undefined */
+  petWindowX?: number;
+  /** 桌宠窗口 Y 坐标，未保存时为 undefined */
+  petWindowY?: number;
+  sidebarVisible: boolean;
+  tasksVisible: boolean;
+  launchAtLogin: boolean;
+  language: "zh-CN";
+  uiTheme: UiTheme;
+  uiFont: UiFont;
+  uiIcon: UiIcon;
+  /** 聊天窗口打开时默认选中的模式。 */
+  defaultChatMode: DefaultChatMode;
+  /** 聊天窗口当前风格，启动时恢复；本轮请求仍以 renderer 显式 styleId 为准。 */
+  currentStyleId: StyleId;
+  /** 全局自定义风格采样配置。 */
+  customStyle: CustomStyleConfig;
+  /** 聊天气泡分段输出偏好。 */
+  segmentedOutputMode: SegmentedOutputMode;
+  /** 手机渠道文本消息分段发送偏好。 */
+  mobileMessageSegmentation: MobileMessageSegmentationMode;
+  /** 主动聊天功能开关占位；当前不接实际逻辑。 */
+  proactiveChatMode: ProactiveChatMode;
+  /** 主动消息最终投递到本地、微信或飞书。 */
+  proactiveDeliveryTarget: ProactiveDeliveryTarget;
+  // TTS 配置
+  ttsEngine: "off" | "minimax" | "gptsovits" | "custom-cloud" | "mimo";
+  ttsAutoRead: boolean;
+  ttsSpeed: number;
+  ttsVolume: number;
+  // MiniMax
+  ttsMinimaxKey: string;
+  ttsMinimaxVoiceId: string;
+  /** MiniMax 合成模型：speech-2.8-hd(高保真¥3.5/万字符) | speech-2.8-turbo(极速¥2.0/万字符) */
+  ttsMinimaxModel: "speech-2.8-hd" | "speech-2.8-turbo";
+  /** MiniMax 流式播放（边合成边播，首字延迟低）；false=完整合成收完再播 */
+  ttsStreaming: boolean;
+  // GPT-SoVITS（本地）
+  ttsGptsovitsBaseUrl: string;
+  ttsGptsovitsRefAudioPath: string;
+  ttsGptsovitsPromptText: string;
+  ttsGptsovitsPromptLang: "auto" | "zh" | "en" | "ja";
+  ttsGptsovitsTextLang: "auto" | "zh" | "en" | "ja";
+  ttsGptsovitsFormat: "wav" | "mp3";
+  // 自定义云端 TTS
+  ttsCustomCloudEndpointUrl: string;
+  ttsCustomCloudApiKey: string;
+  ttsCustomCloudVoiceId: string;
+  ttsCustomCloudFormat: "wav" | "mp3";
+  ttsCustomCloudTimeoutMs: number;
+  // 小米 MiMo TTS
+  ttsMimoKey: string;
+  ttsMimoVoiceAudioPath: string;
+  ttsMimoStylePrompt: string;
+  /** 天气源：open-meteo(免配置默认) | amap(高德,需填key) */
+  weatherSource: "open-meteo" | "amap";
+  /** 天气插件是否启用（开关） */
+  weatherEnabled: boolean;
+  /** 高德天气 key（https://lbs.amap.com 注册 Web服务 key） */
+  amapKey: string;
+  /** 🚗出行工具是否启用 */
+  travelEnabled: boolean;
+  /** 🖥️ 浏览器自动化（Playwright MCP）是否启用。默认 false，需用户手动开启。 */
+  playwrightMcpEnabled: boolean;
+  // 联网搜索：选哪个搜索源 + 对应 key
+  searchEngine: "off" | "bocha" | "tavily" | "minimax";
+  searchBochaKey: string;
+  searchTavilyKey: string;
+  searchMinimaxKey: string;
+  /** ✉️邮件发送插件是否启用 */
+  emailEnabled: boolean;
+  /** SMTP 主机，如 smtp.qq.com */
+  emailSmtpHost: string;
+  /** SMTP 端口，如 465（SSL）/ 587（STARTTLS） */
+  emailSmtpPort: number;
+  /** 使用 SSL/TLS（465 通常 true，587 通常 false；用户可覆盖） */
+  emailSmtpSecure: boolean;
+  /** 发件邮箱地址 */
+  emailSmtpUser: string;
+  /** SMTP 授权码（非邮箱登录密码） */
+  emailSmtpPass: string;
+  /** 发件人显示名（可选） */
+  emailFromName: string;
+  /** 🎧ASR 服务商：off(关闭) | aliyun(阿里云) | local(本地 Qwen3-ASR) */
+  asrEngine: "off" | "aliyun" | "local";
+  /** 阿里云智能语音交互 AppKey */
+  asrAliyunAppKey: string;
+  /** 阿里云 RAM AccessKey ID */
+  asrAliyunAccessKeyId: string;
+  /** 阿里云 RAM AccessKey Secret */
+  asrAliyunAccessKeySecret: string;
+  /** 独立本地 ASR 环境根目录 */
+  asrLocalRoot: string;
+  /** Qwen3-ASR 模型固定本地路径 */
+  asrLocalModelPath: string;
+  /** 单句本地识别超时 */
+  asrLocalTimeoutMs: number;
+  /** 专有名词和转写规则上下文 */
+  asrLocalSystemPrompt: string;
+  /** ASR 识别语言：zh(中文) | en(英文) | auto(自动) */
+  asrLanguage: "zh" | "en" | "auto";
+  /** VAD 静默检测阈值（毫秒），500~2000，默认 1000 */
+  asrVadSilenceMs: number;
+  /** VAD 音量阈值（0~1），默认 0.01。环境吵或麦克风音量低时可调 */
+  asrVadThreshold: number;
+  /** 通话中显示文字转写 */
+  asrShowTranscript: boolean;
+  /** 手机端语音通话：仅桌面端本地保存，绝不下发给手机。 */
+  mobileCallLiveKitUrl: string;
+  mobileCallLiveKitApiKey: string;
+  mobileCallLiveKitApiSecret: string;
+  /** Opener 主动开口档位 */
+  openerMode: "off" | "quiet" | "normal" | "lively";
+  /** 截图全局热键（Electron Accelerator 格式，如 "Alt+Shift+S"） */
+  screenshotHotkey: string;
+}
+
+
+interface PublicModelConfig {
+  mode: "auto" | "manual";
+  provider: string;
+  // 用户自定义昵称；留空时状态栏用 shortName
+  displayName?: string;
+  // 厂商短名（去括号后缀），状态栏"正在喂养"的兜底显示
+  shortName: string;
+  model: string;
+  connected: boolean;
+  runtimeSync: "off" | "local" | "llm";
+  stickerSize: StickerSize;
+  rerankerMode: "light" | "standard" | "none";
+}
+
+type RuntimeStatus = "陪伴中" | "思考中" | "工作中" | "聆听中" | "提醒中" | "离线";
+type RuntimeFeeling = "平静" | "开心" | "温柔" | "激动" | "撒娇" | "担心" | "难过" | "感动" | "害羞";
+type StickerSize = "small" | "standard" | "large";
+
+interface RuntimeState {
+  status: RuntimeStatus;
+  feeling: RuntimeFeeling;
+  expression: number;
+  updatedAt: number;
+}
+
+const RUNTIME_STATUSES: RuntimeStatus[] = ["陪伴中", "思考中", "工作中", "聆听中", "提醒中", "离线"];
+const RUNTIME_FEELINGS: RuntimeFeeling[] = ["平静", "开心", "温柔", "激动", "撒娇", "担心", "难过", "感动", "害羞"];
+const CHAT_REQUEST_TIMEOUT_MS = 300000; // FC 总预算：20 轮 × 推理模型 ~10-15s 需 300s 余量
+
+/** 桌宠窗口的基础尺寸（zoom=1.0 时）。缩放因子改变窗口与模型尺寸，二者同步。 */
+const PET_WINDOW_BASE_WIDTH = 400;
+const PET_WINDOW_BASE_HEIGHT = 500;
+const STARTUP_EMBEDDING_REFRESH_DELAY_MS = 1500;
+
+function getAppIconPath(icon: UiIcon): string {
+  const preset = UI_ICON_PRESETS.find((item) => item.id === icon);
+  return path.join(__dirname, "..", "..", "..", "assets", "icon-presets", preset?.fileName ?? "cyrene-sun.png");
+}
+
+function getCurrentAppIconPath(): string {
+  return getAppIconPath(loadGeneralSettings().uiIcon);
+}
+let runtimeState: RuntimeState = {
+    status: "陪伴中",
+    feeling: "平静",
+    expression: 0,
+    updatedAt: Date.now(),
+  };
+let feelingScores = createFeelingScores(runtimeState.feeling);
+let stickerEmbeddingIndex: StickerEmbeddingEntry[] | null = null;
+let stickerEmbeddingRefreshSeq = 0;
+let sceneEmbeddingIndex: SceneIndex | null = null;
+let sceneEmbeddingRefreshSeq = 0;
+
+function refreshStickerEmbeddingIndexInBackground(reason: string): void {
+  const seq = ++stickerEmbeddingRefreshSeq;
+  void (async () => {
+    try {
+      const provider = getEmbeddingProvider();
+      if (!provider) {
+        if (seq === stickerEmbeddingRefreshSeq) stickerEmbeddingIndex = null;
+        console.warn("[StickerEmbedding] Model not found. Sticker matching disabled.");
+        return;
+      }
+
+      const index = await buildCachedStickerEmbeddingIndex(
+        provider,
+        BUILT_IN_STICKER_DESCRIPTIONS,
+        loadUserStickerManifest(),
+      );
+      if (seq !== stickerEmbeddingRefreshSeq) return;
+      stickerEmbeddingIndex = index;
+      console.log(`[StickerEmbedding] index ready (${reason}): ${index.length} entries`);
+    } catch (err) {
+      if (seq === stickerEmbeddingRefreshSeq) stickerEmbeddingIndex = null;
+      console.error("[StickerEmbedding] refresh failed:", err instanceof Error ? err.message : String(err));
+    }
+  })();
+}
+
+function refreshSceneEmbeddingIndexInBackground(reason: string): void {
+  const seq = ++sceneEmbeddingRefreshSeq;
+  void (async () => {
+    try {
+      const sceneProvider = getSceneEmbeddingProvider();
+      if (!sceneProvider) {
+        if (seq === sceneEmbeddingRefreshSeq) sceneEmbeddingIndex = null;
+        console.warn("[SceneEmbedding] bge-m3 model not found. Scene embedding disabled.");
+        return;
+      }
+
+      const index = await buildCachedSceneIndex(sceneProvider);
+      if (seq !== sceneEmbeddingRefreshSeq) return;
+      sceneEmbeddingIndex = index;
+      console.log("[SceneEmbedding] index ready:", Object.keys(index.scenes).length, "scenes", `(${reason})`);
+    } catch (err) {
+      if (seq === sceneEmbeddingRefreshSeq) sceneEmbeddingIndex = null;
+      console.error("[SceneEmbedding] refresh failed:", err instanceof Error ? err.message : String(err));
+    }
+  })();
+}
+
+function scheduleStartupEmbeddingRefreshes(): void {
+  setTimeout(() => {
+    refreshStickerEmbeddingIndexInBackground("startup");
+    refreshSceneEmbeddingIndexInBackground("startup");
+  }, STARTUP_EMBEDDING_REFRESH_DELAY_MS);
+}
+
+const DEFAULT_MODEL_SETTINGS: ModelSettings = {
+  mode: "auto",
+  // 默认厂商改为 MiniMax（v1 vendor adapter 第一个落地的），DeepSeek 已从 v1 清单移除。
+  provider: "MiniMax（稀宇科技）",
+  baseUrl: "https://api.minimaxi.com/v1",
+  model: "MiniMax-M3",
+  apiKey: "",
+  perProvider: {},
+  runtimeSync: "off",
+  stickerEnabled: true,
+  stickerSize: "standard",
+  stickerSimilarityThreshold: 0.55,
+  rerankerMode: "light",
+  embeddingModel: "minilm",
+  multimodal: false,
+};
+
+const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
+  citaEnabled: false,
+  citaSemanticEngine: "remote",
+  chatSocialContextEnabled: false,
+  musicEnabled: false,
+  musicVolume: 60,
+  soundEnabled: true,
+  soundVolume: 70,
+  petAlwaysOnTop: true,
+  petVisible: true,
+  petZoom: 1,
+  sidebarVisible: true,
+  tasksVisible: true,
+  launchAtLogin: false,
+  language: "zh-CN",
+  uiTheme: "classic",
+  uiFont: DEFAULT_UI_FONT,
+  uiIcon: "cyrene-sun",
+  defaultChatMode: "work",
+  currentStyleId: "default",
+  customStyle: DEFAULT_CUSTOM_STYLE,
+  segmentedOutputMode: "off",
+  mobileMessageSegmentation: "off",
+  proactiveChatMode: "off",
+  proactiveDeliveryTarget: "local",
+  ttsEngine: "off",
+  ttsAutoRead: true,
+  ttsSpeed: 1,
+  ttsVolume: 1,
+  ttsMinimaxKey: "",
+  ttsMinimaxVoiceId: "",
+  ttsMinimaxModel: "speech-2.8-turbo",
+  ttsStreaming: true,
+  ttsGptsovitsBaseUrl: "http://localhost:9880",
+  ttsGptsovitsRefAudioPath: "",
+  ttsGptsovitsPromptText: "",
+  ttsGptsovitsPromptLang: "zh",
+  ttsGptsovitsTextLang: "zh",
+  ttsGptsovitsFormat: "wav",
+  ttsCustomCloudEndpointUrl: "",
+  ttsCustomCloudApiKey: "",
+  ttsCustomCloudVoiceId: "",
+  ttsCustomCloudFormat: "mp3",
+  ttsCustomCloudTimeoutMs: 30000,
+  ttsMimoKey: "",
+  ttsMimoVoiceAudioPath: "",
+  ttsMimoStylePrompt: "温柔、自然、略带亲近感，像在轻声陪用户聊天。",
+  weatherSource: "open-meteo",
+  weatherEnabled: false,
+  amapKey: "",
+  travelEnabled: false,
+  playwrightMcpEnabled: false,
+  searchEngine: "off",
+  searchBochaKey: "",
+  searchTavilyKey: "",
+  searchMinimaxKey: "",
+  emailEnabled: false,
+  emailSmtpHost: "",
+  emailSmtpPort: 465,
+  emailSmtpSecure: true,
+  emailSmtpUser: "",
+  emailSmtpPass: "",
+  emailFromName: "",
+  asrEngine: "off",
+  asrAliyunAppKey: "",
+  asrAliyunAccessKeyId: "",
+  asrAliyunAccessKeySecret: "",
+  asrLocalRoot: path.join(os.homedir(), "Documents", "local-llms", "qwen3-asr-1.7b"),
+  asrLocalModelPath: path.join(os.homedir(), "Documents", "local-llms", "qwen3-asr-1.7b", "model"),
+  asrLocalTimeoutMs: 30000,
+  asrLocalSystemPrompt: "以下是语音转写。技术名词可能包括：Qwen3.5、Cyrene。请忠实转写，不要改写。",
+  asrLanguage: "zh",
+  asrVadSilenceMs: 1000,
+  asrVadThreshold: 0.01,
+  asrShowTranscript: false,
+  mobileCallLiveKitUrl: "",
+  mobileCallLiveKitApiKey: "",
+  mobileCallLiveKitApiSecret: "",
+  openerMode: "off",
+  screenshotHotkey: "Alt+Shift+S",
+};
+
+function getSettingsPath(): string {
+  return path.join(app.getPath("userData"), "model-settings.json");
+}
+
+function getGeneralSettingsPath(): string {
+  return resolveGlobalUserDataLayout(app.getPath("userData")).appSettingsFile;
+}
+
+
+function getUserProfilePath(): string {
+  return resolveGlobalUserDataLayout(app.getPath("userData")).profileFile;
+}
+
+function getAvatarPath(): string {
+  return resolveGlobalUserDataLayout(app.getPath("userData")).avatarFile;
+}
+
+function getRagStorePath(): string {
+  return getGlobalDocumentStorePath();
+}
+
+const DEFAULT_USER_PROFILE: UserProfile = {
+  nickname: "",
+  callPreference: "",
+  birthday: "",
+  timezone: "Asia/Shanghai",
+  avatarPath: "",
+  defaultCity: "",
+  gender: "secret",
+};
+
+function loadUserProfile(): UserProfile {
+  try {
+    const filePath = getUserProfilePath();
+    if (!fs.existsSync(filePath)) return DEFAULT_USER_PROFILE;
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    return {
+      nickname: typeof raw.nickname === "string" ? raw.nickname : DEFAULT_USER_PROFILE.nickname,
+      callPreference: typeof raw.callPreference === "string" ? raw.callPreference : DEFAULT_USER_PROFILE.callPreference,
+      birthday: typeof raw.birthday === "string" ? raw.birthday : DEFAULT_USER_PROFILE.birthday,
+      timezone: typeof raw.timezone === "string" ? raw.timezone : DEFAULT_USER_PROFILE.timezone,
+      avatarPath: typeof raw.avatarPath === "string" ? raw.avatarPath : DEFAULT_USER_PROFILE.avatarPath,
+      defaultCity: typeof raw.defaultCity === "string" ? raw.defaultCity : DEFAULT_USER_PROFILE.defaultCity,
+      gender: typeof raw.gender === "string" ? raw.gender : DEFAULT_USER_PROFILE.gender,
+    };
+  } catch {
+    return DEFAULT_USER_PROFILE;
+  }
+}
+
+function saveUserProfile(profile: Partial<UserProfile>): UserProfile {
+  const existing = loadUserProfile();
+  const merged = { ...existing };
+  const explicitKeys: Array<keyof UserProfile> = [
+    "nickname",
+    "callPreference",
+    "birthday",
+    "timezone",
+    "avatarPath",
+    "defaultCity",
+    "gender",
+  ];
+  for (const key of explicitKeys) {
+    if (typeof profile[key] === "string") merged[key] = profile[key].trim();
+  }
+  const filePath = getUserProfilePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), "utf8");
+  return merged;
+}
+
+interface MemoryPanelItem {
+  id: string;
+  title: string;
+  body: string;
+  meta: string;
+}
+
+interface ImportedDocItem {
+  importId: string | null;
+  fileName: string;
+  chunkCount: number;
+  lastImportedAt: number;
+}
+
+async function loadMemoryPanelData() {
+  const [l0, l1, l2] = await Promise.all([
+    memoryStore.getL0(),
+    memoryStore.getL1(),
+    memoryStore.getAllL2(),
+  ]);
+
+  let importedDocs: ImportedDocItem[] = [];
+  const ragStorePath = getRagStorePath();
+
+  try {
+    if (fs.existsSync(ragStorePath)) {
+      const raw = fs.readFileSync(ragStorePath, "utf8");
+      const entries = JSON.parse(raw) as Array<{
+        source?: string;
+        createdAt?: number;
+        metadata?: { fileName?: string; importId?: string };
+      }>;
+
+      const docsMap = new Map<string, ImportedDocItem>();
+      for (const entry of entries) {
+        if (entry.source !== "imported_doc") continue;
+        const fileName = entry.metadata?.fileName || "未命名文档";
+        const importId = entry.metadata?.importId as string | undefined;
+        // 新数据按 importId 分组，旧数据按 fileName 分组
+        const key = importId || "legacy:" + fileName;
+        const existing = docsMap.get(key);
+        if (existing) {
+          existing.chunkCount += 1;
+          existing.lastImportedAt = Math.max(existing.lastImportedAt, entry.createdAt || 0);
+        } else {
+          docsMap.set(key, {
+            importId: importId || null,
+            fileName,
+            chunkCount: 1,
+            lastImportedAt: entry.createdAt || 0,
+          });
+        }
+      }
+
+      importedDocs = [...docsMap.values()].sort((a, b) => b.lastImportedAt - a.lastImportedAt);
+    }
+  } catch (error) {
+    console.warn("[settings] load imported docs failed:", error);
+  }
+
+  return {
+    l0,
+    l1,
+    l2: l2.sort((a, b) => b.createdAt - a.createdAt),
+    importedDocs,
+    reflections: [] as MemoryPanelItem[],
+  };
+}
+
+function getStickerSettingsPath(): string {
+  return path.join(app.getPath("userData"), "sticker-settings.json");
+}
+
+/**
+ * normalize 流程：
+ *   1. 先清洗顶层基础字段（mode/provider/runtimeSync/...）
+ *   2. 再清洗 perProvider 字典：忽略非法键、缺失字段补默认值、apiKey 不在这里强制 trim 留作下一步
+ *   3. 旧 schema 兼容：若 perProvider 中没有 currentProvider 那一份，把顶层 baseUrl/model/apiKey 当作首次迁移塞进去
+ *   4. 用 perProvider[currentProvider] 反向展开成顶层 baseUrl/model/apiKey 镜像
+ *      → 真值（source of truth）是 perProvider；顶层只是当前厂商配置的视图
+ */
+function normalizeProviderProfile(input: Partial<ProviderProfile> | null | undefined): ProviderProfile {
+  const explicitTransport: ProviderProfile["explicitTransport"] =
+    input?.explicitTransport === "openai" || input?.explicitTransport === "anthropic" || input?.explicitTransport === "auto"
+      ? input.explicitTransport
+      : undefined;
+  return {
+    baseUrl: typeof input?.baseUrl === "string" ? input.baseUrl.trim() : "",
+    model: typeof input?.model === "string" ? input.model.trim() : "",
+    apiKey: typeof input?.apiKey === "string" ? input.apiKey.trim() : "",
+    displayName: typeof input?.displayName === "string" && input?.displayName.trim() ? input.displayName.trim() : undefined,
+    explicitTransport,
+    reasoning: normalizeReasoningPreference((input as { reasoning?: unknown })?.reasoning),
+  };
+}
+
+/** 清洗视觉模型配置。三字段全空 = 未启用，返回 undefined。 */
+function normalizeVisionConfig(input: Partial<VisionModelConfig> | undefined): VisionModelConfig | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : "";
+  const apiKey = typeof input.apiKey === "string" ? input.apiKey.trim() : "";
+  const model = typeof input.model === "string" ? input.model.trim() : "";
+  // 三项全空 = 未启用
+  if (!baseUrl && !apiKey && !model) return undefined;
+  return { baseUrl, apiKey, model };
+}
+
+function normalizeModelSettings(input: Partial<ModelSettings> | null | undefined): ModelSettings {
+  const mode: "auto" | "manual" = input?.mode === "manual" ? "manual" : "auto";
+  let provider = typeof input?.provider === "string" && input.provider.trim()
+    ? input.provider.trim()
+    : DEFAULT_MODEL_SETTINGS.provider;
+
+  // perProvider 清洗：跳过非对象、非法键
+  const rawPerProvider = (input as ModelSettings | undefined)?.perProvider;
+  let perProvider: Record<string, ProviderProfile> = {};
+  if (rawPerProvider && typeof rawPerProvider === "object") {
+    for (const [key, value] of Object.entries(rawPerProvider)) {
+      if (typeof key !== "string" || !key.trim()) continue;
+      perProvider[key.trim()] = normalizeProviderProfile(value as Partial<ProviderProfile>);
+    }
+  }
+
+  // 厂商重命名迁移：把旧 provider 名在字典里和当前 provider 字段一并改成新名。
+  // 必须在"旧 schema 兼容回填"之前做，否则会用旧名先创建一份僵尸数据。
+  ({ provider, perProvider } = migrateProviderRenames(provider, perProvider));
+  for (const [providerName, profile] of Object.entries(perProvider)) {
+    perProvider[providerName] = migrateLegacyMinimaxDefaults(providerName, profile);
+  }
+
+  // 旧 schema 兼容：v1 之前的 model-config.json 没有 perProvider 字段，
+  // 但有顶层 baseUrl/model/apiKey 三件套。首次升级时把它们当作 currentProvider 那一份回填。
+  if (!perProvider[provider]) {
+    perProvider[provider] = normalizeProviderProfile({
+      baseUrl: typeof input?.baseUrl === "string" ? input.baseUrl : "",
+      model: typeof input?.model === "string" ? input.model : "",
+      apiKey: typeof input?.apiKey === "string" ? input.apiKey : "",
+    });
+    // 如果迁移后这一份完全是空的（用户从来没配过），再给个默认 baseUrl/model（便于 UI 第一次显示）
+    if (!perProvider[provider].baseUrl) perProvider[provider].baseUrl = DEFAULT_MODEL_SETTINGS.baseUrl;
+    if (!perProvider[provider].model) perProvider[provider].model = DEFAULT_MODEL_SETTINGS.model;
+  }
+
+  // 顶层镜像：用 perProvider[provider] 展开
+  const profile = perProvider[provider];
+
+  // 迁移旧配置：vision.syncWithMain === true -> multimodal: true
+  let multimodal = input?.multimodal === true;
+  const rawVision = input?.vision as Partial<VisionModelConfig> & { syncWithMain?: boolean } | undefined;
+  if (rawVision && rawVision.syncWithMain === true) {
+    multimodal = true;
+  }
+
+  return {
+    mode,
+    provider,
+    displayName: profile.displayName,
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    apiKey: profile.apiKey,
+    explicitTransport: profile.explicitTransport,
+    reasoning: profile.reasoning,  // 顶层镜像：与 explicitTransport 同源（perProvider[currentProvider].reasoning）
+    perProvider,
+    runtimeSync: input?.runtimeSync === "llm" ? "llm" : input?.runtimeSync === "local" ? "local" : "off",
+    stickerEnabled: input?.stickerEnabled !== false,
+    stickerSize: input?.stickerSize === "small" || input?.stickerSize === "large" ? input.stickerSize : "standard",
+    stickerSimilarityThreshold: typeof input?.stickerSimilarityThreshold === "number"
+      ? Math.max(0.3, Math.min(0.9, input.stickerSimilarityThreshold))
+      : 0.55,
+    rerankerMode: input?.rerankerMode === "standard" || input?.rerankerMode === "none" ? input.rerankerMode : "light",
+    embeddingModel: input?.embeddingModel === "bgem3" ? "bgem3" : "minilm",
+    vision: normalizeVisionConfig(rawVision),
+    multimodal,
+  };
+}
+
+function loadModelSettings(): ModelSettings {
+  try {
+    const filePath = getSettingsPath();
+    if (!fs.existsSync(filePath)) return DEFAULT_MODEL_SETTINGS;
+    const raw = fs.readFileSync(filePath, "utf8");
+    return normalizeModelSettings(JSON.parse(raw) as Partial<ModelSettings>);
+  } catch (err) {
+    console.error("[Cyrene] load settings failed:", err);
+    return DEFAULT_MODEL_SETTINGS;
+  }
+}
+
+/**
+ * 加载视觉模型配置，解析 syncWithMain 并做 supportsVision 检查。
+ * 返回 null = 未启用视觉（read_image 据此诚实拒绝）。
+ *
+ * syncWithMain=true 时：从主配置读 baseUrl/key/model，并检查主模型 supportsVision——
+ * 若主模型非视觉，返回 null（避免把非视觉模型当视觉模型硬调导致运行时错误让用户困惑）。
+ */
+/**
+ * 运行时解析视觉配置。
+ * multimodal=true：主模型本身支持视觉，返回主模型配置（让 read_image 等工具可用）。
+ * multimodal=false：返回独立视觉模型配置（三字段齐全才有效），否则 null。
+ */
+export function loadVisionConfig(): VisionConfig | null {
+  const settings = loadModelSettings();
+
+  if (settings.multimodal) {
+    if (!settings.apiKey || !settings.model) return null;
+    return { baseUrl: settings.baseUrl, apiKey: settings.apiKey, model: settings.model };
+  }
+
+  const v = settings.vision;
+  if (!v) return null;
+  if (!v.baseUrl || !v.apiKey || !v.model) return null;
+  return { baseUrl: v.baseUrl, apiKey: v.apiKey, model: v.model };
+}
+
+/**
+ * 保存逻辑：
+ *   - 渲染端发来的 settings 既可能带顶层 baseUrl/model/apiKey（旧调用方式），
+ *     也可能带 perProvider（新调用方式，未来可扩展）。
+ *   - 写盘前先把"顶层那三件套"折叠回 perProvider[provider]，保证真值落到字典里。
+ *   - normalizeModelSettings 再把 perProvider[provider] 展开成顶层镜像，写盘 = 双视图一致。
+ */
+function saveModelSettings(settings: Partial<ModelSettings>): ModelSettings {
+  const existing = loadModelSettings();
+  const merged: Partial<ModelSettings> = { ...existing, ...settings };
+
+  // currentProvider 优先取传入的、再取已有的
+  const currentProvider = (typeof settings.provider === "string" && settings.provider.trim())
+    ? settings.provider.trim()
+    : existing.provider;
+
+  // 起点：复制现有 perProvider，再 merge 传入的 perProvider
+  const perProvider: Record<string, ProviderProfile> = { ...(existing.perProvider ?? {}) };
+  if (settings.perProvider && typeof settings.perProvider === "object") {
+    for (const [key, value] of Object.entries(settings.perProvider)) {
+      perProvider[key] = normalizeProviderProfile(value as Partial<ProviderProfile>);
+    }
+  }
+
+  // 把传入的顶层三件套折叠到 currentProvider 下（这是渲染端目前主要的写入路径）
+  const incomingProfile = perProvider[currentProvider] ?? normalizeProviderProfile(null);
+  // explicitTransport：渲染端新下拉框字段。传 "openai" | "anthropic" | "auto" 都接受；传 undefined 视为 "auto"。
+  const incomingExplicitTransport: ProviderProfile["explicitTransport"] =
+    settings.explicitTransport === "openai" || settings.explicitTransport === "anthropic" || settings.explicitTransport === "auto"
+      ? settings.explicitTransport
+      : incomingProfile.explicitTransport;
+  // reasoning 折叠（用户第三轮修订 #4）：优先级 perProvider > 顶层 > existing
+  const incomingProfileForReasoning = (settings.perProvider ?? {})[currentProvider];
+  const hasProfileReasoning = incomingProfileForReasoning
+    && Object.prototype.hasOwnProperty.call(incomingProfileForReasoning, "reasoning");
+  const hasTopLevelReasoning = Object.prototype.hasOwnProperty.call(settings, "reasoning");
+  let chosenReasoningRaw: unknown;
+  let chosenReasoningHasKey: boolean;
+  if (hasProfileReasoning) {
+    chosenReasoningRaw = (incomingProfileForReasoning as { reasoning?: unknown }).reasoning;
+    chosenReasoningHasKey = true;
+  } else if (hasTopLevelReasoning) {
+    chosenReasoningRaw = settings.reasoning;
+    chosenReasoningHasKey = true;
+  } else {
+    chosenReasoningRaw = undefined;
+    chosenReasoningHasKey = false;
+  }
+  const foldedReasoning = foldReasoning(chosenReasoningRaw, incomingProfile.reasoning, chosenReasoningHasKey);
+
+  perProvider[currentProvider] = {
+    baseUrl: typeof settings.baseUrl === "string" ? settings.baseUrl.trim() : incomingProfile.baseUrl,
+    model: typeof settings.model === "string" ? settings.model.trim() : incomingProfile.model,
+    apiKey: typeof settings.apiKey === "string" ? settings.apiKey.trim() : incomingProfile.apiKey,
+    displayName: typeof settings.displayName === "string" && settings.displayName.trim()
+      ? settings.displayName.trim()
+      : incomingProfile.displayName,
+    explicitTransport: incomingExplicitTransport,
+    reasoning: foldedReasoning,
+  };
+
+  merged.provider = currentProvider;
+  merged.perProvider = perProvider;
+
+  const final = normalizeModelSettings(merged);
+  const filePath = getSettingsPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(final, null, 2), "utf8");
+  return final;
+}
+
+function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undefined): GeneralSettings {
+  const windowVisibility = normalizeWindowVisibilitySettings(input);
+  const cita = normalizeCitaSettings({
+    enabled: input?.citaEnabled,
+    semanticEngine: input?.citaSemanticEngine,
+  });
+  const clamp = (value: unknown, fallback: number) => {
+    const num = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(num) ? Math.max(0, Math.min(100, Math.round(num))) : fallback;
+  };
+  const clampPort = (value: unknown, fallback: number) => {
+    const num = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(num) ? Math.max(1, Math.min(65535, Math.round(num))) : fallback;
+  };
+  const clampMs = (value: unknown, fallback: number) => {
+    const num = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(num) ? Math.max(1000, Math.min(120000, Math.round(num))) : fallback;
+  };
+  return {
+    citaEnabled: cita.enabled,
+    citaSemanticEngine: cita.semanticEngine,
+    chatSocialContextEnabled: normalizeChatSocialContextEnabled(input?.chatSocialContextEnabled),
+    musicEnabled: Boolean(input?.musicEnabled),
+    musicVolume: clamp(input?.musicVolume, DEFAULT_GENERAL_SETTINGS.musicVolume),
+    soundEnabled: input?.soundEnabled === undefined ? DEFAULT_GENERAL_SETTINGS.soundEnabled : Boolean(input.soundEnabled),
+    soundVolume: clamp(input?.soundVolume, DEFAULT_GENERAL_SETTINGS.soundVolume),
+    petAlwaysOnTop: input?.petAlwaysOnTop === undefined ? DEFAULT_GENERAL_SETTINGS.petAlwaysOnTop : Boolean(input.petAlwaysOnTop),
+    petVisible: input?.petVisible === undefined ? DEFAULT_GENERAL_SETTINGS.petVisible : Boolean(input.petVisible),
+    petZoom: typeof input?.petZoom === "number" ? Math.max(0.5, Math.min(2, input.petZoom)) : DEFAULT_GENERAL_SETTINGS.petZoom,
+    petWindowX: typeof input?.petWindowX === "number" && isFinite(input.petWindowX)
+      ? Math.round(input.petWindowX) : undefined,
+    petWindowY: typeof input?.petWindowY === "number" && isFinite(input.petWindowY)
+      ? Math.round(input.petWindowY) : undefined,
+    sidebarVisible: windowVisibility.sidebarVisible,
+    tasksVisible: windowVisibility.tasksVisible,
+    launchAtLogin: Boolean(input?.launchAtLogin),
+    language: "zh-CN",
+    uiTheme: normalizeUiTheme(input?.uiTheme),
+    uiFont: normalizeUiFont(input?.uiFont),
+    uiIcon: normalizeUiIcon(input?.uiIcon),
+    defaultChatMode: normalizeDefaultChatMode(input?.defaultChatMode),
+    currentStyleId: normalizeStyleId(input?.currentStyleId),
+    customStyle: normalizeCustomStyleConfig(input?.customStyle),
+    segmentedOutputMode: normalizeSegmentedOutputMode(input?.segmentedOutputMode),
+    mobileMessageSegmentation: normalizeMobileMessageSegmentationMode(input?.mobileMessageSegmentation),
+    proactiveChatMode: normalizeProactiveChatMode(input?.proactiveChatMode),
+    proactiveDeliveryTarget: normalizeProactiveDeliveryTarget(input?.proactiveDeliveryTarget),
+    // TTS 配置
+    ttsEngine: (["off", "minimax", "gptsovits", "custom-cloud", "mimo"].includes(input?.ttsEngine as string) ? input?.ttsEngine : "off") as GeneralSettings["ttsEngine"],
+    ttsAutoRead: input?.ttsAutoRead === undefined ? DEFAULT_GENERAL_SETTINGS.ttsAutoRead : Boolean(input.ttsAutoRead),
+    ttsSpeed: typeof input?.ttsSpeed === "number" ? Math.max(0.5, Math.min(2, input.ttsSpeed)) : DEFAULT_GENERAL_SETTINGS.ttsSpeed,
+    ttsVolume: typeof input?.ttsVolume === "number" ? Math.max(0, Math.min(1, input.ttsVolume)) : DEFAULT_GENERAL_SETTINGS.ttsVolume,
+    ttsMinimaxKey: typeof input?.ttsMinimaxKey === "string" ? input.ttsMinimaxKey : "",
+    ttsMinimaxVoiceId: typeof input?.ttsMinimaxVoiceId === "string" ? input.ttsMinimaxVoiceId : "",
+    ttsMinimaxModel: input?.ttsMinimaxModel === "speech-2.8-hd" ? "speech-2.8-hd" : "speech-2.8-turbo",
+    ttsStreaming: input?.ttsStreaming === undefined ? true : Boolean(input.ttsStreaming),
+    weatherSource: ["open-meteo", "amap"].includes(String(input?.weatherSource))
+      ? (input!.weatherSource as "open-meteo" | "amap")
+      : "open-meteo",
+    weatherEnabled: Boolean(input?.weatherEnabled),
+    amapKey: typeof input?.amapKey === "string" ? input.amapKey : "",
+    travelEnabled: Boolean(input?.travelEnabled),
+    playwrightMcpEnabled: Boolean(input?.playwrightMcpEnabled),
+    searchEngine: ["off", "bocha", "tavily", "minimax"].includes(String(input?.searchEngine))
+      ? (input!.searchEngine as "off" | "bocha" | "tavily" | "minimax")
+      : "off",
+    searchBochaKey: typeof input?.searchBochaKey === "string" ? input.searchBochaKey : "",
+    searchTavilyKey: typeof input?.searchTavilyKey === "string" ? input.searchTavilyKey : "",
+    searchMinimaxKey: typeof input?.searchMinimaxKey === "string" ? input.searchMinimaxKey : "",
+    // 邮件（SMTP）配置
+    emailEnabled: Boolean(input?.emailEnabled),
+    emailSmtpHost: typeof input?.emailSmtpHost === "string" ? input.emailSmtpHost : "",
+    emailSmtpPort: clampPort(input?.emailSmtpPort, DEFAULT_GENERAL_SETTINGS.emailSmtpPort),
+    emailSmtpSecure: input?.emailSmtpSecure === undefined
+      ? (clampPort(input?.emailSmtpPort, DEFAULT_GENERAL_SETTINGS.emailSmtpPort) === 465)
+      : Boolean(input.emailSmtpSecure),
+    emailSmtpUser: typeof input?.emailSmtpUser === "string" ? input.emailSmtpUser : "",
+    emailSmtpPass: typeof input?.emailSmtpPass === "string" ? input.emailSmtpPass : "",
+    emailFromName: typeof input?.emailFromName === "string" ? input.emailFromName : "",
+    // ASR（语音识别）配置
+    asrEngine: ["off", "aliyun", "local"].includes(String(input?.asrEngine))
+      ? (input!.asrEngine as "off" | "aliyun" | "local")
+      : "off",
+    asrAliyunAppKey: typeof input?.asrAliyunAppKey === "string" ? input.asrAliyunAppKey : "",
+    asrAliyunAccessKeyId: typeof input?.asrAliyunAccessKeyId === "string" ? input.asrAliyunAccessKeyId : "",
+    asrAliyunAccessKeySecret: typeof input?.asrAliyunAccessKeySecret === "string" ? input.asrAliyunAccessKeySecret : "",
+    asrLocalRoot: typeof input?.asrLocalRoot === "string" && input.asrLocalRoot.trim()
+      ? input.asrLocalRoot.trim()
+      : DEFAULT_GENERAL_SETTINGS.asrLocalRoot,
+    asrLocalModelPath: typeof input?.asrLocalModelPath === "string" && input.asrLocalModelPath.trim()
+      ? input.asrLocalModelPath.trim()
+      : DEFAULT_GENERAL_SETTINGS.asrLocalModelPath,
+    asrLocalTimeoutMs: typeof input?.asrLocalTimeoutMs === "number"
+      ? Math.max(5000, Math.min(120000, Math.round(input.asrLocalTimeoutMs)))
+      : DEFAULT_GENERAL_SETTINGS.asrLocalTimeoutMs,
+    asrLocalSystemPrompt: typeof input?.asrLocalSystemPrompt === "string"
+      ? input.asrLocalSystemPrompt.slice(0, 2000)
+      : DEFAULT_GENERAL_SETTINGS.asrLocalSystemPrompt,
+    asrLanguage: ["zh", "en", "auto"].includes(String(input?.asrLanguage))
+      ? (input!.asrLanguage as "zh" | "en" | "auto")
+      : "zh",
+    asrVadSilenceMs: typeof input?.asrVadSilenceMs === "number"
+      ? Math.max(300, Math.min(30000, Math.round(input.asrVadSilenceMs)))
+      : DEFAULT_GENERAL_SETTINGS.asrVadSilenceMs,
+    asrVadThreshold: typeof input?.asrVadThreshold === "number"
+      ? Math.max(0.001, Math.min(0.5, Number(input.asrVadThreshold)))
+      : DEFAULT_GENERAL_SETTINGS.asrVadThreshold,
+    asrShowTranscript: Boolean(input?.asrShowTranscript),
+    mobileCallLiveKitUrl: typeof input?.mobileCallLiveKitUrl === "string"
+      ? input.mobileCallLiveKitUrl.trim()
+      : "",
+    mobileCallLiveKitApiKey: typeof input?.mobileCallLiveKitApiKey === "string"
+      ? input.mobileCallLiveKitApiKey.trim()
+      : "",
+    mobileCallLiveKitApiSecret: typeof input?.mobileCallLiveKitApiSecret === "string"
+      ? input.mobileCallLiveKitApiSecret.trim()
+      : "",
+    openerMode: ["off", "quiet", "normal", "lively"].includes(String(input?.openerMode))
+      ? (input!.openerMode as "off" | "quiet" | "normal" | "lively")
+      : "off",
+    screenshotHotkey: typeof input?.screenshotHotkey === "string" && input.screenshotHotkey.trim()
+      ? input.screenshotHotkey.trim() : DEFAULT_GENERAL_SETTINGS.screenshotHotkey,
+    ttsGptsovitsBaseUrl: typeof input?.ttsGptsovitsBaseUrl === "string" ? input.ttsGptsovitsBaseUrl : DEFAULT_GENERAL_SETTINGS.ttsGptsovitsBaseUrl,
+    ttsGptsovitsRefAudioPath: typeof input?.ttsGptsovitsRefAudioPath === "string" ? input.ttsGptsovitsRefAudioPath : "",
+    ttsGptsovitsPromptText: typeof input?.ttsGptsovitsPromptText === "string" ? input.ttsGptsovitsPromptText : "",
+    ttsGptsovitsPromptLang: ["auto", "zh", "en", "ja"].includes(String(input?.ttsGptsovitsPromptLang))
+      ? input!.ttsGptsovitsPromptLang as "auto" | "zh" | "en" | "ja"
+      : DEFAULT_GENERAL_SETTINGS.ttsGptsovitsPromptLang,
+    ttsGptsovitsTextLang: ["auto", "zh", "en", "ja"].includes(String(input?.ttsGptsovitsTextLang))
+      ? input!.ttsGptsovitsTextLang as "auto" | "zh" | "en" | "ja"
+      : DEFAULT_GENERAL_SETTINGS.ttsGptsovitsTextLang,
+    ttsGptsovitsFormat: input?.ttsGptsovitsFormat === "mp3" ? "mp3" : "wav",
+    ttsCustomCloudEndpointUrl: typeof input?.ttsCustomCloudEndpointUrl === "string" ? input.ttsCustomCloudEndpointUrl : "",
+    ttsCustomCloudApiKey: typeof input?.ttsCustomCloudApiKey === "string" ? input.ttsCustomCloudApiKey : "",
+    ttsCustomCloudVoiceId: typeof input?.ttsCustomCloudVoiceId === "string" ? input.ttsCustomCloudVoiceId : "",
+    ttsCustomCloudFormat: input?.ttsCustomCloudFormat === "wav" ? "wav" : "mp3",
+    ttsCustomCloudTimeoutMs: clampMs(input?.ttsCustomCloudTimeoutMs, DEFAULT_GENERAL_SETTINGS.ttsCustomCloudTimeoutMs),
+    ttsMimoKey: typeof input?.ttsMimoKey === "string" ? input.ttsMimoKey : "",
+    ttsMimoVoiceAudioPath: typeof input?.ttsMimoVoiceAudioPath === "string" ? input.ttsMimoVoiceAudioPath : "",
+    ttsMimoStylePrompt: typeof input?.ttsMimoStylePrompt === "string" ? input.ttsMimoStylePrompt : DEFAULT_GENERAL_SETTINGS.ttsMimoStylePrompt,
+  };
+}
+
+function loadGeneralSettings(): GeneralSettings {
+  try {
+    const filePath = getGeneralSettingsPath();
+    if (!fs.existsSync(filePath)) return DEFAULT_GENERAL_SETTINGS;
+    return normalizeGeneralSettings(JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<GeneralSettings>);
+  } catch (err) {
+    console.error("[Cyrene] load general settings failed:", err);
+    return DEFAULT_GENERAL_SETTINGS;
+  }
+}
+
+function applyGeneralSettings(settings: GeneralSettings): void {
+  mainWindow?.setAlwaysOnTop(settings.petAlwaysOnTop, settings.petAlwaysOnTop ? "screen-saver" : "normal");
+  if (settings.petVisible) mainWindow?.show();
+  else mainWindow?.hide();
+  app.setLoginItemSettings({ openAtLogin: settings.launchAtLogin });
+  applyPetZoom(settings.petZoom);
+}
+
+/**
+ * 按缩放因子调整桌宠窗口尺寸，并通知渲染进程重算模型 scale。
+ * 窗口与模型同步等比缩放，比例不变，故模型始终塞满窗口、不被裁剪。
+ */
+function applyPetZoom(zoom: number): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const width = Math.round(PET_WINDOW_BASE_WIDTH * zoom);
+  const height = Math.round(PET_WINDOW_BASE_HEIGHT * zoom);
+  mainWindow.setSize(width, height);
+  sendToLive2DWindow(IPC.PET_ZOOM, zoom);
+}
+
+function saveGeneralSettings(settings: Partial<GeneralSettings>): GeneralSettings {
+  const before = loadGeneralSettings();
+  const normalized = normalizeGeneralSettings({ ...before, ...settings });
+  const filePath = getGeneralSettingsPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(normalized, null, 2), "utf8");
+  applyGeneralSettings(normalized);
+  syncBuiltInToolToggles(normalized);
+  if (before.uiTheme !== normalized.uiTheme) {
+    broadcastUiThemeChanged(normalized.uiTheme);
+  }
+  if (JSON.stringify(before.uiFont) !== JSON.stringify(normalized.uiFont)) {
+    broadcastUiFontChanged(normalized.uiFont);
+  }
+  if (before.uiIcon !== normalized.uiIcon) {
+    applyUiIcon(normalized.uiIcon);
+  }
+  // TODO: 截图功能重构中，暂时禁用
+  // if (before.screenshotHotkey !== normalized.screenshotHotkey) {
+  //   const result = replaceScreenshotHotkey(normalized.screenshotHotkey);
+  //   if (!result.ok) {
+  //     console.warn("[Cyrene] 截图热键注册失败，可能被其他应用占用:", normalized.screenshotHotkey);
+  //   }
+  // }
+  return normalized;
+}
+
+function syncBuiltInToolToggles(settings: GeneralSettings): void {
+  toolRegistry.setEnabled("weather", settings.weatherEnabled);
+  toolRegistry.setEnabled("plan_trip", settings.travelEnabled);
+}
+
+/** MiniMax 搜索 MCP Server 的固定 ID。 */
+const MINIMAX_SEARCH_MCP_ID = "minimax-web-search";
+
+/**
+ * 同步搜索 MCP Server：选 MiniMax+有key→注册连接，否则→移除断开。
+ * 在 TTS_SAVE_SETTINGS 检测到搜索配置变化时调用。
+ */
+async function syncVolcanoSearchMcp(settings: GeneralSettings): Promise<void> {
+  // ── MiniMax（PyPI包，不依赖GitHub，推荐）──
+  const minimaxEnable = settings.searchEngine === "minimax" && settings.searchMinimaxKey.trim().length > 0;
+  const minimaxExists = listMcpServers().some(s => s.id === MINIMAX_SEARCH_MCP_ID);
+
+  if (minimaxEnable && !minimaxExists) {
+    console.log("[Cyrene] 注册 MiniMax 搜索 MCP Server...");
+    try {
+      const result = await addMcpServer({
+        id: MINIMAX_SEARCH_MCP_ID,
+        name: "MiniMax搜索",
+        transport: "stdio",
+        command: "uvx",
+        args: ["minimax-coding-plan-mcp", "-y"],
+        env: {
+          MINIMAX_API_KEY: settings.searchMinimaxKey.trim(),
+          MINIMAX_API_HOST: "https://api.minimaxi.com",
+        },
+      });
+      if (result.ok) {
+        console.log("[Cyrene] MiniMax 搜索 MCP 注册成功，工具:", result.toolIds?.join(", "));
+      } else {
+        console.error("[Cyrene] MiniMax 搜索 MCP 注册失败:", result.error);
+      }
+    } catch (err) {
+      console.error("[Cyrene] MiniMax 搜索 MCP 注册异常:", err);
+    }
+  } else if (!minimaxEnable && minimaxExists) {
+    console.log("[Cyrene] 移除 MiniMax 搜索 MCP Server...");
+    try { await removeMcpServer(MINIMAX_SEARCH_MCP_ID); } catch (err) { console.error("[Cyrene] MiniMax 搜索 MCP 移除异常:", err); }
+  } else if (minimaxEnable && minimaxExists) {
+    console.log("[Cyrene] MiniMax 搜索 key 变化，重新注册 MCP Server...");
+    try {
+      await removeMcpServer(MINIMAX_SEARCH_MCP_ID);
+      await addMcpServer({
+        id: MINIMAX_SEARCH_MCP_ID, name: "MiniMax搜索", transport: "stdio",
+        command: "uvx",
+        args: ["minimax-coding-plan-mcp", "-y"],
+        env: { MINIMAX_API_KEY: settings.searchMinimaxKey.trim(), MINIMAX_API_HOST: "https://api.minimaxi.com" },
+      });
+    } catch (err) { console.error("[Cyrene] MiniMax 搜索 MCP 重新注册异常:", err); }
+  }
+}
+
+function loadStickerSettings(): Record<string, boolean> {
+  let raw: Record<string, unknown> = {};
+  try {
+    const filePath = getStickerSettingsPath();
+    if (fs.existsSync(filePath)) {
+      raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    }
+  } catch (err) {
+    console.error("[Cyrene] load sticker settings failed:", err);
+  }
+
+  // 把所有 id 归一化为 boolean（默认 true）
+  const result: Record<string, boolean> = {};
+  for (const id of Object.keys(raw)) {
+    result[id] = raw[id] !== false;
+  }
+  return result;
+}
+
+function saveStickerSettings(settings: Record<string, boolean>): Record<string, boolean> {
+  const filePath = getStickerSettingsPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(settings, null, 2), "utf8");
+  return settings;
+}
+
+function setStickerEnabled(id: string, enabled: boolean): Record<string, boolean> {
+  const current = loadStickerSettings();
+  current[id] = enabled;
+  return saveStickerSettings(current);
+}
+
+function getStickerManagerConfig(): StickerConfigItem[] {
+  const stickerSettings = loadStickerSettings();
+  return getAllStickerConfig(stickerSettings);
+}
+
+// ── 多面板自适应布局 ──────────────────────────────────────────────
+
+interface PanelLayout { x: number; y: number; }
+
+/**
+ * 将窗口位置 clamp 到 workArea 内，保证至少 minVisibleW × minVisibleH 可见。
+ * 允许窗口部分超出屏幕（可正可负），但可见区域不少于指定阈值。
+ */
+function clampWindowToWorkArea(
+  pos: PanelLayout,
+  size: { width: number; height: number },
+  workArea: { x: number; y: number; width: number; height: number },
+  minVisibleW = 120,
+  minVisibleH = 80,
+): PanelLayout {
+  const minX = workArea.x - size.width + minVisibleW;
+  const maxX = workArea.x + workArea.width - minVisibleW;
+  const minY = workArea.y - size.height + minVisibleH;
+  const maxY = workArea.y + workArea.height - minVisibleH;
+
+  function clamp(value: number, lo: number, hi: number): number {
+    return Math.max(lo, Math.min(hi, value));
+  }
+
+  return {
+    x: clamp(pos.x, minX, maxX),
+    y: clamp(pos.y, minY, maxY),
+  };
+}
+
+/**
+ * 计算多面板自适应布局。
+ *
+ * 策略：
+ * - 水平排列：totalWidth <= workArea.width → 三面板水平居中
+ * - 阶梯排列：totalWidth > workArea.width → sidebar/tasks 贴右边缘并垂直错开
+ *
+ * 所有窗口均 clampWindowToWorkArea 保证至少 120×80 可见。
+ */
+function computePanelLayout(
+  workArea: { x: number; y: number; width: number; height: number },
+  panels: Array<{ width: number; height: number }>,
+  gap = 8,
+): PanelLayout[] {
+  const totalWidth = panels.reduce((sum, p, i) => sum + p.width + (i > 0 ? gap : 0), 0);
+  const maxPanelHeight = Math.max(...panels.map(p => p.height));
+  const baseY =
+    workArea.height >= maxPanelHeight
+      ? workArea.y + Math.floor((workArea.height - maxPanelHeight) / 2)
+      : workArea.y;
+
+  if (totalWidth <= workArea.width) {
+    // 水平居中排列
+    const startX = workArea.x + Math.floor((workArea.width - totalWidth) / 2);
+    const positions: PanelLayout[] = [];
+    let curX = startX;
+    for (let i = 0; i < panels.length; i++) {
+      const pos = clampWindowToWorkArea({ x: curX, y: baseY }, panels[i], workArea);
+      positions.push(pos);
+      curX += panels[i].width + gap;
+    }
+    return positions;
+  }
+
+  // 阶梯排列：总宽超屏
+  // chat: 居中（clamp 后）
+  const chatPos = clampWindowToWorkArea(
+    { x: workArea.x + Math.floor((workArea.width - panels[0].width) / 2), y: baseY },
+    panels[0],
+    workArea,
+  );
+
+  // sidebar: 优先 chat 右侧有 gap；不够则贴 workArea 右边缘
+  const sidebarMaxX = workArea.x + workArea.width - panels[1].width;
+  const sidebarX = Math.min(chatPos.x + panels[0].width + gap, sidebarMaxX);
+  const sidebarPos = clampWindowToWorkArea({ x: sidebarX, y: baseY }, panels[1], workArea);
+
+  // tasks: 贴右边缘，y 与 sidebar 错开 48px
+  const tasksX = Math.min(sidebarPos.x, sidebarMaxX);
+  const tasksY = clampWindowToWorkArea(
+    { x: tasksX, y: sidebarPos.y + 48 },
+    panels[2],
+    workArea,
+  );
+
+  return [chatPos, sidebarPos, tasksY];
+}
+
+// 计算 chat / sidebar / tasks 三个窗口的初始位置。
+// 规则：优先鼠标所在 display；窗口自适应 workArea，保证至少 120×80 可见。
+function computeLayout(): {
+  chat: PanelLayout;
+  sidebar: PanelLayout;
+  tasks: PanelLayout;
+} {
+  const cursor = screen.getCursorScreenPoint();
+  const displays = screen.getAllDisplays();
+  const display =
+    displays.find(d => {
+      const { x, y, width, height } = d.workArea;
+      return cursor.x >= x && cursor.x < x + width && cursor.y >= y && cursor.y < y + height;
+    }) ?? screen.getPrimaryDisplay();
+
+  const { workArea } = display;
+  const panels = [
+    { width: 1280, height: 760 }, // chat
+    { width: 320, height: 760 },  // sidebar
+    { width: 320, height: 760 },  // tasks
+  ];
+  const [chatPos, sidebarPos, tasksPos] = computePanelLayout(workArea, panels, 8);
+  return { chat: chatPos, sidebar: sidebarPos, tasks: tasksPos };
+}
+
+
+interface ChatRequestMessage {
+  role: "user" | "model" | "assistant" | "system";
+  content: string;
+  at?: number;
+}
+
+interface ChatCompletionChoice {
+  message?: {
+    content?: string;
+  };
+}
+
+interface ChatCompletionResponse {
+  choices?: ChatCompletionChoice[];
+  error?: {
+    message?: string;
+  };
+}
+
+
+function stripThinkBlocks(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/gi, "")
+    .trim();
+}
+
+function createVisibleStreamFilter(): {
+  push: (chunk: string) => string;
+  flush: () => string;
+} {
+  let pending = "";
+  let insideThink = false;
+  const openTag = "<think>";
+  const closeTag = "</think>";
+
+  return {
+    push(chunk: string): string {
+      pending += chunk;
+      let visible = "";
+
+      while (pending) {
+        const lower = pending.toLowerCase();
+
+        if (insideThink) {
+          const closeIndex = lower.indexOf(closeTag);
+          if (closeIndex < 0) {
+            pending = pending.slice(Math.max(0, pending.length - (closeTag.length - 1)));
+            break;
+          }
+
+          pending = pending.slice(closeIndex + closeTag.length);
+          insideThink = false;
+          continue;
+        }
+
+        const openIndex = lower.indexOf(openTag);
+        if (openIndex < 0) {
+          const safeLength = Math.max(0, pending.length - (openTag.length - 1));
+          visible += pending.slice(0, safeLength);
+          pending = pending.slice(safeLength);
+          break;
+        }
+
+        visible += pending.slice(0, openIndex);
+        pending = pending.slice(openIndex + openTag.length);
+        insideThink = true;
+      }
+
+      return visible;
+    },
+    flush(): string {
+      if (insideThink) {
+        pending = "";
+        return "";
+      }
+
+      const rest = pending;
+      pending = "";
+      return rest;
+    },
+  };
+}
+
+function extractJsonPayload(text: string): unknown | null {
+  const cleaned = text
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleaned) as unknown;
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+
+    try {
+      return JSON.parse(cleaned.slice(start, end + 1)) as unknown;
+    } catch {
+      return null;
+    }
+  }
+}
+
+// feeling → Live2D 表情索引
+const feelingToExpression: Record<string, number> = {
+  "平静": 0,
+  "开心": 6,
+  "温柔": 0,
+  "激动": 3,
+  "撒娇": 5,
+  "担心": 2,
+  "难过": 0,
+  "感动": 4,
+  "害羞": 5,
+};
+
+function inferRuntimeState(
+  userInput: string,
+  llmReply: string,
+  toolCalled: boolean
+): Pick<RuntimeState, "status"> {
+  if (toolCalled) return { status: "工作中" };
+
+  const text = userInput + llmReply;
+
+  if (STATUS_KEYWORDS["聆听中"].test(text)) {
+    return { status: "聆听中" };
+  }
+
+  if (STATUS_KEYWORDS["思考中"].test(text)) {
+    return { status: "思考中" };
+  }
+
+  return { status: "陪伴中" };
+}
+
+function parseObserverFeeling(text: string): string | null {
+  const payload = extractJsonPayload(text);
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const feeling = typeof record.feeling === "string" ? record.feeling : null;
+  const validFeelings = ["平静","开心","温柔","激动","撒娇","担心","难过","感动","害羞"];
+  return feeling && validFeelings.includes(feeling) ? feeling : null;
+}
+
+function buildChatCompletionsUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  if (trimmed.endsWith("/chat/completions")) return trimmed;
+  return `${trimmed}/chat/completions`;
+}
+
+function normalizeChatMessages(input: unknown): ChatContextMessage[] {
+  return normalizeChatMessagesWithTime(input);
+}
+
+function getApiLogPath(): string {
+  return path.join(app.getPath("userData"), "chat-api.log");
+}
+
+function appendApiLog(
+  label: string,
+  requestMessages: Array<{ role: string; content: string }>,
+  rawResponse: string,
+  cleanedResponse: string,
+): void {
+  try {
+    const now = new Date().toISOString();
+    const entry = [
+      "=".repeat(80),
+      `[${now}] ${label}`,
+      "-".repeat(40) + " REQUEST " + "-".repeat(40),
+      JSON.stringify(requestMessages, null, 2),
+      "-".repeat(40) + " RAW RESPONSE " + "-".repeat(40),
+      rawResponse,
+      "-".repeat(40) + " CLEANED " + "-".repeat(40),
+      cleanedResponse || "(empty)",
+      "=".repeat(80),
+      "",
+    ].join(os.EOL);
+    fs.appendFileSync(getApiLogPath(), entry, "utf8");
+  } catch {
+    // silent
+  }
+}
+
+async function callChatCompletionsStream(
+  settings: ModelSettings,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  temperature: number | undefined,
+  timeoutMs: number,
+  label: string,
+  onChunk: (text: string) => void,
+  logTiming = true,
+): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const _startTime = Date.now();
+  if (logTiming) console.log(`[TIMING] ${label} START timeout=${timeoutMs}ms msgLen=${messages.length} sysLen=${messages[0]?.content?.length ?? 0}`);
+
+  // 拼 VendorConfig（settings 顶层三件套 + 镜像字段都参与）
+  const cfg: VendorConfig = {
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    apiKey: settings.apiKey,
+    explicitTransport: settings.explicitTransport,
+    reasoning: settings.reasoning,
+  };
+
+  try {
+    // adapter 三层 transport 解析（explicitTransport → baseUrl 启发式 → capabilities fallback）
+    const adapter = getAdapterForConfig(cfg);
+    // adapter 的 buildStreamRequest 内部已写 stream=true + 拼 transport 相关的 headers/body
+    const http = adapter.buildStreamRequest({
+      model: cfg.model,
+      messages,
+      ...(temperature !== undefined ? { temperature } : {}),
+      stream: true,
+    }, cfg);
+
+    const response = await fetch(http.url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: http.headers,
+      body: http.body,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({})) as Record<string, unknown>;
+      const errMsg = (errorData as { error?: { message?: string } }).error?.message;
+      throw new Error(errMsg || `模型请求失败：HTTP ${response.status}`);
+    }
+
+    if (!response.body) {
+      throw new Error("响应体为空，不支持流式读取");
+    }
+
+    let fullText = "";
+    const visibleFilter = createVisibleStreamFilter();
+
+    // Reader 层切分字节流 → StreamEvent；adapter 解析为 StreamChunk
+    // 半行拼接、event 块切分等状态由 createSseReader 内部维护，adapter 保持纯函数无状态。
+    for await (const event of createSseReader(adapter, response.body)) {
+      const chunk = adapter.parseStreamEvent(event);
+      if (!chunk) continue;
+      if (chunk.deltaText) {
+        fullText += chunk.deltaText;
+        const visibleDelta = visibleFilter.push(chunk.deltaText);
+        if (visibleDelta) onChunk(visibleDelta);
+      }
+      // thinking 累积但不入可见流（stripThinkBlocks 末尾统一剥）
+      if (chunk.usage) {
+        recordUsage(chunk.usage.input, chunk.usage.output, 1);
+      }
+      if (chunk.done) break;
+    }
+
+    const visibleTail = visibleFilter.flush();
+    if (visibleTail) {
+      onChunk(visibleTail);
+    }
+
+    const result = stripThinkBlocks(fullText);
+    if (logTiming) console.log(`[TIMING] ${label} OK in ${Date.now() - _startTime}ms resultLen=${result.length}`);
+    appendApiLog(label, messages, fullText, result);
+    return result;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      if (logTiming) console.log(`[TIMING] ${label} TIMEOUT at ${Date.now() - _startTime}ms`);
+      throw new Error("模型请求超时，请稍后重试。");
+    }
+    if (logTiming) console.log(`[TIMING] ${label} ERROR at ${Date.now() - _startTime}ms: ${err instanceof Error ? err.message : err}`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
+// Legacy wrapper for non-streaming calls (e.g. observer)
+async function callChatCompletions(
+  settings: ModelSettings,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  temperature: number | undefined,
+  timeoutMs: number,
+  label: string,
+  logTiming = true,
+): Promise<string> {
+  return callChatCompletionsStream(settings, messages, temperature, timeoutMs, label, () => {}, logTiming);
+}
+
+/**
+ * 非流式 chat completions 调用（CITA 专用）。
+ * CITA 不需要流式输出（它只要完整 JSON），非流式比流式快 ~2 倍。
+ * 支持 reasoningOverride 强制关闭 reasoning（CITA 不需要深度推理）。
+ */
+async function callChatCompletionsNonStream(
+  settings: ModelSettings,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  temperature: number | undefined,
+  timeoutMs: number,
+  label: string,
+  reasoningOverride?: ModelSettings["reasoning"],
+  options?: {
+    structuredOutput?: StructuredOutputRequest;
+    maxTokens?: number;
+    extraBody?: Record<string, unknown>;
+  },
+  signal?: AbortSignal,
+): Promise<{
+  text: string;
+  thinking?: string;
+  finishReason: string;
+  refusal?: string;
+}> {
+  const cfg: VendorConfig = {
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    apiKey: settings.apiKey,
+    explicitTransport: settings.explicitTransport,
+    reasoning: reasoningOverride ?? settings.reasoning,
+  };
+  const adapter = getAdapterForConfig(cfg);
+  const http = adapter.buildRequest({
+    model: cfg.model,
+    messages,
+    ...(temperature !== undefined ? { temperature } : {}),
+    stream: false,
+    ...(options?.structuredOutput ? { structuredOutput: options.structuredOutput } : {}),
+    ...(options?.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+    ...(options?.extraBody ? { extraBody: options.extraBody } : {}),
+  }, cfg);
+
+  const controller = new AbortController();
+  const abort = (): void => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const startTime = Date.now();
+  console.log(`[TIMING] ${label} START (non-stream) timeout=${timeoutMs}ms msgLen=${messages.length} sysLen=${messages[0]?.content?.length ?? 0}`);
+
+  try {
+    const response = await fetch(http.url, {
+      method: "POST",
+      headers: http.headers,
+      body: http.body,
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({})) as Record<string, unknown>;
+      const errMsg = (errorData as { error?: { message?: string } }).error?.message;
+      throw new Error(errMsg || `模型请求失败：HTTP ${response.status}`);
+    }
+    const json = await response.json();
+    const parsed = adapter.parseResponse(json);
+    if (parsed.usage) {
+      recordUsage(parsed.usage.input, parsed.usage.output, 1);
+    }
+    const totalTime = Date.now() - startTime;
+    console.log(`[TIMING] ${label} OK in ${totalTime}ms resultLen=${parsed.text.length}`);
+    return {
+      text: parsed.text,
+      thinking: parsed.thinking,
+      finishReason: parsed.finishReason,
+      refusal: parsed.refusal,
+    };
+  } catch (error) {
+    const totalTime = Date.now() - startTime;
+    if (error instanceof Error && error.name === "AbortError") {
+      console.log(`[TIMING] ${label} TIMEOUT at ${totalTime}ms`);
+    } else {
+      console.log(`[TIMING] ${label} ERROR at ${totalTime}ms: ${error}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
+const citaService = new CitaService({
+  store: new ContextStore(),
+  engine: new RemoteSemanticEngine(
+    async (request, signal) => callChatCompletionsNonStream(
+      loadModelSettings(),
+      [
+        { role: "system", content: request.systemPrompt },
+        { role: "user", content: request.userPrompt },
+      ],
+      0,
+      6_000,
+      "CITA understandTurn",
+      { mode: "off" as const },
+      {
+        structuredOutput: request.structuredOutput,
+        maxTokens: request.maxTokens,
+        extraBody: request.extraBody,
+      },
+      signal,
+    ),
+    {
+      timeoutMs: 8_000,
+      systemPrompt: loadPromptFile("cita_system.md"),
+      getProfile: () => {
+        const settings = loadModelSettings();
+        const cfg: VendorConfig = {
+          provider: settings.provider,
+          baseUrl: settings.baseUrl,
+          model: settings.model,
+          apiKey: settings.apiKey,
+          explicitTransport: settings.explicitTransport,
+          reasoning: { mode: "off" },
+        };
+        const adapter = getAdapterForConfig(cfg);
+        return resolveStructuredOutputProfile({
+          provider: adapter.id,
+          model: cfg.model,
+          transport: adapter.transport,
+          endpointKind: classifyStructuredOutputEndpoint({
+            providerId: adapter.id,
+            configuredBaseUrl: cfg.baseUrl,
+            officialBaseUrl: adapter.capability.baseUrl,
+          }),
+        });
+      },
+    },
+  ),
+  getSettings: () => normalizeCitaSettings({
+    enabled: loadGeneralSettings().citaEnabled,
+    semanticEngine: loadGeneralSettings().citaSemanticEngine,
+  }),
+});
+
+function loadPromptFile(filename: string): string {
+  try {
+    const filePath = path.join(app.getAppPath(), "prompts", filename);
+    if (!fs.existsSync(filePath)) return "";
+    return fs.readFileSync(filePath, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function getCustomStylePromptPath(): string {
+  return path.join(app.getPath("userData"), "styles", "custom", "custom.md");
+}
+
+function ensureCustomStylePrompt(): string {
+  const targetPath = getCustomStylePromptPath();
+  if (fs.existsSync(targetPath)) return targetPath;
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const templatePath = path.join(app.getAppPath(), "prompts", "styles", "custom", "custom.md");
+  if (fs.existsSync(templatePath)) {
+    fs.copyFileSync(templatePath, targetPath);
+  } else {
+    fs.writeFileSync(targetPath, "", "utf8");
+  }
+  return targetPath;
+}
+
+function readStylePrompt(styleId: StyleId): string {
+  if (styleId === "custom") {
+    const filePath = ensureCustomStylePrompt();
+    return fs.readFileSync(filePath, "utf8").trim();
+  }
+  return loadPromptFile("styles/" + STYLE_FILE_BY_ID[styleId]);
+}
+
+function resolveSoulSamplingForStyle(input: {
+  styleId: StyleId;
+  settings: { provider: string; model: string; reasoning?: ReasoningPreference };
+  customStyle: CustomStyleConfig;
+}) {
+  const capability = getCapabilityOrOpenAI(input.settings.provider);
+  const preference = resolveStylePreference(input.styleId, input.customStyle);
+  return resolveApprovedStyleSampling({
+    providerId: capability.id,
+    model: input.settings.model,
+    reasoning: input.settings.reasoning ?? { mode: "auto" },
+    preference,
+  });
+}
+
+/**
+ * 诊断：确认 WorldBook active entries 是否真正进入最终 system prompt，
+ * 以及在什么位置。不预设结论——先看数据再判断是 lost-in-middle、
+ * 被后续 prompt 覆盖、还是根本没拼进去。
+ */
+function logWorldbookInjection(alwaysOnContext: string, systemContent: string): void {
+  const marker = "【已激活的世界知识】";
+  if (alwaysOnContext && alwaysOnContext.includes(marker)) {
+    const wbStart = systemContent.indexOf(marker);
+    console.log("[Worldbook/Diag] ────────────────────────");
+    console.log(`[Worldbook/Diag] systemContent total length: ${systemContent.length}`);
+    console.log(`[Worldbook/Diag] alwaysOnContext length: ${alwaysOnContext.length}`);
+    console.log(`[Worldbook/Diag] ${marker} 在 systemContent 中的偏移: ${wbStart} / ${systemContent.length} (${((wbStart / systemContent.length) * 100).toFixed(1)}%)`);
+    console.log(`[Worldbook/Diag] ${marker} 之后剩余内容: ${systemContent.length - wbStart} 字符`);
+    const beforeWb = systemContent.slice(Math.max(0, wbStart - 200), wbStart);
+    const wbSlice = systemContent.slice(wbStart, Math.min(wbStart + alwaysOnContext.length + 200, systemContent.length));
+    console.log(`[Worldbook/Diag] ── 注入前 200 字 ──\n${beforeWb.slice(-200)}`);
+    console.log(`[Worldbook/Diag] ── 注入内容 + 后 200 字 ──\n${wbSlice.slice(0, 800)}`);
+    console.log("[Worldbook/Diag] ────────────────────────");
+  } else {
+    console.log("[Worldbook/Diag] 本轮无世界知识注入（alwaysOnContext 为空或不含标记）");
+  }
+}
+
+function buildSystemPrompt(styleFile: string, includeStyle = true): string {
+  const parts: string[] = [];
+
+  // Chat 模式使用独立基础规则；仍兼容旧调用方传入的 "talk"。
+  const isChatMode = styleFile.startsWith("chat") || styleFile.startsWith("talk");
+  const system = loadPromptFile(isChatMode ? "chat_system.md" : "system.md");
+  if (system) parts.push(system);
+
+  // 新链路由 build-options 独立注入 style Prompt；旧调用方仍可选择在这里附加 style 文件。
+  if (includeStyle && !isChatMode) {
+    const style = loadPromptFile("styles/" + styleFile);
+    if (style) parts.push(style);
+  }
+
+  return composeCharacterSystemPrompt({
+    applicationPolicy: parts.join("\n\n---\n\n"),
+    character: getActiveCharacterText(),
+    mode: isChatMode ? "talk" : "chat",
+    styleFile: includeStyle ? styleFile : undefined,
+  });
+}
+
+function buildProactivePersonaPrompt(): string {
+  const character = getActiveCharacterText();
+  return composeCharacterSystemPrompt({
+    applicationPolicy: [loadPromptFile("application_policy.md"), loadPromptFile("chat_system.md")]
+      .filter(Boolean)
+      .join("\n\n---\n\n"),
+    character: {
+      ...character,
+      // 主动轮完全不携带工具说明；内置 Soul 尾部的 Live2D/联网章节由正常聊天使用。
+      soul: character.soul.split("\n## Live2D 与聊天文字的分工")[0].trim(),
+    },
+    mode: "proactive",
+    styleFile: "01_default.md",
+  });
+}
+
+function toProactiveHistory(messages: Array<{ role: "user" | "model"; content: string; at: number }>): ProactiveHistoryTurn[] {
+  return messages
+    .filter((message) => message.content.trim())
+    .slice(-16)
+    .map((message) => ({ role: message.role, content: message.content, at: message.at }));
+}
+
+function getProactiveHistories(): { ordinary: ProactiveHistoryTurn[]; proactive: ProactiveHistoryTurn[] } {
+  const ordinaryMeta = chatsStore.listSessions().find((session) => session.purpose !== "proactive-chat");
+  const ordinarySession = ordinaryMeta ? chatsStore.getSession(ordinaryMeta.id) : null;
+  const proactiveSession = chatsStore.getSessionByPurpose("proactive-chat");
+  return {
+    ordinary: toProactiveHistory(ordinarySession?.messages ?? []),
+    proactive: toProactiveHistory(proactiveSession?.messages ?? []),
+  };
+}
+
+function getProactiveRuntimeSnapshot(): ProactiveRuntimeSnapshot {
+  const now = Date.now();
+  let idleSec = Number.POSITIVE_INFINITY;
+  try { idleSec = powerMonitor.getSystemIdleTime(); } catch { /* app 尚未 ready */ }
+  return {
+    now,
+    localHour: new Date(now).getHours(),
+    idleSec,
+    enabled: loadGeneralSettings().proactiveChatMode === "on",
+    conversationBusy: normalConversationBusyCount > 0,
+    generationBusy: false,
+    screenLocked: proactiveScreenLocked,
+  };
+}
+
+async function buildProactiveAgentMessages(candidate: ProactiveCandidate) {
+  const histories = getProactiveHistories();
+  const recentTopic = histories.ordinary.slice(-4).map((turn) => turn.content).join("\n");
+  const retrievalQuery = `${candidate.sceneId}\n${recentTopic}`.trim();
+  const [profileContext, memoryContext] = await Promise.all([
+    buildAlwaysOnContext(retrievalQuery, histories.ordinary.map((turn) => ({ role: turn.role, content: turn.content }))).catch(() => ""),
+    buildMemoryInjection(retrievalQuery).catch(() => ""),
+  ]);
+  const state = loadProactiveState();
+  const snapshot = getProactiveRuntimeSnapshot();
+  // 用户有效时区：resolver 校验后传给 prompt，禁止未校验的 profile.timezone。
+  const profile = loadUserProfile();
+  const timezone = resolveChatContextTimezone(profile.timezone);
+  return buildProactiveMessages({
+    basePersona: buildProactivePersonaPrompt(),
+    userProfile: profileContext,
+    relevantMemory: memoryContext,
+    ordinaryHistory: histories.ordinary,
+    proactiveHistory: histories.proactive,
+    sceneId: candidate.sceneId,
+    localNow: new Date(snapshot.now),
+    idleSec: snapshot.idleSec,
+    unansweredCount: state.unansweredCount,
+    timezone,
+  });
+}
+
+async function synthesizeProactiveSpeech(text: string): Promise<{ audioBase64: string; format: "wav" | "mp3" | "pcm"; durationMs: number } | null> {
+  const globalCfg = loadGeneralSettings();
+  if (!globalCfg.ttsAutoRead || globalCfg.ttsEngine === "off") return null;
+  const voice = getActiveCharacter().capabilities.voice;
+  if (voice.status !== "available") return null;
+  const voiceResolution = applyVoiceProfileToTtsSettings(voice.profile, globalCfg);
+  if (voiceResolution.status !== "available") return null;
+  const cfg = voiceResolution.settings;
+  try {
+    const result = await synthesizeByEngine(cfg.ttsEngine, {
+      text,
+      speed: cfg.ttsSpeed,
+      volume: cfg.ttsVolume,
+      apiKey: cfg.ttsEngine === "mimo" ? cfg.ttsMimoKey : (cfg.ttsEngine === "custom-cloud" ? cfg.ttsCustomCloudApiKey : cfg.ttsMinimaxKey),
+      voiceId: cfg.ttsEngine === "custom-cloud" ? cfg.ttsCustomCloudVoiceId : cfg.ttsMinimaxVoiceId,
+      model: cfg.ttsMinimaxModel,
+      baseUrl: cfg.ttsGptsovitsBaseUrl,
+      refAudioPath: cfg.ttsGptsovitsRefAudioPath,
+      promptText: cfg.ttsGptsovitsPromptText,
+      promptLang: cfg.ttsGptsovitsPromptLang,
+      textLang: cfg.ttsGptsovitsTextLang,
+      endpointUrl: cfg.ttsCustomCloudEndpointUrl,
+      timeoutMs: cfg.ttsCustomCloudTimeoutMs,
+      voiceAudioPath: cfg.ttsMimoVoiceAudioPath,
+      stylePrompt: cfg.ttsMimoStylePrompt,
+      format: cfg.ttsEngine === "gptsovits" ? cfg.ttsGptsovitsFormat : (cfg.ttsEngine === "custom-cloud" ? cfg.ttsCustomCloudFormat : "mp3"),
+    });
+    return {
+      audioBase64: result.audio.toString("base64"),
+      format: result.format,
+      durationMs: Math.max(1_500, Math.min(30_000, text.length * 180)),
+    };
+  } catch (error) {
+    console.warn("[Proactive] TTS 合成失败，保留文本消息:", error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+function updateNormalConversationBusy(delta: 1 | -1): void {
+  normalConversationBusyCount = Math.max(0, normalConversationBusyCount + delta);
+}
+
+const proactiveConversationLifecycle = {
+  onUserMessage: () => proactiveChatService?.invalidateForUserMessage(),
+  onConversationStarted: () => {
+    updateNormalConversationBusy(1);
+    proactiveChatService?.normalConversationStarted();
+  },
+  onConversationEnded: () => {
+    updateNormalConversationBusy(-1);
+    if (normalConversationBusyCount === 0) proactiveChatService?.normalConversationEnded();
+  },
+};
+
+function getProactiveCommitDecision(candidate: ProactiveCandidate, generationEpoch: number) {
+  return canCommitProactiveMessage(
+    getProactiveRuntimeSnapshot(),
+    loadProactiveState(),
+    candidate,
+    generationEpoch,
+  );
+}
+
+function recordProactiveDeliveryMetadata(input: ProactiveCommitInput): void {
+  // Opener 的 todayFired/recentItems 字段已整体废弃（依赖的 SCENE_CONFIGS 与 ShowBubblePayload 来自旧 opener 子系统）。
+  // ProactiveChat 这边只需持久化 committed 副作用；当前 implementation 已无副作用，留空占位即可。
+  void input;
+}
+
+async function commitLocalProactiveMessage(input: ProactiveCommitInput): Promise<ProactiveCommitResult> {
+  if (getActiveCharacter().id !== input.ownerCharacterId) {
+    return { kind: "cancelled", reason: "inactive_character" };
+  }
+  const initialDecision = getProactiveCommitDecision(input.candidate, input.generationEpoch);
+  if (!initialDecision.allowed) return { kind: "cancelled", reason: initialDecision.reason };
+
+  const session = chatsStore.getOrCreateSessionByPurpose("proactive-chat", {
+    title: `${getActiveCharacterText().displayName}的主动消息`,
+    identityId: null,
+  });
+  const at = Date.now();
+  const appended = chatsStore.appendMessage(session.id, {
+    id: randomUUID(),
+    role: "model",
+    content: input.text,
+    at,
+  });
+  if (!appended) throw new Error("主动聊天会话写入失败");
+  broadcastChatsChanged();
+
+  // 文本已落库；上次落库后没有 panel/show 步骤要做（opener 气泡已被移除，fallback 路径没有了）。
+  void input;
+  void at;
+  return { kind: "committed" };
+}
+
+async function commitSelectedProactiveMessage(input: ProactiveCommitInput): Promise<ProactiveCommitResult> {
+  if (getActiveCharacter().id !== input.ownerCharacterId) {
+    return { kind: "cancelled", reason: "inactive_character" };
+  }
+  const settings = loadGeneralSettings();
+  const target = settings.proactiveDeliveryTarget;
+  const result = await routeProactiveDelivery(target, {
+    commitLocal: () => commitLocalProactiveMessage(input),
+    commitChannel: async (channel) => {
+      const channelResult = await sendProactiveChannelMessage({
+        channel,
+        text: input.text,
+        mobileMessageSegmentation: settings.mobileMessageSegmentation,
+        manager: channelManager,
+        canContinue: () => {
+          if (getActiveCharacter().id !== input.ownerCharacterId) return false;
+          if (loadGeneralSettings().proactiveDeliveryTarget !== channel) return false;
+          return getProactiveCommitDecision(input.candidate, input.generationEpoch).allowed;
+        },
+      });
+      return channelResult.kind === "committed"
+        ? { kind: "committed" }
+        : { kind: "cancelled", reason: channelResult.reason };
+    },
+  });
+
+  if (result.kind === "committed" && getActiveCharacter().id === input.ownerCharacterId) {
+    recordProactiveDeliveryMetadata(input);
+  }
+  return result;
+}
+
+function initializeProactiveChatService(): void {
+  proactiveChatService = createProactiveChatService({
+    loadState: loadProactiveState,
+    saveState: (state) => {
+      saveProactiveState(state);
+    },
+    getSnapshot: getProactiveRuntimeSnapshot,
+    buildMessages: async (candidate) => buildProactiveAgentMessages(candidate),
+    runModel: async (messages) => {
+      const settings = loadModelSettings();
+      if (!settings.apiKey) return { kind: "error", reason: "missing_api_key" };
+      return runProactiveModel({
+        settings: {
+          provider: settings.provider,
+          baseUrl: settings.baseUrl,
+          model: settings.model,
+          apiKey: settings.apiKey,
+          explicitTransport: settings.explicitTransport,
+          reasoning: settings.reasoning,
+        },
+        messages,
+        timeoutMs: 45_000,
+      });
+    },
+    // Opener 的 preset fallback 已移除：model 失败时由 proactive-service 自身走 cancel 路径。
+    getFallback: async () => null,
+    canStartDelivery: () => {
+      const target = loadGeneralSettings().proactiveDeliveryTarget;
+      return target === "local" || canStartProactiveChannelDelivery(target, channelManager);
+    },
+    commitMessage: commitSelectedProactiveMessage,
+    getActiveCharacterId: () => getActiveCharacter().id,
+    log: (event, detail) => console.log(`[Proactive] ${event}`, detail ?? ""),
+  });
+
+  setChannelsConversationLifecycle(proactiveConversationLifecycle);
+
+  powerMonitor.on("lock-screen", () => {
+    proactiveScreenLocked = true;
+    proactiveChatService?.invalidate();
+  });
+  powerMonitor.on("unlock-screen", () => { proactiveScreenLocked = false; });
+  powerMonitor.on("suspend", () => {
+    proactiveScreenLocked = true;
+    proactiveChatService?.invalidate();
+  });
+  powerMonitor.on("resume", () => { proactiveScreenLocked = false; });
+}
+
+// ── 主动聊天触发器（60s 周期扫描 → evaluateCandidate） ─────────────
+// 闭包持有的 evaluation backoff Map（仅内存，重启后由 policy 持久化冷却接续）
+let proactiveTrigger: ProactiveTriggerController | null = null;
+const proactiveBackoffMap = new Map<string, number>();
+
+function initializeProactiveTrigger(): void {
+  if (proactiveTrigger) return; // 幂等
+  if (!proactiveChatService) {
+    console.warn("[Proactive] trigger skipped: service not initialized");
+    return;
+  }
+  const service = proactiveChatService;
+  proactiveTrigger = createProactiveTrigger({
+    evaluateCandidate: (c) => service.evaluateCandidate(c),
+    getRuntimeSnapshot: getProactiveRuntimeSnapshot,
+    getProactiveState: loadProactiveState,
+    getTimezone: () => resolveChatContextTimezone(loadUserProfile().timezone),
+    // getWeatherContext 第一版不传：未来天气缓存接入后填，函数体无需改
+    getLastEvaluatedAtByScene: () => new Map(proactiveBackoffMap),
+    setLastEvaluatedAtByScene: (next) => {
+      proactiveBackoffMap.clear();
+      for (const [k, v] of next) proactiveBackoffMap.set(k, v);
+    },
+  });
+  proactiveTrigger.start();
+}
+
+function stopProactiveTrigger(): void {
+  proactiveTrigger?.stop();
+  proactiveTrigger = null;
+}
+
+/**
+ * 工具阶段使用的 system prompt。
+ * 第一期：固定 tools_system.md 规则 + 运行时生成的工具目录。
+ * 不放任何人格 / 环境 / 记忆，避免人设污染工具决策。
+ */
+function buildToolSystemPrompt(enabledTools: ReadonlyArray<ToolDefinition>): string {
+  const base = scopeToolSystemRules(loadPromptFile("tools_system.md"), enabledTools);
+  const catalog = buildToolCatalog(enabledTools as ToolDefinition[]);
+  return [
+    base,
+    "## 当前可用工具",
+    catalog,
+  ].filter(Boolean).join("\n\n");
+}
+
+/**
+ * Soul 阶段使用的基础 system prompt。
+ * 包含：人设（system.md + identity.md + soul.md + canon + style）+ 后续可追加的环境/记忆等。
+ * 注意：工具结果（`role: "tool"` 消息）在 conversation 中已携带，本函数不重复注入。
+ * 第一期：build-options 会把 environmentContext / skillCatalog / toneInjection /
+ * alwaysOnContext / relationshipContext / attachmentContext 等都拼到 baseContent 末尾，
+ * 后续第二期再拆分为 toolEnvironmentContext / soulEnvironmentContext。
+ */
+function buildSoulSystemBasePrompt(styleFile: string): string {
+  return buildSystemPrompt(styleFile, false);
+}
+
+/**
+ * /命令拦截：命中 /skill-id（且 skill 存在+启用）则返回 system 激活段
+ * （正文注入 system，user message 原样，不污染 memory，见 spec 6.3）。
+ * 命中但 skill 不存在/未启用 → 改写该 user 消息为提示，返回 ""。
+ * 未命中 → 返回 ""（放行，不误吞其他 /命令）。
+ */
+function resolveSlashActivation<T extends { role: string; content: string }>(messages: T[]): string {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx < 0) return "";
+  const lastUser = messages[lastUserIdx];
+  if (typeof lastUser.content !== "string") return "";
+  const knownIds = skillRegistry.getAll().map(s => s.id);
+  const parsed = parseSlashCommand(lastUser.content, knownIds);
+  if (!parsed.hit || !parsed.skillId) return "";
+  const skill = skillRegistry.getById(parsed.skillId);
+  if (skill && skill.enabled && skillRegistry.isAvailable(parsed.skillId)) {
+    const body = skillRegistry.getBody(parsed.skillId);
+    if (body !== null) {
+      console.log("[Cyrene] /命令激活 skill:", parsed.skillId);
+      return `\n\n---\n\n[已激活 skill: ${parsed.skillId}]\n${body}`;
+    }
+    return "";
+  }
+  // skill 不存在/未启用：替换该 user 消息为提示
+  const available = skillRegistry.getEnabled().map(s => s.id).join(", ") || "(无)";
+  messages[lastUserIdx] = { ...lastUser, content: `[系统提示：skill 未启用或不存在: ${parsed.skillId}。可用 skill: ${available}]` } as T;
+  return "";
+}
+
+function loadSoulFeelingContext(): string {
+  return getActiveCharacterText().soul;
+}
+
+async function observeRuntimeState(
+  settings: ModelSettings,
+  recentMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  latestUserText: string,
+  chatContent: string,
+): Promise<void> {
+  const recentDialogue = [...recentMessages.slice(-8), { role: "assistant" as const, content: chatContent }]
+    .filter((message) => message.role !== "system")
+    .slice(-6)
+    .map((message) => ({ role: message.role, content: message.content }));
+
+  // 入 LLM 后台队列：和 MemoryJudge 串行执行，避免并发触发限流；
+  // 限流自动退避 5s 重试 1 次。.catch 吞错误，不影响主流程。
+  enqueueLLMTask("心情观察器", async () => {
+    const observerContent = await callChatCompletions(settings, [
+      {
+        role: "system",
+        content:
+          `你是一个情绪分析器。以下是${getActiveCharacterText().displayName}的完整人格设定：\n\n${loadSoulFeelingContext()}\n\n根据以上人格设定和以下对话，判断${getActiveCharacterText().displayName}当前的心情状态。可选心情值（只能选其中一个）：平静 / 开心 / 温柔 / 激动 / 撒娇 / 担心 / 难过 / 感动 / 害羞。只返回 JSON，不要任何多余文字：{"feeling": "心情值"}。判断规则：以最后一轮对话为主，之前几轮为辅；判断的是角色的心情，不是用户的心情；无法判断时返回 平静。`,
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          recentDialogue,
+        }),
+      },
+    ], undefined, 30000, "心情观察器", false);
+    const feeling = parseObserverFeeling(observerContent);
+    if (feeling) {
+      const smoothed = smoothFeeling(feelingScores, feeling);
+      feelingScores = smoothed.scores;
+      runtimeState.feeling = smoothed.feeling as RuntimeFeeling;
+      runtimeState.expression = feelingToExpression[smoothed.feeling] ?? 0;
+      runtimeState.updatedAt = Date.now();
+      broadcastRuntimeStateChanged();
+    }
+  }, { log: false }).catch((err) => {
+    console.warn("[Cyrene] observe runtime failed; keeping current feeling:", err);
+  });
+  // 标注未使用的参数，避免 lint 警告
+  void latestUserText;
+}
+
+// 厂商短名映射（与 settings.ts 的 MODEL_PRESETS.shortName 镜像，需手动同步）。
+// 状态栏"正在喂养"在用户没填昵称时用这个兜底。
+const PROVIDER_SHORT_NAMES: Record<string, string> = {
+  "MiniMax（稀宇科技）": "MiniMax",
+  "DeepSeek（深度求索）": "DeepSeek",
+  "豆包（火山方舟）": "豆包",
+  "GLM（智谱）": "GLM",
+  "Kimi（月之暗面）": "Kimi",
+  "Qwen（通义千问）": "Qwen",
+  "ChatGPT（OpenAI）": "ChatGPT",
+  "Claude（Anthropic）": "Claude",
+};
+
+function getPublicModelConfig(settings = loadModelSettings()): PublicModelConfig {
+  return {
+    mode: settings.mode,
+    provider: settings.provider,
+    displayName: settings.displayName,
+    shortName: PROVIDER_SHORT_NAMES[settings.provider] ?? settings.provider,
+    model: settings.model,
+    connected: Boolean(settings.apiKey),
+    runtimeSync: settings.runtimeSync,
+    stickerSize: settings.stickerSize,
+    rerankerMode: settings.rerankerMode,
+  };
+}
+
+function broadcastToAuxWindows(channel: string, payload: unknown): void {
+  for (const win of [chatWindow, sidebarWindow, tasksWindow, settingsWindow]) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(channel, payload);
+    }
+  }
+}
+
+function broadcastUiThemeChanged(theme: GeneralSettings["uiTheme"]): void {
+  for (const win of [mainWindow, chatWindow, sidebarWindow, tasksWindow, settingsWindow, stickerManagerWindow, callWindow]) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(IPC.UI_THEME_CHANGED, theme);
+    }
+  }
+}
+
+function broadcastUiFontChanged(font: GeneralSettings["uiFont"]): void {
+  for (const win of [mainWindow, chatWindow, sidebarWindow, tasksWindow, settingsWindow, stickerManagerWindow, callWindow]) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(IPC.UI_FONT_CHANGED, font);
+    }
+  }
+}
+
+function broadcastModelConfigChanged(settings = loadModelSettings()): void {
+  broadcastToAuxWindows(IPC.MODEL_CONFIG_CHANGED, getPublicModelConfig(settings));
+}
+
+function broadcastRuntimeStateChanged(): void {
+  broadcastToAuxWindows(IPC.RUNTIME_STATE_CHANGED, runtimeState);
+}
+
+export function sendToLive2DWindow(channel: string, payload?: unknown): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (payload === undefined) win.webContents.send(channel);
+  else win.webContents.send(channel, payload);
+}
+
+function openExternalUrl(url: string): boolean {
+  if (!url.startsWith("http://") && !url.startsWith("https://")) return false;
+  if (isDev && url.startsWith("http://localhost:5173")) return false;
+  void shell.openExternal(url);
+  return true;
+}
+
+function attachExternalLinkHandler(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    return openExternalUrl(url) ? { action: "deny" } : { action: "allow" };
+  });
+
+  win.webContents.on("will-navigate", (event, url) => {
+    if (openExternalUrl(url)) {
+      event.preventDefault();
+    }
+  });
+}
+function createWindow(): void {
+  const settings = loadGeneralSettings();
+  let restoreX: number | undefined;
+  let restoreY: number | undefined;
+
+  if (settings.petWindowX !== undefined && settings.petWindowY !== undefined) {
+    const PET_W = PET_WINDOW_BASE_WIDTH;
+    const PET_H = PET_WINDOW_BASE_HEIGHT;
+    const targetBounds = {
+      x: settings.petWindowX,
+      y: settings.petWindowY,
+      width: PET_W,
+      height: PET_H,
+    };
+    const display = screen.getDisplayMatching(targetBounds);
+    const wa = display.workArea;
+
+    // 窗口与 workArea 交集至少 80x80 才使用保存的坐标
+    const interW =
+      Math.min(targetBounds.x + PET_W, wa.x + wa.width) -
+      Math.max(targetBounds.x, wa.x);
+    const interH =
+      Math.min(targetBounds.y + PET_H, wa.y + wa.height) -
+      Math.max(targetBounds.y, wa.y);
+
+    if (interW >= 80 && interH >= 80) {
+      restoreX = settings.petWindowX;
+      restoreY = settings.petWindowY;
+    } else {
+      console.log(
+        "[Cyrene] 桌宠保存位置已离屏（仅 " +
+          interW + "x" + interH + " 可见），使用默认位置",
+      );
+    }
+  }
+
+  mainWindow = new BrowserWindow({
+    x: restoreX,
+    y: restoreY,
+    width: PET_WINDOW_BASE_WIDTH,
+    height: PET_WINDOW_BASE_HEIGHT,
+    transparent: true,
+    frame: false,
+    skipTaskbar: true,
+    resizable: false,
+    hasShadow: false,
+    icon: getCurrentAppIconPath(),
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  live2dWindowLifecycle.attach(mainWindow);
+
+  if (isDev) {
+    mainWindow.loadURL("http://localhost:5173");
+  } else {
+    mainWindow.loadFile(path.join(__dirname, "..", "..", "renderer", "index.html"));
+  }
+
+  if (!isDev) {
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  }
+
+  mainWindow.on("hide", () => {
+    mainWindow?.webContents.send(IPC.PET_VISIBILITY_CHANGED, false);
+  });
+  mainWindow.on("show", () => {
+    mainWindow?.webContents.send(IPC.PET_VISIBILITY_CHANGED, true);
+  });
+
+  applyGeneralSettings(loadGeneralSettings());
+
+  // 注入天气工具配置获取器：每次工具执行时实时读 key/默认城市
+  // （用户改了设置不用重启就能生效）
+  setWeatherConfig(
+    () => loadUserProfile().defaultCity,
+    () => loadGeneralSettings().weatherSource,
+    () => loadGeneralSettings().amapKey,
+    // 天气卡片回调：工具拿到结构化数据后，发 Custom 事件给聊天窗口渲染卡片
+    (card) => {
+      if (chatWindow && !chatWindow.isDestroyed()) {
+        chatWindow.webContents.send(IPC.AGUI_EVENT, {
+          type: "CUSTOM",
+          name: "cyrene.weather",
+          value: card,
+        });
+      }
+    },
+    () => loadGeneralSettings().weatherEnabled,
+  );
+
+  // 注入用户时区 getter：工具侧通过 currentUserTimezone() 统一拿用户时区（缺/非法回退 Asia/Shanghai）
+  setUserTimezoneConfig(() => loadUserProfile().timezone);
+
+  // 注入用户选择卡片回调：工具调 ask_user_choice 时发 Custom 事件给聊天窗口
+  setChoiceCardSender((cardData) => {
+    if (chatWindow && !chatWindow.isDestroyed()) {
+      chatWindow.webContents.send(IPC.AGUI_EVENT, {
+        type: "CUSTOM",
+        name: "cyrene.choice",
+        value: cardData,
+      });
+    }
+  });
+
+  // 注入搜索配置获取器
+  setSearchConfig(
+    () => loadGeneralSettings().searchEngine,
+    () => loadGeneralSettings().searchBochaKey,
+    () => loadGeneralSettings().searchTavilyKey,
+  );
+
+  // 注入出行工具 amapKey 获取器（复用 GeneralSettings 中的 amapKey）
+  setTravelConfig(() => loadGeneralSettings().amapKey, () => loadGeneralSettings().travelEnabled);
+
+  // 注入邮件工具 SMTP 配置获取器（每次执行实时读 GeneralSettings）
+  setEmailConfig(
+    () => loadGeneralSettings().emailEnabled,
+    () => loadGeneralSettings().emailSmtpHost,
+    () => loadGeneralSettings().emailSmtpPort,
+    () => loadGeneralSettings().emailSmtpSecure,
+    () => loadGeneralSettings().emailSmtpUser,
+    () => loadGeneralSettings().emailSmtpPass,
+    () => loadGeneralSettings().emailFromName,
+  );
+
+  // 注入 ASR 配置获取器（通话功能用，实时读 GeneralSettings）
+  setAsrConfig(() => {
+    const s = loadGeneralSettings();
+    if (s.asrEngine === "off") return null;
+    return {
+      engine: s.asrEngine,
+      language: s.asrLanguage,
+      appKey: s.asrAliyunAppKey,
+      accessKeyId: s.asrAliyunAccessKeyId,
+      accessKeySecret: s.asrAliyunAccessKeySecret,
+      localRoot: s.asrLocalRoot,
+      localModelPath: s.asrLocalModelPath,
+      localTimeoutMs: s.asrLocalTimeoutMs,
+      localSystemPrompt: s.asrLocalSystemPrompt,
+    };
+  });
+
+  // 注入通话模型/TTS 配置获取器
+  setCallSettings(
+    () => {
+      const s = loadModelSettings();
+      return { provider: s.provider, baseUrl: s.baseUrl, model: s.model, apiKey: s.apiKey };
+    },
+    () => {
+      const s = loadGeneralSettings();
+      return {
+        ttsEngine: s.ttsEngine,
+        ttsMinimaxKey: s.ttsMinimaxKey, ttsMinimaxVoiceId: s.ttsMinimaxVoiceId,
+        ttsMinimaxModel: s.ttsMinimaxModel,
+        ttsSpeed: s.ttsSpeed, ttsVolume: s.ttsVolume,
+        ttsGptsovitsBaseUrl: s.ttsGptsovitsBaseUrl,
+        ttsGptsovitsRefAudioPath: s.ttsGptsovitsRefAudioPath,
+        ttsGptsovitsPromptText: s.ttsGptsovitsPromptText,
+        ttsGptsovitsPromptLang: s.ttsGptsovitsPromptLang,
+        ttsGptsovitsTextLang: s.ttsGptsovitsTextLang,
+        ttsGptsovitsFormat: s.ttsGptsovitsFormat,
+        ttsCustomCloudEndpointUrl: s.ttsCustomCloudEndpointUrl,
+        ttsCustomCloudApiKey: s.ttsCustomCloudApiKey,
+        ttsCustomCloudVoiceId: s.ttsCustomCloudVoiceId,
+        ttsCustomCloudFormat: s.ttsCustomCloudFormat,
+        ttsCustomCloudTimeoutMs: s.ttsCustomCloudTimeoutMs,
+        ttsMimoKey: s.ttsMimoKey,
+        ttsMimoVoiceAudioPath: s.ttsMimoVoiceAudioPath,
+        ttsMimoStylePrompt: s.ttsMimoStylePrompt,
+      };
+    },
+    // 通话专用 system prompt 构建器（时间+常驻+记忆+phone人设+skill+语气，不要环境上下文）
+    async (userText: string) => {
+      const messages = [{ role: "user" as const, content: userText }];
+
+      // ① 时间日期（用用户时区，禁止直接喂未校验的 profile.timezone 给 Intl）
+      const now = new Date();
+      const userTz = resolveChatContextTimezone(loadUserProfile().timezone);
+      const timeStr = `当前时间：${now.toLocaleDateString("zh-CN", { timeZone: userTz })} ${now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", timeZone: userTz })}`;
+
+      // ② 常驻上下文（世界书 + L0/L1 画像）
+      let alwaysOnContext = "";
+      try { alwaysOnContext = await buildAlwaysOnContext(userText, messages); } catch { /* ignore */ }
+
+      // ③ 记忆注入
+      let memoryInjection = "";
+      try { memoryInjection = await buildMemoryInjection(userText); } catch { /* ignore */ }
+
+      // ④ 通话专用应用规则 + 活动角色内容
+      const phonePrompt = composeCharacterSystemPrompt({
+        applicationPolicy: [loadPromptFile("application_policy.md"), loadPromptFile("phone_system.md")]
+          .filter(Boolean)
+          .join("\n\n---\n\n"),
+        character: getActiveCharacterText(),
+        mode: "phone",
+      });
+
+      // ⑤ Skill 约束
+      const skillCatalog = buildSkillCatalog(skillRegistry.getEnabled());
+      const skillActivation = resolveSlashActivation(messages);
+
+      // ⑥ 语气注入
+      let toneInjection = "";
+      const sceneProvider = getSceneEmbeddingProvider();
+      if (sceneProvider && sceneEmbeddingIndex) {
+        try { toneInjection = await buildToneInjection(userText, messages, sceneProvider, sceneEmbeddingIndex); } catch { /* ignore */ }
+      }
+
+      return timeStr + "\n\n" +
+        (alwaysOnContext ? alwaysOnContext + "\n\n" : "") +
+        (memoryInjection ? memoryInjection + "\n\n" : "") +
+        phonePrompt +
+        (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
+        skillActivation +
+        toneInjection;
+    },
+    // 天气快捷处理：正则匹配到天气关键词 → 调 weather 工具的 execute
+    async (userText: string) => {
+      try {
+        const weatherTool = toolRegistry.getById("weather");
+        if (!weatherTool) return null;
+        // 提取城市名（简单匹配：XX天气 / XX的天气）
+        const cityMatch = userText.match(/([北京上海广州深圳成都杭州南京武汉西安重庆天津苏州长沙郑州青岛大连沈阳哈尔滨长春济南太原合肥南昌福州昆明贵阳拉萨乌鲁木齐呼和浩特]+)/);
+        const city = cityMatch?.[1] ?? "";
+        const result = await weatherTool.execute({ city }, undefined);
+        return result;
+      } catch (err) {
+        console.warn("[Call] 天气查询失败:", err);
+        return null;
+      }
+    },
+  );
+
+  // 注入子代理 LLM 配置（delegate_task 工具用，复用主模型配置）
+  setDelegateSettings(() => {
+    const s = loadModelSettings();
+    return { provider: s.provider, baseUrl: s.baseUrl, model: s.model, apiKey: s.apiKey };
+  });
+
+  mainWindow.on("closed", () => {
+    petWindowMoveController.dispose();
+    live2dWindowLifecycle.clear(mainWindow ?? undefined);
+    mainWindow = null;
+  });
+}
+
+
+function createChatWindow(sessionId?: string): void {
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.show();
+    chatWindow.focus();
+    // 窗口已存在：通过事件让渲染进程切到目标会话（不重 load）
+    if (sessionId) {
+      chatWindow.webContents.send(IPC.CHATS_SWITCH_SESSION, sessionId);
+    }
+    return;
+  }
+
+  const layout = computeLayout();
+  chatWindow = new BrowserWindow({
+    x: layout.chat.x,
+    y: layout.chat.y,
+    width: 1280,
+    height: 760,
+    minWidth: 960,
+    minHeight: 540,
+    title: "Cyrene · 聊天",
+    icon: getCurrentAppIconPath(),
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  // 通过 URL query 把目标 sessionId 带给渲染进程（首次加载用），
+  // 后续切换走 CHATS_SWITCH_SESSION 事件，避免重新加载页面。
+  const queryString = sessionId ? "?sessionId=" + encodeURIComponent(sessionId) : "";
+  if (isDev) {
+    chatWindow.loadURL("http://localhost:5173/chat/" + queryString);
+  } else {
+    chatWindow.loadFile(
+      path.join(__dirname, "..", "..", "renderer", "chat", "index.html"),
+      sessionId ? { search: queryString } : undefined,
+    );
+  }
+
+  chatWindow.once("ready-to-show", () => {
+    chatWindow?.show();
+  });
+
+  chatWindow.on("closed", () => {
+    chatWindow = null;
+    // 聊天窗口关闭后清空活跃 sessionId 广播，让设置面板的"删除当前会话"
+    // 提示文案恢复成普通的"确定删除？"
+    activeChatSessionId = null;
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      try { win.webContents.send(IPC.CHATS_ACTIVE_SESSION_CHANGED, null); } catch { /* ignore */ }
+    }
+  });
+}
+
+function createSidebarWindow(): void {
+  if (sidebarWindow && !sidebarWindow.isDestroyed()) {
+    sidebarWindow.show();
+    sidebarWindow.focus();
+    return;
+  }
+
+  const layout = computeLayout();
+  sidebarWindow = new BrowserWindow({
+    x: layout.sidebar.x,
+    y: layout.sidebar.y,
+    width: 320,
+    height: 760,
+    minWidth: 56,
+    minHeight: 540,
+    title: `${getActiveCharacterText().displayName} · 状态`,
+    icon: getCurrentAppIconPath(),
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  if (isDev) {
+    sidebarWindow.loadURL("http://localhost:5173/sidebar/");
+  } else {
+    sidebarWindow.loadFile(
+      path.join(__dirname, "..", "..", "renderer", "sidebar", "index.html")
+    );
+  }
+
+  sidebarWindow.once("ready-to-show", () => {
+    sidebarWindow?.show();
+  });
+
+  sidebarWindow.on("closed", () => {
+    sidebarWindow = null;
+  });
+}
+
+function createTasksWindow(): void {
+  if (tasksWindow && !tasksWindow.isDestroyed()) {
+    tasksWindow.show();
+    tasksWindow.focus();
+    return;
+  }
+
+  const layout = computeLayout();
+  tasksWindow = new BrowserWindow({
+    x: layout.tasks.x,
+    y: layout.tasks.y,
+    width: 320,
+    height: 760,
+    minHeight: 540,
+    title: "Cyrene Agent · 今日日程",
+    icon: getCurrentAppIconPath(),
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  if (isDev) {
+    tasksWindow.loadURL("http://localhost:5173/tasks/");
+  } else {
+    tasksWindow.loadFile(
+      path.join(__dirname, "..", "..", "renderer", "tasks", "index.html")
+    );
+  }
+
+  tasksWindow.once("ready-to-show", () => {
+    tasksWindow?.show();
+  });
+
+  tasksWindow.on("closed", () => {
+    tasksWindow = null;
+  });
+}
+
+function createSettingsWindow(section?: string): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show();
+    settingsWindow.focus();
+    // 窗口已存在：发事件让 settings 页切标签（loadURL 不会重新触发）
+    if (section) {
+      settingsWindow.webContents.send(IPC.SETTINGS_SWITCH_SECTION, section);
+    }
+    return;
+  }
+
+  const display = screen.getPrimaryDisplay();
+  const { x: dx, y: dy, width: dw, height: dh } = display.workArea;
+  const width = 1060;
+  const height = 920;
+  settingsWindow = new BrowserWindow({
+    x: dx + Math.max(0, Math.floor((dw - width) / 2)),
+    y: dy + Math.max(0, Math.floor((dh - height) / 2)),
+    width,
+    height,
+    minWidth: 920,
+    minHeight: 580,
+    title: "Cyrene Agent · 设置",
+    icon: getCurrentAppIconPath(),
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  attachExternalLinkHandler(settingsWindow);
+
+  const hash = section ? `#${section}` : "";
+  if (isDev) {
+    settingsWindow.loadURL("http://localhost:5173/settings/" + hash);
+  } else {
+    settingsWindow.loadFile(
+      path.join(__dirname, "..", "..", "renderer", "settings", "index.html"),
+      { hash: section || "" }
+    );
+  }
+
+  settingsWindow.once("ready-to-show", () => {
+    settingsWindow?.show();
+  });
+
+  settingsWindow.on("closed", () => {
+    settingsWindow = null;
+  });
+}
+async function createStickerManagerWindow(): Promise<{ ok: boolean; error?: string }> {
+  if (stickerManagerWindow && !stickerManagerWindow.isDestroyed()) {
+    stickerManagerWindow.show();
+    stickerManagerWindow.focus();
+    stickerManagerWindow.moveTop();
+    return { ok: true };
+  }
+
+  const parentBounds = settingsWindow?.getBounds();
+  const display = screen.getPrimaryDisplay();
+  const { x: dx, y: dy, width: dw, height: dh } = display.workArea;
+  const width = 520;
+  const height = 420;
+  stickerManagerWindow = new BrowserWindow({
+    x: parentBounds ? parentBounds.x + Math.max(24, Math.floor((parentBounds.width - width) / 2)) : dx + Math.max(0, Math.floor((dw - width) / 2)),
+    y: parentBounds ? parentBounds.y + 64 : dy + Math.max(0, Math.floor((dh - height) / 2)),
+    width,
+    height,
+    minWidth: 460,
+    minHeight: 360,
+    title: "表情包管理",
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    parent: settingsWindow ?? undefined,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  stickerManagerWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    console.error("[stickers] did-fail-load", { errorCode, errorDescription, validatedURL });
+  });
+
+  try {
+    if (isDev) {
+      await stickerManagerWindow.loadURL("http://localhost:5173/sticker-manager/");
+    } else {
+      await stickerManagerWindow.loadFile(
+        path.join(__dirname, "..", "..", "renderer", "sticker-manager", "index.html")
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[stickers] failed to load sticker manager window", error);
+    stickerManagerWindow?.close();
+    return { ok: false, error: message };
+  }
+
+  stickerManagerWindow.once("ready-to-show", () => {
+    stickerManagerWindow?.show();
+    stickerManagerWindow?.focus();
+    stickerManagerWindow?.moveTop();
+  });
+
+  stickerManagerWindow.on("closed", () => {
+    stickerManagerWindow = null;
+  });
+
+  return { ok: true };
+}
+
+/** 创建通话窗口（450×800 竖屏，语音通话）。 */
+function createCallWindow(): void {
+  if (callWindow && !callWindow.isDestroyed()) {
+    callWindow.show();
+    callWindow.focus();
+    return;
+  }
+
+  const display = screen.getPrimaryDisplay();
+  const { width: dw, height: dh } = display.workArea;
+  const CALL_W = 420;
+  const CALL_H = 800;
+  const cx = Math.max(0, Math.floor((dw - CALL_W) / 2));
+  const cy = Math.max(0, Math.floor((dh - CALL_H) / 2));
+
+  callWindow = new BrowserWindow({
+    x: display.workArea.x + cx,
+    y: display.workArea.y + cy,
+    width: CALL_W,
+    height: CALL_H,
+    minWidth: 420,
+    minHeight: 600,
+    title: "Cyrene · 语音通话",
+    icon: getCurrentAppIconPath(),
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  if (isDev) {
+    callWindow.loadURL("http://localhost:5173/call/");
+  } else {
+    callWindow.loadFile(path.join(__dirname, "..", "..", "renderer", "call", "index.html"));
+  }
+
+  callWindow.once("ready-to-show", () => {
+    callWindow?.show();
+  });
+
+  callWindow.on("closed", () => {
+    callWindow = null;
+    stopCall();
+    setCallWindow(null);
+  });
+
+  // 绑定给 call-manager
+  setCallWindow(callWindow);
+}
+
+function createTray(): void {
+  const icon = nativeImage.createFromPath(getCurrentAppIconPath());
+  tray = new Tray(icon);
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: "打开状态面板",
+      click: () => { createSidebarWindow(); },
+    },
+    {
+      label: "设置",
+      click: () => { createSettingsWindow(); },
+    },
+    {
+      label: "显示/隐藏桌宠",
+      click: () => {
+        if (mainWindow) {
+          mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+        }
+      },
+    },
+    { type: "separator" },
+    {
+      label: "退出",
+      click: () => { app.quit(); },
+    },
+  ]);
+
+  tray.setToolTip("Cyrene");
+  tray.setContextMenu(contextMenu);
+}
+
+function applyUiIcon(iconSetting: UiIcon): void {
+  const icon = nativeImage.createFromPath(getAppIconPath(iconSetting));
+  if (icon.isEmpty()) {
+    console.warn("[Cyrene] failed to load selected app icon:", iconSetting);
+    return;
+  }
+  tray?.setImage(icon);
+  for (const win of [mainWindow, chatWindow, sidebarWindow, tasksWindow, settingsWindow, stickerManagerWindow, callWindow]) {
+    if (win && !win.isDestroyed()) win.setIcon(icon);
+  }
+}
+
+ipcMain.handle(IPC.WINDOW_SET_INTERACTIVE, (_event, interactive: boolean) => {
+  if (mainWindow) {
+    mainWindow.setIgnoreMouseEvents(!interactive, { forward: true });
+  }
+});
+
+ipcMain.on(IPC.WINDOW_MOVE, (_event, dx: number, dy: number) => {
+  petWindowMoveController.moveRelative(dx, dy);
+});
+
+ipcMain.on(IPC.WINDOW_MOVE_TO, (_event, x: number, y: number) => {
+  petWindowMoveController.queueAbsolute(x, y);
+});
+
+/**
+ * Toggle the BrowserWindow's opacity while the user is dragging.
+ *
+ * The window is created with 	ransparent: true (a WS_EX_LAYERED window).
+ * Windows DWM treats "fully transparent" layered windows as a special
+ * class and caches a separate drag-image bitmap that races with the
+ * WebGL canvas being redrawn by the GPU during the drag -- that race
+ * is the "double model" ghost the user sees.
+ *
+ * Why opacity (not setBackgroundColor): setBackgroundColor only changes
+ * the Chromium page background. DWM still sees a fully-transparent
+ * layered window and keeps its drag-image code path. setOpacity calls
+ * SetLayeredWindowAttributes with a per-pixel alpha < 1.0, which forces
+ * DWM to take the alpha-blending path -- the same path that no longer
+ * generates the drag image. setOpacity is therefore the lever that
+ * actually changes DWM's drag behaviour, regardless of the page
+ * background colour.
+ *
+ * 0.99 (= 1% transparent) is the most conservative value: visually
+ * imperceptible, but enough to switch DWM off the drag-image path.
+ * If a particular Windows build still ghosts at 0.99, push the value
+ * down (0.95, 0.9). Lower opacity is *more* effective at suppressing
+ * the drag image, at the cost of making the model itself look faintly
+ * translucent during the drag.
+ */
+ipcMain.on(IPC.WINDOW_SET_DRAGGING, (_event, isDragging: boolean) => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return;
+  if (!isDragging) petWindowMoveController.finishDragging();
+  try {
+    window.setOpacity(isDragging ? 0.99 : 1.0);
+  } catch (error) {
+    console.warn("[Cyrene] Failed to update pet window dragging opacity:", error);
+  }
+});
+
+/**
+ * Capture the current window contents and return it as a base64 data URL.
+ *
+ * Used by the renderer to grab a single frame of the WebGL canvas at the
+ * start of a window drag, so it can overlay a static <img> on top of the
+ * canvas while the drag is in progress. The static image lets the drag
+ * work without involving the WebGL draw pipeline at all, which is what
+ * kills the layered-window flicker (DWM is no longer racing with
+ * GPU-driven canvas updates).
+ */
+ipcMain.handle(IPC.WINDOW_CAPTURE_FRAME, async () => {
+  if (!mainWindow) return null;
+  try {
+    const image = await mainWindow.webContents.capturePage();
+    return image.toDataURL();
+  } catch (err) {
+    console.error("[Cyrene] captureFrame failed:", err);
+    return null;
+  }
+});
+ipcMain.handle(IPC.WINDOW_GET_CURSOR_POSITION, () => {
+  return screen.getCursorScreenPoint();
+});
+
+ipcMain.handle(IPC.LIVE2D_GET_MAIN_DIAGNOSTICS, () => ({
+  window: live2dWindowLifecycle.getDiagnostics(),
+}));
+
+ipcMain.handle("debug:screenshot", async () => {
+  if (!mainWindow) return null;
+  const image = await mainWindow.webContents.capturePage();
+  const png = image.toPNG();
+  const outPath = path.join(app.getPath("temp"), "cyrene-screenshot.png");
+  fs.writeFileSync(outPath, png);
+  return outPath;
+});
+
+ipcMain.on(IPC.WINDOW_MINIMIZE, () => {
+  mainWindow?.minimize();
+});
+
+ipcMain.on(IPC.WINDOW_CLOSE, () => {
+  mainWindow?.hide();
+});
+
+ipcMain.on(IPC.APP_QUIT, () => {
+  app.quit();
+});
+
+ipcMain.on(IPC.CHAT_MINIMIZE, () => {
+  chatWindow?.minimize();
+});
+
+ipcMain.on(IPC.CHAT_CLOSE, () => {
+  chatWindow?.close();
+});
+
+ipcMain.on(IPC.CHAT_TOGGLE_MAXIMIZE, () => {
+  if (!chatWindow) return;
+  if (chatWindow.isMaximized()) {
+    chatWindow.unmaximize();
+  } else {
+    chatWindow.maximize();
+  }
+});
+
+ipcMain.handle(IPC.CHAT_IS_MAXIMIZED, () => {
+  return chatWindow?.isMaximized() ?? false;
+});
+
+// 推理下拉原子读：{ providerKey, providerId, model, preference }
+// providerKey = settings.provider（displayName），用来防竞态；chat:setReasoning 需携带同 providerKey。
+ipcMain.handle(IPC.CHAT_GET_REASONING_STATE, () => {
+  const settings = loadModelSettings();
+  const cap = getCapabilityOrOpenAI(settings.provider);
+  return {
+    providerKey: settings.provider,
+    providerId: cap.id,
+    model: settings.model,
+    preference: settings.perProvider?.[settings.provider]?.reasoning,
+  };
+});
+
+// 推理下拉写：原子。payload 形如 { providerKey, preference }，providerKey 防竞态。
+ipcMain.handle(IPC.CHAT_SET_REASONING, (_event, payload: unknown) => {
+  if (!payload || typeof payload !== "object") return;
+  const p = payload as { providerKey?: unknown; preference?: unknown };
+  if (typeof p.providerKey !== "string" || typeof p.preference !== "object" || !p.preference) return;
+  const current = loadModelSettings();
+  if (current.provider !== p.providerKey) {
+    // 竞态：用户拿到 state 后、点选项前，provider 已切换。丢弃旧 providerKey 的写。
+    return;
+  }
+  const normalized = normalizeReasoningPreference(p.preference);
+  if (!normalized) return;
+  saveModelSettings({ reasoning: normalized });
+});
+ipcMain.handle(IPC.CHAT_INGEST_FILES, async (_event, paths: unknown) => {
+  const list = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === "string") : [];
+  if (list.length === 0) return [];
+  try {
+    return list.map((filePath) => describePendingAttachment(filePath));
+  } catch (err: any) {
+    console.error("[Cyrene] ingestFiles ERROR:", err?.message || err);
+    return [];
+  }
+});
+
+ipcMain.handle(IPC.CHAT_INGEST_CLIPBOARD_IMAGES, async (_event, payload: unknown) => {
+  try {
+    const attachmentsRoot = path.join(requireActiveCharacterState().chatsRoot, "attachments");
+    const stored = await persistClipboardImages(attachmentsRoot, payload);
+    return stored.map((image) => {
+      const attachment = describePendingAttachment(image.filePath);
+      if (attachment.kind !== "image") {
+        throw new Error("剪贴板图片保存后无法识别为图片附件");
+      }
+      return { ...attachment, name: image.name, mime: image.mime };
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn("[Cyrene] ingestClipboardImages ERROR:", message);
+    throw new Error(`无法导入剪贴板图片：${message}`);
+  }
+});
+
+ipcMain.handle(IPC.CHAT_PROCESS_DOCUMENTS, async (event, payload: unknown) => {
+  const filePaths = payload && typeof payload === "object" && Array.isArray((payload as { filePaths?: unknown }).filePaths)
+    ? (payload as { filePaths: unknown[] }).filePaths.filter((p): p is string => typeof p === "string")
+    : [];
+  if (filePaths.length === 0) return [];
+  const query = typeof (payload as { query?: unknown }).query === "string"
+    ? (payload as { query: string }).query
+    : "";
+  return processDocumentIndexRequest({
+    filePaths,
+    query,
+    sender: event.sender,
+    enqueue: enqueueDocumentIndexJob,
+    retrieve: retrieveQueuedDocumentChunks,
+  });
+});
+
+ipcMain.handle(IPC.CHAT_CANCEL_DOCUMENT_INDEX, (_event, payload: unknown) => {
+  const jobId = payload && typeof payload === "object" ? (payload as { jobId?: unknown }).jobId : undefined;
+  return typeof jobId === "string" && cancelDocumentIndexJob(jobId);
+});
+
+ipcMain.handle(IPC.CHAT_CAPTION_IMAGE, async (_event, payload: unknown) => {
+  const filePath = payload && typeof payload === "object"
+    ? (payload as { filePath?: unknown }).filePath
+    : undefined;
+  const validated = validateCaptionImagePath(filePath);
+  if (!validated.ok) return { ok: false, error: validated.error };
+
+  const visionCfg = loadVisionConfig();
+  if (!visionCfg) {
+    return { ok: false, error: "未配置视觉模型，无法分析图片" };
+  }
+
+  try {
+    const { captionImage } = await import("./orchestrator/vision-captioner");
+    const caption = await captionImage(
+      { base64: validated.buffer.toString("base64"), mime: validated.mime },
+      IMAGE_CAPTION_PROMPT,
+      visionCfg,
+    );
+    if (caption.startsWith("[错误")) {
+      return { ok: false, error: caption };
+    }
+    return { ok: true, caption };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+});
+
+ipcMain.handle(IPC.CHAT_GET_IMAGE_SEND_STRATEGY, () => {
+  const settings = loadModelSettings();
+  return decideImageSendStrategy({
+    multimodal: settings.multimodal,
+    vision: loadVisionConfig(),
+  });
+});
+ipcMain.on(IPC.SIDEBAR_MINIMIZE, () => {
+  sidebarWindow?.minimize();
+});
+
+ipcMain.on(IPC.SIDEBAR_CLOSE, () => {
+  sidebarWindow?.close();
+});
+
+// 状态栏窗口置顶 toggle：返回切换后的新状态（true=已置顶）
+ipcMain.handle(IPC.SIDEBAR_TOGGLE_ALWAYS_ON_TOP, () => {
+  if (!sidebarWindow) return false;
+  const next = !sidebarWindow.isAlwaysOnTop();
+  sidebarWindow.setAlwaysOnTop(next, next ? "screen-saver" : "normal");
+  return next;
+});
+
+ipcMain.on(IPC.SIDEBAR_OPEN_TASKS, () => {
+  createTasksWindow();
+});
+
+ipcMain.on(IPC.SIDEBAR_OPEN_SETTINGS, (_event, section?: string) => {
+  createSettingsWindow(section);
+});
+
+ipcMain.on(IPC.SIDEBAR_OPEN_CALL, () => {
+  createCallWindow();
+});
+
+ipcMain.on(IPC.TASKS_MINIMIZE, () => {
+  tasksWindow?.minimize();
+});
+
+ipcMain.on(IPC.TASKS_CLOSE, () => {
+  tasksWindow?.close();
+});
+ipcMain.on(IPC.SETTINGS_MINIMIZE, () => {
+  settingsWindow?.minimize();
+});
+
+ipcMain.on(IPC.SETTINGS_CLOSE, () => {
+  settingsWindow?.close();
+});
+
+ipcMain.handle(IPC.SETTINGS_GET_CONFIG, () => {
+  return loadModelSettings();
+});
+
+ipcMain.handle(IPC.SETTINGS_GET_GENERAL, () => {
+  return loadGeneralSettings();
+});
+
+ipcMain.handle(IPC.CHARACTER_LIST, () => {
+  if (!characterRuntime) throw new Error("角色运行时尚未就绪");
+  return getCharacterSettingsSnapshot(characterRuntime);
+});
+
+ipcMain.handle(IPC.CHARACTER_ACTIVE_GET, () => getActiveCharacterPublicIdentity());
+
+ipcMain.handle(IPC.CHARACTER_PICK_IMPORT_FOLDER, async () => {
+  const options: Electron.OpenDialogOptions = {
+    title: "选择角色包文件夹",
+    properties: ["openDirectory"],
+  };
+  const result = settingsWindow
+    ? await dialog.showOpenDialog(settingsWindow, options)
+    : await dialog.showOpenDialog(options);
+  return result.canceled ? null : result.filePaths[0] ?? null;
+});
+
+ipcMain.handle(IPC.CHARACTER_IMPORT, async (_event, sourcePath: unknown, confirmReplacement: unknown) => {
+  if (!characterRuntime) throw new Error("角色运行时尚未就绪");
+  if (typeof sourcePath !== "string" || sourcePath.trim().length === 0 || !path.isAbsolute(sourcePath)) {
+    throw new Error("角色包路径必须是有效的绝对路径");
+  }
+  return characterRuntime.importPackage(sourcePath, {
+    confirmReplacement: confirmReplacement === true,
+  });
+});
+
+ipcMain.handle(IPC.CHARACTER_SWITCH, async (_event, characterId: unknown) => {
+  if (!characterRuntime) throw new Error("角色运行时尚未就绪");
+  return requestCoordinatedCharacterSwitch(
+    characterRuntime,
+    characterId,
+    (operation) => channelManager.coordinateWechatCharacterSwitch(operation),
+  );
+});
+
+ipcMain.handle(IPC.CHARACTER_UNINSTALL, async (_event, characterId: unknown) => {
+  if (!characterRuntime) throw new Error("角色运行时尚未就绪");
+  return uninstallCharacterPackage(characterRuntime, characterId);
+});
+
+ipcMain.handle(IPC.CHARACTER_ARCHIVE_LIST, async () => {
+  if (!characterRuntime) throw new Error("角色运行时尚未就绪");
+  return listArchivedCharacterStates(characterRuntime);
+});
+
+ipcMain.handle(
+  IPC.CHARACTER_ARCHIVE_DELETE,
+  async (_event, characterId: unknown, confirmationCharacterId: unknown) => {
+    if (!characterRuntime) throw new Error("角色运行时尚未就绪");
+    return deleteArchivedCharacterState(characterRuntime, characterId, confirmationCharacterId);
+  },
+);
+
+ipcMain.handle(IPC.ASR_LOCAL_STATUS, async (_event, startWorker: boolean) => {
+  const settings = loadGeneralSettings();
+  return localAsrWorker.getStatus({
+    engine: "local",
+    language: settings.asrLanguage,
+    localRoot: settings.asrLocalRoot,
+    localModelPath: settings.asrLocalModelPath,
+    localTimeoutMs: settings.asrLocalTimeoutMs,
+    localSystemPrompt: settings.asrLocalSystemPrompt,
+  }, Boolean(startWorker));
+});
+
+ipcMain.handle(IPC.ASR_LOCAL_TEST, async () => {
+  const settings = loadGeneralSettings();
+  const fixturePath = path.join(settings.asrLocalRoot, "fixtures", "zh_short.wav");
+  const wav = fs.readFileSync(fixturePath);
+  if (wav.length < 44 || wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 8, 12) !== "WAVE") {
+    throw new Error(`测试音频无效：${fixturePath}`);
+  }
+  const sampleRate = wav.readUInt32LE(24);
+  const bits = wav.readUInt16LE(34);
+  const channels = wav.readUInt16LE(22);
+  if (bits !== 16 || channels !== 1) throw new Error("测试音频必须为 PCM16 单声道 WAV");
+  const result = await localAsrWorker.transcribe({ pcm: wav.subarray(44), sampleRate }, {
+    engine: "local",
+    language: settings.asrLanguage,
+    localRoot: settings.asrLocalRoot,
+    localModelPath: settings.asrLocalModelPath,
+    localTimeoutMs: settings.asrLocalTimeoutMs,
+    localSystemPrompt: settings.asrLocalSystemPrompt,
+  });
+  return result;
+});
+
+ipcMain.handle(IPC.UI_THEME_GET, () => {
+  return loadGeneralSettings().uiTheme;
+});
+
+ipcMain.handle(IPC.UI_FONT_GET, () => {
+  return loadGeneralSettings().uiFont;
+});
+
+function getUiFontsDir(): string {
+  return path.join(app.getPath("userData"), "ui-fonts");
+}
+
+function getCustomFontDisplayName(filePath: string): string {
+  return path.basename(filePath, path.extname(filePath)).replace(/[-_]+/g, " ").trim().slice(0, 80) || "自定义字体";
+}
+
+ipcMain.handle(IPC.SETTINGS_PICK_UI_FONT, async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile"],
+    filters: [{ name: "字体文件", extensions: ["ttf", "otf"] }],
+  });
+  return result.canceled ? null : result.filePaths[0] ?? null;
+});
+
+ipcMain.handle(IPC.SETTINGS_IMPORT_UI_FONT, (_event, sourcePath: unknown) => {
+  if (typeof sourcePath !== "string" || !sourcePath) throw new Error("未选择字体文件");
+  const extension = path.extname(sourcePath).toLowerCase();
+  if (extension !== ".ttf" && extension !== ".otf") throw new Error("仅支持 .ttf 或 .otf 字体文件");
+  const stat = fs.statSync(sourcePath);
+  if (!stat.isFile() || stat.size <= 0 || stat.size > 50 * 1024 * 1024) throw new Error("字体文件无效或超过 50 MB");
+
+  const fileName = `custom-${randomUUID()}${extension}`;
+  if (!isSupportedFontFileName(fileName)) throw new Error("字体文件名无效");
+  const fontsDir = getUiFontsDir();
+  fs.mkdirSync(fontsDir, { recursive: true });
+  const targetPath = path.join(fontsDir, fileName);
+  fs.copyFileSync(sourcePath, targetPath);
+
+  const before = loadGeneralSettings().uiFont;
+  const saved = saveGeneralSettings({ uiFont: { kind: "custom", fileName, displayName: getCustomFontDisplayName(sourcePath) } });
+  if (before.kind === "custom" && before.fileName !== fileName) {
+    const oldPath = path.join(fontsDir, before.fileName);
+    if (isSupportedFontFileName(before.fileName)) fs.rmSync(oldPath, { force: true });
+  }
+  return saved.uiFont;
+});
+
+ipcMain.handle(IPC.SETTINGS_RESET_UI_FONT, () => {
+  const before = loadGeneralSettings().uiFont;
+  const saved = saveGeneralSettings({ uiFont: DEFAULT_UI_FONT });
+  if (before.kind === "custom" && isSupportedFontFileName(before.fileName)) {
+    fs.rmSync(path.join(getUiFontsDir(), before.fileName), { force: true });
+  }
+  return saved.uiFont;
+});
+
+ipcMain.handle(IPC.SETTINGS_SAVE_GENERAL, (_event, settings: Partial<GeneralSettings>) => {
+  const saved = saveGeneralSettings(settings);
+  if ("proactiveChatMode" in settings || "proactiveDeliveryTarget" in settings) {
+    proactiveChatService?.invalidate();
+  }
+  return saved;
+});
+
+ipcMain.handle(IPC.SETTINGS_OPEN_CUSTOM_STYLE_PROMPT, async () => {
+  const filePath = ensureCustomStylePrompt();
+  await shell.showItemInFolder(filePath);
+  return { ok: true, filePath };
+});
+
+ipcMain.on(IPC.SETTINGS_OPEN_SIDEBAR, () => {
+  createSidebarWindow();
+});
+
+ipcMain.on(IPC.SETTINGS_CLOSE_SIDEBAR, () => {
+  sidebarWindow?.close();
+});
+
+ipcMain.on(IPC.SETTINGS_OPEN_TASKS, () => {
+  createTasksWindow();
+});
+
+ipcMain.on(IPC.SETTINGS_CLOSE_TASKS, () => {
+  tasksWindow?.close();
+});
+
+ipcMain.on(IPC.SETTINGS_SET_PET_ALWAYS_ON_TOP, (_event, value: boolean) => {
+  const saved = saveGeneralSettings({ ...loadGeneralSettings(), petAlwaysOnTop: Boolean(value) });
+  mainWindow?.setAlwaysOnTop(saved.petAlwaysOnTop, saved.petAlwaysOnTop ? "screen-saver" : "normal");
+});
+
+ipcMain.on(IPC.SETTINGS_SET_PET_VISIBLE, (_event, value: boolean) => {
+  saveGeneralSettings({ ...loadGeneralSettings(), petVisible: Boolean(value) });
+});
+
+ipcMain.on(IPC.SETTINGS_SET_PET_ZOOM, (_event, value: number) => {
+  const saved = saveGeneralSettings({ ...loadGeneralSettings(), petZoom: Number(value) });
+  applyPetZoom(saved.petZoom);
+});
+
+ipcMain.handle(IPC.MODEL_CONFIG_GET, () => {
+  return getPublicModelConfig();
+});
+
+ipcMain.handle(IPC.RUNTIME_STATE_GET, () => {
+  return runtimeState;
+});
+
+ipcMain.handle(IPC.SETTINGS_SAVE_CONFIG, (_event, settings: Partial<ModelSettings>) => {
+  const saved = saveModelSettings(settings);
+  broadcastModelConfigChanged(saved);
+  return saved;
+});
+
+ipcMain.handle(IPC.SETTINGS_TEST_CONNECTION, async (_event, cfg: VendorConfig) => testVendorConnection(cfg));
+
+/**
+ * 测试视觉模型连通性。
+ * 用一张纯红 PNG 做测试图——纯色位图所有视觉模型都能识别，
+ * 比 SVG 兼容性好（SVG 是矢量，部分模型不支持）。
+ * 验连通性（HTTP 2xx + 有内容返回）而非对答案——模型可能只说"一张红色图片"也算成功。
+ */
+ipcMain.handle(IPC.SETTINGS_TEST_VISION, async (_event, cfg: { baseUrl: string; apiKey: string; model: string }) => {
+  const start = Date.now();
+  console.log("[Cyrene] test vision: model=" + cfg.model + " url=" + cfg.baseUrl);
+  try {
+    const { captionImage } = await import("./orchestrator/vision-captioner");
+    const result = await captionImage(
+      VISION_TEST_IMAGE,
+      "这张图是什么颜色？用一个词回答。",
+      { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
+    );
+    const latency = Date.now() - start;
+    // 验连通性：返回不含 [错误 即成功（视觉模型返回了内容）
+    if (result.startsWith("[错误")) {
+      return { ok: false, latency, error: result };
+    }
+    return { ok: true, latency, sample: result.slice(0, 80) };
+  } catch (e) {
+    return { ok: false, latency: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+
+
+ipcMain.handle(IPC.EMBEDDING_SET_MODEL, async (_event, modelKey: string) => {
+  console.log("[Cyrene] embedding model switch requested:", modelKey);
+  try {
+    const result = await switchEmbeddingModel(modelKey);
+    if (result.ok) {
+      await reconcileUserMemoryIndex();
+      saveModelSettings({ embeddingModel: modelKey as "minilm" | "bgem3" });
+      broadcastModelConfigChanged();
+      stickerEmbeddingIndex = null;
+      refreshStickerEmbeddingIndexInBackground("embedding-model-switch");
+    }
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[Cyrene] embedding model switch failed:", message);
+    return { ok: false, clearedEntries: 0, error: message };
+  }
+});
+ipcMain.handle(IPC.RERANKER_SET_MODE, async (_event, mode: "light" | "standard" | "none") => {
+  const current = loadModelSettings();
+  saveModelSettings({ ...current, rerankerMode: mode });
+  await initReranker(mode);
+  console.log("[Cyrene] reranker mode switched to", mode);
+  return true;
+});
+
+ipcMain.handle(IPC.RERANKER_GET_STATUS, () => {
+  return getRerankerInstallStatus();
+});
+
+ipcMain.handle(IPC.MODEL_GET_INSTALL_STATUS, () => {
+  const { getModelInstallStatus } = require("./rag/model-status");
+  return getModelInstallStatus();
+});
+
+ipcMain.handle(IPC.OPEN_EXTERNAL, async (_event, url: string) => {
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    return { ok: false, error: "Invalid URL" };
+  }
+  try {
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
+ipcMain.on(IPC.SETTINGS_PREVIEW_RUNTIME_SYNC, (_event, value: "off" | "local" | "llm") => {
+  const current = loadModelSettings();
+  const preview = normalizeModelSettings({
+    ...current,
+    runtimeSync: value === "llm" ? "llm" : value === "local" ? "local" : "off",
+  });
+  broadcastModelConfigChanged(preview);
+});
+
+ipcMain.handle(IPC.SETTINGS_OPEN_STICKER_MANAGER, async () => {
+  console.log("[stickers] open sticker manager requested");
+  return createStickerManagerWindow();
+});
+
+ipcMain.on(IPC.STICKERS_MINIMIZE, () => {
+  stickerManagerWindow?.minimize();
+});
+
+ipcMain.on(IPC.STICKERS_CLOSE, () => {
+  stickerManagerWindow?.close();
+});
+
+ipcMain.handle(IPC.STICKERS_GET_CONFIG, () => {
+  return getStickerManagerConfig();
+});
+
+ipcMain.handle(IPC.STICKERS_SET_ENABLED, (_event, payload: unknown) => {
+  const record = payload as { id?: unknown; enabled?: unknown };
+  const id = typeof record?.id === "string" ? record.id : null;
+  if (!id) return getStickerManagerConfig();
+  setStickerEnabled(id, Boolean(record.enabled));
+  return getStickerManagerConfig();
+});
+
+ipcMain.handle(IPC.STICKERS_PICK_FILE, async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile"],
+    filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+  });
+  return result.canceled ? null : result.filePaths[0];
+});
+
+ipcMain.handle(IPC.STICKERS_ADD, async (_event, payload: unknown) => {
+  const { sourcePath, id, description, phrases } = payload as {
+    sourcePath: string;
+    id: string;
+    description: string;
+    phrases: string[];
+  };
+  try {
+    await addUserSticker(sourcePath, id, description, phrases);
+    stickerEmbeddingIndex = null;
+    refreshStickerEmbeddingIndexInBackground("user-sticker-add");
+  } catch (err) {
+    console.error("[stickers] add failed:", err);
+    throw err;
+  }
+  return getStickerManagerConfig();
+});
+
+ipcMain.handle(IPC.STICKERS_DELETE, async (_event, id: string) => {
+  try {
+    await deleteUserSticker(id);
+    stickerEmbeddingIndex = null;
+    refreshStickerEmbeddingIndexInBackground("user-sticker-delete");
+  } catch (err) {
+    console.error("[stickers] delete failed:", err);
+    throw err;
+  }
+  return getStickerManagerConfig();
+});
+
+ipcMain.handle(IPC.STICKERS_GET_ENABLED, () => {
+  const stickerSettings = loadStickerSettings();
+  return getAllStickerConfig(stickerSettings).filter((s) => s.enabled);
+});
+
+
+ipcMain.handle(IPC.EMBEDDING_GET_STATUS, async () => {
+  return getEmbeddingStatus();
+});
+
+
+ipcMain.handle(IPC.EMBEDDING_DOWNLOAD, async (_event, payload: unknown) => {
+  const p = payload as { model?: string; mirror?: string };
+  const model = p.model || "minilm";
+  const mirror = p.mirror || "official";
+  try {
+    const win = BrowserWindow.getFocusedWindow();
+    await downloadEmbeddingModel(model, mirror, (info) => {
+      win?.webContents.send(IPC.EMBEDDING_PROGRESS, info);
+    });
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle(IPC.USER_GET_AVATAR, () => {
+  const avatarPath = getAvatarPath();
+  if (!fs.existsSync(avatarPath)) return null;
+  const buf = fs.readFileSync(avatarPath);
+  const ext = path.extname(avatarPath).toLowerCase();
+  const mime = ext === ".png" ? "image/png" : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png";
+  return "data:" + mime + ";base64," + buf.toString("base64");
+});
+
+ipcMain.handle(IPC.MEMORY_PANEL_GET_DATA, () => loadMemoryPanelData());
+ipcMain.handle(IPC.MEMORY_PANEL_DELETE_IMPORTED_DOC, (_event, payload: { importId: string; fileName?: string }) => {
+  const deleted = deleteImportedDoc(payload.importId, payload.fileName);
+  return { ok: true, deleted };
+});
+// L0/L1 editable fields whitelist
+const L0_EDITABLE_KEYS = ["preferredName", "occupation", "longTermInterests", "language", "permanentNote"];
+const L1_EDITABLE_KEYS = ["recentGoals", "recentPreferences", "currentProject"];
+
+ipcMain.handle(IPC.MEMORY_PANEL_SAVE_L0, async (_event, raw: Record<string, unknown>) => {
+  const patch: Partial<L0Profile> = {};
+  for (const key of L0_EDITABLE_KEYS) {
+    if (key in raw && typeof raw[key] === "string") {
+      (patch as Record<string, unknown>)[key] = (raw[key] as string).trim();
+    }
+  }
+  await memoryStore.updateL0(patch);
+  return { ok: true };
+});
+
+ipcMain.handle(IPC.MEMORY_PANEL_SAVE_L1, async (_event, raw: Record<string, unknown>) => {
+  const patch: Partial<L1Profile> = {};
+  for (const key of L1_EDITABLE_KEYS) {
+    if (key in raw && typeof raw[key] === "string") {
+      (patch as Record<string, unknown>)[key] = (raw[key] as string).trim();
+    }
+  }
+  await memoryStore.updateL1(patch);
+  return { ok: true };
+});
+ipcMain.handle(IPC.USER_GET_PROFILE, () => loadUserProfile());
+ipcMain.handle(IPC.USER_SAVE_PROFILE, (_event, profile: Partial<UserProfile>) => saveUserProfile(profile));
+ipcMain.handle(IPC.USER_UPLOAD_AVATAR, async () => {
+  const { dialog } = await import("electron");
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile"],
+    filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "bmp"] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const srcPath = result.filePaths[0];
+  const avatarPath = getAvatarPath();
+  fs.mkdirSync(path.dirname(avatarPath), { recursive: true });
+  fs.copyFileSync(srcPath, avatarPath);
+  const profile = saveUserProfile({ avatarPath });
+  broadcastToAuxWindows(IPC.USER_AVATAR_CHANGED, null);
+  return { avatarPath, profile };
+});
+
+ipcMain.handle(IPC.MCP_ADD_SERVER, async (_event, config: unknown) => {
+  console.log('[MCP IPC] add-server:', JSON.stringify(config).slice(0, 200));
+  const result = await addMcpServer(config as Parameters<typeof addMcpServer>[0]);
+  console.log('[MCP IPC] add-server result:', JSON.stringify(result));
+  return result;
+});
+
+ipcMain.handle(IPC.MCP_REMOVE_SERVER, async (_event, serverId: string) => {
+  console.log('[MCP IPC] remove-server:', serverId);
+  const result = await removeMcpServer(serverId);
+  console.log('[MCP IPC] remove-server result:', JSON.stringify(result));
+  return result;
+});
+
+ipcMain.handle(IPC.MCP_LIST_SERVERS, () => {
+  const servers = listMcpServers();
+  console.log('[MCP IPC] list-servers:', servers.length + ' servers');
+  return servers;
+});
+
+ipcMain.handle(IPC.TOOL_SET_ENABLED, (_event, payload: unknown) => {
+  const p = payload as { id?: string; enabled?: boolean };
+  if (!p.id) return { ok: false, error: 'missing tool id' };
+  toolRegistry.setEnabled(p.id, p.enabled !== false);
+  console.log('[Tool] ' + p.id + ' enabled=' + (p.enabled !== false));
+  return { ok: true };
+});
+
+ipcMain.handle(IPC.TOOL_GET_ENABLED, () => {
+  const tools = toolRegistry.getAllTools();
+  const result: Record<string, boolean> = {};
+  for (const t of tools) {
+    result[t.id] = t.enabled;
+  }
+  return result;
+});
+
+ipcMain.handle(IPC.SKILL_LIST, () => {
+  return listSkillsForUi();
+});
+
+ipcMain.handle(IPC.SKILL_SET_ENABLED, (_event, payload: unknown) => {
+  const p = payload as { id?: string; enabled?: boolean };
+  if (!p.id) return { ok: false, error: "missing skill id" };
+  setSkillEnabled(p.id, p.enabled !== false);
+  console.log("[Skill] " + p.id + " enabled=" + (p.enabled !== false));
+  return { ok: true };
+});
+
+ipcMain.handle(IPC.EMBEDDING_DELETE, async (_event, payload: unknown) => {
+  const p = payload as { model?: string };
+  const model = p.model || "minilm";
+  try {
+    deleteEmbeddingModel(model);
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+});
+
+// 注册本地用户资源协议（表情包图片与用户导入的字体）
+// 必须在 app.ready 之前调用
+protocol.registerSchemesAsPrivileged([
+  { scheme: "local-sticker", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+  { scheme: "local-font", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
+  { scheme: "local-character", privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    stream: true,
+    corsEnabled: true,
+  } },
+]);
+
+app.whenReady().then(async () => {
+  characterRuntime = createDefaultCharacterRuntime({
+    appRoot: app.getAppPath(),
+    userDataRoot: app.getPath("userData"),
+    appVersion: app.getVersion(),
+    switchAdapters: createElectronCharacterSwitchAdapters({
+      getActivity: () => {
+        const activity = getCharacterBoundActivitySnapshot();
+        return {
+          agentBusy: hasUncoordinatedAgentActivity(
+            normalConversationBusyCount,
+            channelManager.getWechatProcessingCount(),
+          ),
+          callActive: isCallActive(),
+          asrBusy: localAsrWorker.isBusy(),
+          ttsBusy: activity.tts,
+          proactiveBusy: proactiveChatService?.isGenerating() ?? false,
+          stateWriteBusy: activity.stateWrite,
+        };
+      },
+      flushState: () => flushTokenUsage(),
+      stopCall: () => {
+        stopCall();
+        void stopMobileCall();
+      },
+      disposeAsr: () => localAsrWorker.shutdown(),
+      stopScheduler: () => schedulerEngine?.stop(),
+      stopOpener: () => stopProactiveTrigger(),
+      shutdownChannels: () => shutdownChannels(),
+      relaunch: () => app.relaunch(),
+      exit: (code) => app.exit(code),
+    }),
+  });
+  const characterSnapshot = await characterRuntime.initialize();
+  if (characterSnapshot.status !== "ready" || !characterSnapshot.activeCharacter) {
+    console.error("[CharacterRuntime] 已进入诊断安全模式:", characterSnapshot.diagnostics);
+    const result = await dialog.showMessageBox(buildCharacterSafeModeDialog(characterSnapshot));
+    if (result.response === 0) {
+      app.relaunch();
+      app.exit(0);
+    } else {
+      app.quit();
+    }
+    return;
+  }
+  console.log(
+    `[CharacterRuntime] Active Character ready: ${characterSnapshot.activeCharacter.displayName} (${characterSnapshot.activeCharacter.id})`,
+  );
+  configureActiveCharacter(characterSnapshot.activeCharacter);
+  configureActiveCharacterState(characterSnapshot.activeCharacter.state);
+  const stateMigrationFailed = characterSnapshot.diagnostics.some(({ code }) => (
+    code.startsWith("character.state_migration.")
+  ));
+  if (stateMigrationFailed) {
+    console.warn(
+      "[CharacterRuntime] 状态迁移存在诊断；本次启动保持角色状态目录隔离，旧全局路径不会重新挂载",
+      characterSnapshot.diagnostics,
+    );
+  }
+
+  // 注册 local-sticker:// 协议处理器：将请求映射到 userData/stickers/ 下的文件
+  protocol.handle("local-sticker", (request) => {
+    const file = parseLocalStickerFileFromUrl(request.url);
+    if (!file) return new Response("Invalid sticker URL", { status: 404 });
+
+    const filePath = resolveLocalStickerPath(getStickersDir(), file);
+    if (!filePath) return new Response("Invalid sticker path", { status: 403 });
+
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+  protocol.handle("local-font", (request) => {
+    let fileName: string;
+    try {
+      fileName = decodeURIComponent(new URL(request.url).hostname);
+    } catch {
+      return new Response("Invalid font URL", { status: 404 });
+    }
+    if (!isSafeUiFontRequest(fileName)) return new Response("Invalid font URL", { status: 404 });
+    const filePath = path.join(getUiFontsDir(), fileName);
+    if (path.dirname(filePath) !== getUiFontsDir() || !fs.existsSync(filePath)) return new Response("Font not found", { status: 404 });
+    return net.fetch(pathToFileURL(filePath).toString()).then((response) => new Response(response.body, {
+      headers: getUiFontResponseHeaders(fileName),
+    }));
+  });
+  protocol.handle("local-character", (request) => {
+    const active = getActiveCharacter();
+    const resolved = resolveCharacterResourceRequest(active, request.url);
+    if (!resolved.ok) {
+      return new Response("Invalid character resource", { status: resolved.status });
+    }
+    if (!fs.existsSync(resolved.filePath) || !fs.statSync(resolved.filePath).isFile()) {
+      return new Response("Character resource not found", { status: 404 });
+    }
+    if (active.capabilities.live2d.status === "available"
+      && resolved.filePath === active.capabilities.live2d.modelPath) {
+      return new Response(prepareLive2dModelJsonForProtocol(fs.readFileSync(resolved.filePath, "utf8")), {
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+    return net.fetch(pathToFileURL(resolved.filePath).toString());
+  });
+  // Token 用量查询 IPC
+  ipcMain.handle(IPC.TOKEN_USAGE_GET, (_event, days: number) => {
+    return getUsage(Math.max(1, Math.min(90, Number(days) || 7)));
+  });
+
+  ipcMain.on(IPC.LIVE2D_SPEECH_PREPARE, () => {
+    sendToLive2DWindow(IPC.LIVE2D_SPEECH_PREPARE);
+  });
+  ipcMain.on(IPC.LIVE2D_MOUTH_START, (_event, payload: { durationMs?: number }) => {
+    sendToLive2DWindow(IPC.LIVE2D_MOUTH_START, { durationMs: Number(payload?.durationMs ?? 0) });
+  });
+  ipcMain.on(IPC.LIVE2D_MOUTH_STOP, () => {
+    sendToLive2DWindow(IPC.LIVE2D_MOUTH_STOP);
+  });
+
+  // ── TTS IPC ──
+  // 保存/加载 TTS 配置（复用 general settings 存储）
+  ipcMain.handle(IPC.TTS_SAVE_SETTINGS, async (_event, tts: Partial<GeneralSettings>) => {
+    const before = loadGeneralSettings();
+    const saved = saveGeneralSettings({ ...before, ...tts });
+
+    // 搜索 MCP 自动注册/移除：选 MiniMax+有key→注册，否则→移除
+    const searchConfigChanged = "searchMinimaxKey" in tts || "searchEngine" in tts;
+    if (searchConfigChanged) {
+      await syncVolcanoSearchMcp(saved);
+    }
+
+    // Playwright MCP：按 settings 字段自动连接/断开
+    if ("playwrightMcpEnabled" in tts) {
+      await syncPlaywrightMcp(saved);
+    }
+
+    // 主动聊天总开关变化时使现有评估失效（频率档位由 ProactiveChat 内部判定，无需重启）。
+    if ("proactiveChatMode" in tts) {
+      proactiveChatService?.invalidate();
+    }
+
+    // 返回不含密钥明文的副本（前端展示用）
+    return saved;
+  });
+  ipcMain.handle(IPC.TTS_LOAD_SETTINGS, () => {
+    return loadGeneralSettings();
+  });
+
+  // 上传音频文件 → file_id
+  ipcMain.handle(IPC.TTS_UPLOAD, async (_event, payload: { apiKey: string; filePath: string; purpose: "voice_clone" | "prompt_audio" }) => {
+    if (!payload?.apiKey || !payload?.filePath) {
+      throw new Error("缺少 API Key 或文件路径");
+    }
+    return await ttsUploadFile(payload.apiKey, payload.filePath, payload.purpose);
+  });
+
+  // 选择音频文件（Electron dialog）
+  ipcMain.handle(IPC.TTS_PICK_AUDIO, async () => {
+    const result = await dialog.showOpenDialog({
+      title: "选择音频文件",
+      filters: [{ name: "音频文件", extensions: ["mp3", "m4a", "wav"] }],
+      properties: ["openFile"],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+
+  // 音色快速复刻 → voice_id
+  ipcMain.handle(IPC.TTS_CLONE, async (_event, payload: {
+    apiKey: string; fileId: string; voiceId: string;
+    promptAudioId?: string; promptText?: string;
+    text: string; model?: string;
+  }) => {
+    if (!payload?.apiKey || !payload?.fileId || !payload?.voiceId || !payload?.text) {
+      throw new Error("缺少必要参数（apiKey/fileId/voiceId/text）");
+    }
+    return await ttsCloneVoice(payload);
+  });
+
+  // 语音合成 → base64 音频（聊天朗读 / 测试发音都用这个）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE, async (_event, payload: {
+    apiKey: string; voiceId: string; text: string;
+    speed?: number; volume?: number; pitch?: number;
+    model?: string; format?: "mp3" | "wav" | "pcm";
+  }) => {
+    if (!payload?.apiKey || !payload?.voiceId || !payload?.text) {
+      throw new Error("缺少必要参数（apiKey/voiceId/text）");
+    }
+    const audioBuffer = await ttsSynthesize({
+      ...payload,
+      debugLog: appendMinimaxTtsLog,
+    });
+    // Buffer → base64 传给渲染进程（渲染进程用 atob 解码再播）
+    return audioBuffer.toString("base64");
+  });
+
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_CACHED, async (_event, payload: {
+    apiKey: string; voiceId: string; text: string;
+    speed?: number; volume?: number; pitch?: number;
+    model?: string; format?: "mp3" | "wav" | "pcm";
+    expectedCacheKey?: string;
+  }) => {
+    const format = payload.format ?? "mp3";
+
+    // 回听优先：如果 expectedCacheKey 对应的缓存文件存在，直接返回，不需要 apiKey/voiceId。
+    let expectedPath: string | null = null;
+    if (payload.expectedCacheKey) {
+      try {
+        expectedPath = getTtsCachePath(payload.expectedCacheKey, format);
+      } catch { /* expectedCacheKey 格式非法，忽略 */ }
+    }
+    if (expectedPath && fs.existsSync(expectedPath)) {
+      const cachedBuffer = fs.readFileSync(expectedPath);
+      appendMinimaxTtsLog({
+        requestId: `tts-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        ts: new Date().toISOString(),
+        phase: "cache.hit",
+        cacheKey: payload.expectedCacheKey,
+        audioBytes: cachedBuffer.length,
+        textChars: Array.from(payload.text).length,
+      });
+      return {
+        base64: cachedBuffer.toString("base64"),
+        cacheKey: payload.expectedCacheKey,
+        cached: true,
+      };
+    }
+
+    // 缓存未命中 → 需要合成，检查 apiKey/voiceId
+    if (!payload?.apiKey || !payload?.voiceId || !payload?.text || payload.apiKey === "cache-only") {
+      throw new Error("缓存未命中且缺少必要参数（apiKey/voiceId/text）");
+    }
+
+    const cacheKey = buildTtsCacheKey(payload);
+    const audioPath = getTtsCachePath(cacheKey, format);
+    fs.mkdirSync(path.dirname(audioPath), { recursive: true });
+
+    const audioBuffer = await ttsSynthesize({
+      ...payload,
+      format,
+      debugLog: appendMinimaxTtsLog,
+    });
+    fs.writeFileSync(audioPath, audioBuffer);
+    appendMinimaxTtsLog({
+      requestId: `tts-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      ts: new Date().toISOString(),
+      phase: "cache.write",
+      cacheKey,
+      audioBytes: audioBuffer.length,
+      textChars: Array.from(payload.text).length,
+    });
+    return {
+      base64: audioBuffer.toString("base64"),
+      cacheKey,
+      cached: false,
+    };
+  });
+
+  // 流式语音合成（minimax WS 边合成边推 chunk 给渲染端播）
+  // 主进程同时攒完整 buffer 落盘缓存，下次同文本走缓存
+  ipcMain.handle(IPC.TTS_STREAM_START, async (event, payload: {
+    apiKey: string; voiceId: string; text: string;
+    speed?: number; volume?: number; pitch?: number;
+    model?: string; format?: "mp3" | "wav" | "pcm";
+    expectedCacheKey?: string;
+  }) => {
+    const format = payload.format ?? "mp3";
+    const sender = event.sender;
+
+    // 回听优先：expectedCacheKey 命中缓存直接发完整 base64（走 STREAM_END，不走 chunk）
+    let expectedPath: string | null = null;
+    if (payload.expectedCacheKey) {
+      try { expectedPath = getTtsCachePath(payload.expectedCacheKey, format); } catch { /* */ }
+    }
+    if (expectedPath && fs.existsSync(expectedPath)) {
+      const cachedBuf = fs.readFileSync(expectedPath);
+      appendMinimaxTtsLog({
+        requestId: `tts-stream-cache-${Date.now()}`,
+        ts: new Date().toISOString(),
+        phase: "stream.cache.hit",
+        cacheKey: payload.expectedCacheKey,
+        audioBytes: cachedBuf.length,
+      });
+      // 缓存命中：一次性发完整音频（渲染端会按 STREAM_END 处理，直接播完整 buffer）
+      sender.send(IPC.TTS_AUDIO_CHUNK, { base64: cachedBuf.toString("base64") });
+      sender.send(IPC.TTS_STREAM_END, { cacheKey: payload.expectedCacheKey, cached: true, format });
+      return { started: false, cacheKey: payload.expectedCacheKey, cached: true };
+    }
+
+    if (!payload?.apiKey || !payload?.voiceId || !payload?.text) {
+      throw new Error("流式合成缺少必要参数（apiKey/voiceId/text）");
+    }
+
+    const cacheKey = buildTtsCacheKey(payload);
+    const audioPath = getTtsCachePath(cacheKey, format);
+    fs.mkdirSync(path.dirname(audioPath), { recursive: true });
+    const fullChunks: Buffer[] = [];
+
+    // 异步合成，不 await（handler 立即返回，chunk 通过 send 推送）
+    void (async () => {
+      try {
+        const audioBuffer = await ttsSynthesize({
+          apiKey: payload.apiKey,
+          voiceId: payload.voiceId,
+          text: payload.text,
+          speed: payload.speed,
+          volume: payload.volume,
+          pitch: payload.pitch,
+          model: payload.model,
+          format,
+          debugLog: appendMinimaxTtsLog,
+          onChunk: (chunkBase64) => {
+            fullChunks.push(Buffer.from(chunkBase64, "base64"));
+            if (!sender.isDestroyed()) sender.send(IPC.TTS_AUDIO_CHUNK, { base64: chunkBase64 });
+          },
+        });
+        // 落盘缓存（用完整 buffer，不用拼接的 fullChunks——synthesize 返回的更可靠）
+        fs.writeFileSync(audioPath, audioBuffer);
+        appendMinimaxTtsLog({
+          requestId: `tts-stream-${Date.now()}`,
+          ts: new Date().toISOString(),
+          phase: "stream.cache.write",
+          cacheKey,
+          audioBytes: audioBuffer.length,
+        });
+        if (!sender.isDestroyed()) sender.send(IPC.TTS_STREAM_END, { cacheKey, cached: false, format });
+      } catch (err) {
+        if (!sender.isDestroyed()) {
+          sender.send(IPC.TTS_STREAM_ERROR, { message: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    })();
+
+    return { started: true, cacheKey, cached: false };
+  });
+
+  // GPT-SoVITS 语音合成 → base64 音频（测试发音用，不缓存）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_GPTSOVITS, async (_event, payload: {
+    baseUrl: string; refAudioPath: string; promptText: string; text: string;
+    promptLang?: "auto" | "zh" | "en" | "ja"; textLang?: "auto" | "zh" | "en" | "ja";
+    speed?: number; format?: "wav" | "mp3";
+  }) => {
+    if (!payload?.baseUrl || !payload?.refAudioPath || !payload?.promptText || !payload?.text) {
+      throw new Error("缺少必要参数（baseUrl/refAudioPath/promptText/text）");
+    }
+    const result = await gptsovitsSynthesize({
+      ...payload,
+      debugLog: appendGptsovitsTtsLog,
+    });
+    const cacheKey = buildGptsovitsCacheKey(payload);
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // GPT-SoVITS 语音合成 + 本地缓存（聊天朗读用）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_CACHED_GPTSOVITS, async (_event, payload: {
+    baseUrl: string; refAudioPath: string; promptText: string; text: string;
+    promptLang?: "auto" | "zh" | "en" | "ja"; textLang?: "auto" | "zh" | "en" | "ja";
+    speed?: number; format?: "wav" | "mp3";
+    expectedCacheKey?: string;
+  }) => {
+    const format: "wav" | "mp3" = payload.format ?? "wav";
+
+    // 回听优先：如果 expectedCacheKey 对应的缓存文件存在，直接返回，不需要 baseUrl/refAudioPath。
+    let expectedPath: string | null = null;
+    if (payload.expectedCacheKey) {
+      try {
+        expectedPath = getTtsCachePath(payload.expectedCacheKey, format);
+      } catch { /* expectedCacheKey 格式非法，忽略 */ }
+    }
+    if (expectedPath && fs.existsSync(expectedPath)) {
+      const cachedBuffer = fs.readFileSync(expectedPath);
+      appendGptsovitsTtsLog({
+        requestId: `gptsovits-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        ts: new Date().toISOString(),
+        phase: "cache.hit",
+        cacheKey: payload.expectedCacheKey,
+        audioBytes: cachedBuffer.length,
+        textChars: Array.from(payload.text).length,
+      });
+      return {
+        base64: cachedBuffer.toString("base64"),
+        cacheKey: payload.expectedCacheKey,
+        cached: true,
+        format,
+      };
+    }
+
+    // 缓存未命中 → 需要合成，检查必要参数
+    if (!payload?.baseUrl || !payload?.refAudioPath || !payload?.promptText || !payload?.text) {
+      throw new Error("缓存未命中且缺少必要参数（baseUrl/refAudioPath/promptText/text）");
+    }
+
+    const cacheKey = buildGptsovitsCacheKey(payload);
+    const audioPath = getTtsCachePath(cacheKey, format);
+    fs.mkdirSync(path.dirname(audioPath), { recursive: true });
+
+    const result = await gptsovitsSynthesize({
+      baseUrl: payload.baseUrl,
+      refAudioPath: payload.refAudioPath,
+      promptText: payload.promptText,
+      promptLang: payload.promptLang,
+      textLang: payload.textLang,
+      text: payload.text,
+      speed: payload.speed,
+      format,
+      debugLog: appendGptsovitsTtsLog,
+    });
+    fs.writeFileSync(audioPath, result.audio);
+    appendGptsovitsTtsLog({
+      requestId: `gptsovits-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      ts: new Date().toISOString(),
+      phase: "cache.write",
+      cacheKey,
+      audioBytes: result.audio.length,
+      textChars: Array.from(payload.text).length,
+    });
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // 自定义云端 TTS 合成 → base64 音频（测试发音用，不缓存）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_CUSTOM_CLOUD, async (_event, payload: {
+    endpointUrl: string; apiKey?: string; voiceId?: string; text: string;
+    speed?: number; volume?: number; format?: "wav" | "mp3"; timeoutMs?: number;
+  }) => {
+    if (!payload?.endpointUrl || !payload?.text) {
+      throw new Error("缺少必要参数（endpointUrl/text）");
+    }
+    const result = await customCloudSynthesize({
+      ...payload,
+      debugLog: appendCustomCloudTtsLog,
+    });
+    const cacheKey = buildCustomCloudCacheKey(payload);
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // 自定义云端 TTS 合成 + 本地缓存（聊天朗读用）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_CACHED_CUSTOM_CLOUD, async (_event, payload: {
+    endpointUrl: string; apiKey?: string; voiceId?: string; text: string;
+    speed?: number; volume?: number; format?: "wav" | "mp3"; timeoutMs?: number;
+    expectedCacheKey?: string;
+  }) => {
+    const format: "wav" | "mp3" = payload.format ?? "mp3";
+
+    let expectedPath: string | null = null;
+    if (payload.expectedCacheKey) {
+      try {
+        expectedPath = getTtsCachePath(payload.expectedCacheKey, format);
+      } catch { /* expectedCacheKey 格式非法，忽略 */ }
+    }
+    if (expectedPath && fs.existsSync(expectedPath)) {
+      const cachedBuffer = fs.readFileSync(expectedPath);
+      appendCustomCloudTtsLog({
+        requestId: `custom-cloud-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        ts: new Date().toISOString(),
+        phase: "cache.hit",
+        cacheKey: payload.expectedCacheKey,
+        audioBytes: cachedBuffer.length,
+        textChars: Array.from(payload.text).length,
+      });
+      return {
+        base64: cachedBuffer.toString("base64"),
+        cacheKey: payload.expectedCacheKey,
+        cached: true,
+        format,
+      };
+    }
+
+    if (!payload?.endpointUrl || !payload?.text) {
+      throw new Error("缓存未命中且缺少必要参数（endpointUrl/text）");
+    }
+
+    const cacheKey = buildCustomCloudCacheKey(payload);
+    const audioPath = getTtsCachePath(cacheKey, format);
+    fs.mkdirSync(path.dirname(audioPath), { recursive: true });
+
+    const result = await customCloudSynthesize({
+      endpointUrl: payload.endpointUrl,
+      apiKey: payload.apiKey,
+      voiceId: payload.voiceId,
+      text: payload.text,
+      speed: payload.speed,
+      volume: payload.volume,
+      format,
+      timeoutMs: payload.timeoutMs,
+      debugLog: appendCustomCloudTtsLog,
+    });
+    fs.writeFileSync(audioPath, result.audio);
+    appendCustomCloudTtsLog({
+      requestId: `custom-cloud-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      ts: new Date().toISOString(),
+      phase: "cache.write",
+      cacheKey,
+      audioBytes: result.audio.length,
+      textChars: Array.from(payload.text).length,
+    });
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // 小米 MiMo TTS 合成 → base64 音频（测试发音用，不缓存）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_MIMO, async (_event, payload: {
+    apiKey: string; voiceAudioPath?: string; text: string; stylePrompt?: string;
+  }) => {
+    if (!payload?.apiKey || !payload?.voiceAudioPath || !payload?.text) {
+      throw new Error("缺少必要参数（apiKey/voiceAudioPath/text）");
+    }
+    const result = await mimoSynthesize({
+      apiKey: payload.apiKey,
+      voiceAudioPath: payload.voiceAudioPath,
+      text: payload.text,
+      stylePrompt: payload.stylePrompt,
+      debugLog: appendMimoTtsLog,
+    });
+    const cacheKey = buildMimoCacheKey(payload);
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // 小米 MiMo TTS 合成 + 本地缓存（聊天朗读用）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_CACHED_MIMO, async (_event, payload: {
+    apiKey: string; voiceAudioPath?: string; text: string; stylePrompt?: string;
+    expectedCacheKey?: string;
+  }) => {
+    const format: "wav" = "wav";
+
+    let expectedPath: string | null = null;
+    if (payload.expectedCacheKey) {
+      try {
+        expectedPath = getTtsCachePath(payload.expectedCacheKey, format);
+      } catch { /* expectedCacheKey 格式非法，忽略 */ }
+    }
+    if (expectedPath && fs.existsSync(expectedPath)) {
+      const cachedBuffer = fs.readFileSync(expectedPath);
+      appendMimoTtsLog({
+        requestId: `mimo-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        ts: new Date().toISOString(),
+        phase: "cache.hit",
+        cacheKey: payload.expectedCacheKey,
+        audioBytes: cachedBuffer.length,
+        textChars: Array.from(payload.text).length,
+      });
+      return {
+        base64: cachedBuffer.toString("base64"),
+        cacheKey: payload.expectedCacheKey,
+        cached: true,
+        format,
+      };
+    }
+
+    if (!payload?.apiKey || !payload?.voiceAudioPath || !payload?.text || payload.apiKey === "cache-only") {
+      throw new Error("缓存未命中且缺少必要参数（apiKey/voiceAudioPath/text）");
+    }
+
+    const cacheKey = buildMimoCacheKey(payload);
+    const audioPath = getTtsCachePath(cacheKey, format);
+    fs.mkdirSync(path.dirname(audioPath), { recursive: true });
+
+    const result = await mimoSynthesize({
+      apiKey: payload.apiKey,
+      voiceAudioPath: payload.voiceAudioPath,
+      text: payload.text,
+      stylePrompt: payload.stylePrompt,
+      debugLog: appendMimoTtsLog,
+    });
+    fs.writeFileSync(audioPath, result.audio);
+    appendMimoTtsLog({
+      requestId: `mimo-cache-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      ts: new Date().toISOString(),
+      phase: "cache.write",
+      cacheKey,
+      audioBytes: result.audio.length,
+      textChars: Array.from(payload.text).length,
+    });
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // ── Mossland (api.mosi.cn) ──────────────────────────────────────
+
+  // Mossland 合成（Settings「测试发音」用，无缓存）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_MOSSLAND, async (_event, payload: {
+    apiKey: string; voiceId: string; text: string;
+    speed?: number; volume?: number; model?: string;
+    format?: "mp3" | "wav" | "pcm";
+  }) => {
+    if (!payload?.apiKey || !payload?.voiceId || !payload?.text) {
+      throw new Error("缺少必要参数（apiKey/voiceId/text）");
+    }
+    const result = await mosslandSynthesize({
+      apiKey: payload.apiKey,
+      voiceId: payload.voiceId,
+      text: payload.text,
+      speed: payload.speed,
+      volume: payload.volume,
+      model: payload.model,
+      format: payload.format,
+    });
+    const cacheKey = buildMosslandCacheKey(payload);
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // Mossland 合成 + 本地缓存（聊天自动朗读用；cache-only 兜底由 chat 侧传 "cache-only"）
+  ipcMain.handle(IPC.TTS_SYNTHESIZE_CACHED_MOSSLAND, async (_event, payload: {
+    apiKey: string; voiceId: string; text: string;
+    speed?: number; volume?: number; model?: string;
+    format?: "mp3" | "wav" | "pcm";
+    expectedCacheKey?: string;
+  }) => {
+    const format: "mp3" | "wav" | "pcm" = payload.format ?? "mp3";
+
+    // 缓存命中
+    let expectedPath: string | null = null;
+    if (payload.expectedCacheKey) {
+      try {
+        expectedPath = getTtsCachePath(payload.expectedCacheKey, format);
+      } catch { /* expectedCacheKey 非法，忽略 */ }
+    }
+    if (expectedPath && fs.existsSync(expectedPath)) {
+      const cachedBuffer = fs.readFileSync(expectedPath);
+      return {
+        base64: cachedBuffer.toString("base64"),
+        cacheKey: payload.expectedCacheKey,
+        cached: true,
+        format,
+      };
+    }
+
+    // 缓存未命中 + 缺关键参数（或 chat 端 cache-only 占位）→ 抛错
+    if (!payload?.apiKey || !payload?.voiceId || !payload?.text
+        || payload.apiKey === "cache-only" || payload.voiceId === "cache-only") {
+      throw new Error("缓存未命中且缺少必要参数（apiKey/voiceId/text）");
+    }
+
+    const cacheKey = buildMosslandCacheKey(payload);
+    const audioPath = getTtsCachePath(cacheKey, format);
+    fs.mkdirSync(path.dirname(audioPath), { recursive: true });
+
+    const result = await mosslandSynthesize({
+      apiKey: payload.apiKey,
+      voiceId: payload.voiceId,
+      text: payload.text,
+      speed: payload.speed,
+      volume: payload.volume,
+      model: payload.model,
+      format,
+    });
+    fs.writeFileSync(audioPath, result.audio);
+    return {
+      base64: result.audio.toString("base64"),
+      cacheKey,
+      cached: false,
+      format: result.format,
+    };
+  });
+
+  // Mossland 音色克隆（multipart 上传）
+  ipcMain.handle(IPC.TTS_CLONE_MOSSLAND, async (_event, payload: {
+    apiKey: string; filePath: string; name?: string; description?: string;
+  }) => {
+    const result = await mosslandCloneVoice({
+      apiKey: payload.apiKey,
+      filePath: payload.filePath,
+      name: payload.name,
+      description: payload.description,
+    });
+    return {
+      voiceId: result.voiceId,
+      name: result.name,
+      createdAt: result.createdAt,
+    };
+  });
+
+  // Mossland 拉取账号下音色列表
+  ipcMain.handle(IPC.TTS_LIST_MOSSLAND_VOICES, async (_event, payload: {
+    apiKey: string; limit?: number;
+  }) => {
+    const result = await mosslandListVoices({
+      apiKey: payload.apiKey,
+      limit: payload.limit,
+    });
+    return { voices: result.voices };
+  });
+
+  // 聊天会话存储 IPC（chats-store.initialize 会创建活动角色的 chats 目录并加载 index）
+  registerChatsIpc();
+  initializeProactiveChatService();
+  initializeProactiveTrigger();
+
+  // 历史召回工具（recall_history）——让模型能回忆滚出窗口的对话
+  registerRecallHistoryTool();
+
+  // 文档生成工具（write_excel/write_word/write_pdf/write_markdown）
+  registerDocumentTools();
+
+  // 生活类工具（记账/汇率/翻译/代码补丁）
+  // 翻译需要主模型，注入 loadModelSettings getter
+  setTranslateConfig(() => {
+    const s = loadModelSettings();
+    return s.apiKey ? { provider: s.provider, baseUrl: s.baseUrl, model: s.model, apiKey: s.apiKey } : null;
+  });
+  registerLifeTools();
+
+  // 出行工具（路线规划——驾车/步行/骑行/公交，复用 amapKey）
+  registerTravelTools();
+
+  // 邮件发送工具（SMTP 直发，需在设置里配置 SMTP 授权码）
+  registerEmailTools();
+  syncBuiltInToolToggles(loadGeneralSettings());
+
+  // 内置 MCP 自动连接：Playwright (默认关闭,选项控制)
+  const initialSettings = loadGeneralSettings();
+
+  // 一次性清理已下架的内置 MCP（Firecrawl hosted 等）
+  const removed = await pruneMcpServersByIds([...REMOVED_BUILTIN_MCP_IDS]);
+  if (removed.length > 0) {
+    console.log("[Cyrene] 已清理遗留的已下架内置 MCP:", removed.join(", "));
+  }
+
+  void syncPlaywrightMcp(initialSettings).catch((e) =>
+    console.error("[Cyrene] playwright MCP sync failed:", e)
+  );
+
+  // TODO: 截图功能重构中，暂时禁用
+  // initScreenshotIpc();
+  // registerScreenshotHotkey(initialSettings.screenshotHotkey ?? "Alt+Shift+S");
+
+  // Cloud Music MCP wiring (MusicService + IPC + 5 Agent tools + shutdown latch)
+  const musicPaths = resolveMusicPaths();
+  const musicBootstrap = bootstrapMusicService(musicPaths, {
+    contextRefs: contextRefRegistry,
+    ingestContextEvent: (event) => citaService.ingest(event),
+    sendCard: (card) => {
+      if (chatWindow && !chatWindow.isDestroyed()) {
+        chatWindow.webContents.send(IPC.AGUI_EVENT, {
+          type: "CUSTOM",
+          name: "cyrene.music",
+          value: card,
+        });
+        return true;
+      }
+      return false;
+    },
+  });
+  installShutdownLatch(musicBootstrap);
+
+  // Skill 系统：扫描双源 skills + 注册 meta-tool
+  initSkills();
+  try {
+    loadMusicCompanionHost(
+      path.join(app.getAppPath(), "dist", "skills", "cyrene-music-companion", "index.js"),
+      () => ({
+        skillEnabled: skillRegistry.getById("cyrene-music-companion")?.enabled === true,
+        backendAvailable: ["ready", "degraded"].includes(musicBootstrap.service.getBackendState()),
+        enabledTools: toolRegistry.getEnabledTools().map((tool) => tool.id),
+      }),
+    );
+    skillRegistry.setAvailability("cyrene-music-companion", isMusicCompanionAvailable);
+  } catch (err) {
+    console.error("[MusicCompanion] 复合 Skill 加载失败:", err);
+    skillRegistry.setAvailability("cyrene-music-companion", () => false);
+  }
+
+  // 游戏代肝：IPC + game_bot_start 工具
+  initGameBot();
+
+  // 多渠道（微信/飞书/...）：先注入 dispatcher 的 buildAndRunAgent + TTS + 镜像广播 + 最近历史读取，
+  // 让 channels 模块拿到真 agent + 出站增强能力 + 对话上下文。
+  setDispatcherLoadRecentHistory(async (sessionId, limit) => {
+    // 委托给 history-log：读 userData/channels/history/<sessionId>.jsonl 最新 N 条
+    const { loadRecentHistory } = await import("./channels/history-log");
+    return loadRecentHistory(sessionId, limit);
+  });
+  setDispatcherLoadGeneralSettings(loadGeneralSettings);
+
+  setDispatcherBuildAndRunAgent(async (msg, sessionId, priorMessages) => {
+    // 渠道响应结果：统一由 dispatcher 按 cap 降级到 OutgoingMessage.parts。
+    // 包含 sticker 决定（从 onAgentRunFinished 返回，避免在 dispatcher 端重新算一遍 embedding）。
+    const channelResult: { text: string; sticker: string | null } = { text: "", sticker: null };
+
+    // Phase 3.3：按 toolSandbox 过滤可用工具
+    const sandbox = loadChannelsSettings().toolSandbox;
+    const allTools = toolRegistry.getEnabledTools();
+    const sandboxFilteredTools: ToolDefinition[] = sandbox === "safe-only"
+      ? allTools.filter((t) => (t.risk ?? "safe") === ("safe" as ToolRiskLevel))
+      : allTools;
+    const toolsAllowedBySandbox: ToolDefinition[] = sandbox === "off"
+      ? []
+      : sandbox === "safe-only"
+        ? sandboxFilteredTools
+        : allTools;
+    const filteredTools = filterToolsForChannelConversation(toolsAllowedBySandbox, msg);
+    console.log(
+      "[Channels] bot run:",
+      `msg.channel=${msg.channel} sandbox=${sandbox} tools=${filteredTools.length}/${allTools.length} priorMsgs=${priorMessages?.length ?? 0}`,
+    );
+
+    // Phase A：拼接历史 (同桌面端 buildModelMessages 行为: 上滑窗最近 N 条).
+    // history-log 统一存 role: "user"|"assistant", 直接用即可.
+    const selectedHistory = selectChannelHistoryContext(priorMessages ?? [], msg.text);
+    const historyMessages = selectedHistory
+      .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
+      .map((m) => ({
+        role: m.role as "user" | "assistant" | "system",
+        content: m.content,
+      }));
+
+    // 把 IncomingMessage 转成 AguiRunInput，调 CyreneAgent
+    const channelModelSettings = loadModelSettings();
+    const imageSendStrategy = decideImageSendStrategy({
+      multimodal: channelModelSettings.multimodal,
+      vision: loadVisionConfig(),
+    });
+    const attachmentInputs = await buildChannelAttachmentInputs(msg, {
+      imageMode: imageSendStrategy.mode,
+      captionImage: async (filePath: string) => {
+        const validated = validateCaptionImagePath(filePath);
+        if (!validated.ok) return { ok: false, error: validated.error };
+        const visionCfg = loadVisionConfig();
+        if (!visionCfg) return { ok: false, error: "未配置视觉模型，无法分析图片" };
+        try {
+          const { captionImage } = await import("./orchestrator/vision-captioner");
+          const caption = await captionImage(
+            { base64: validated.buffer.toString("base64"), mime: validated.mime },
+            IMAGE_CAPTION_PROMPT,
+            visionCfg,
+          );
+          if (caption.startsWith("[错误")) return { ok: false, error: caption };
+          return { ok: true, caption };
+        } catch (err: any) {
+          return { ok: false, error: err?.message || String(err) };
+        }
+      },
+    });
+    const { options } = await buildAgentRunOptions(
+      {
+        messages: [
+          ...historyMessages,
+          { role: "user", content: msg.text },
+        ],
+        style: "01_default.md",
+        sessionId,
+        attachments: attachmentInputs.attachments,
+        imageAttachments: attachmentInputs.imageAttachments,
+        channel: msg.channel,
+        conversationIdentity: msg.conversationIdentity,
+        executionMode: sandbox === "off" ? "chat" : "work",
+        ...(sandbox === "off" ? {
+          userTurnId: `${msg.channel}:${msg.senderId}:${msg.at.toISOString()}:user`,
+          assistantTurnId: `${msg.channel}:${msg.senderId}:${msg.at.toISOString()}:assistant`,
+        } : {}),
+      },
+      buildOptionsDeps,
+    );
+    const executionPlan = planChannelExecution({
+      text: msg.text,
+      attachments: msg.attachments,
+      enabledToolIds: filteredTools.map((tool) => tool.id),
+      characterNames: getActiveCharacter().speechRecognitionHints.terms,
+    });
+    options.executionMode = executionPlan.mode === "soul-only" ? "soul-only" : "two-phase";
+    options.toolContextMetadata = {
+      sessionId,
+      channel: msg.channel,
+      ...(msg.connectionAccountId ? { connectionAccountId: msg.connectionAccountId } : {}),
+      ...(msg.conversationIdentity?.participantId
+        ? { participantId: msg.conversationIdentity.participantId }
+        : {}),
+    };
+    options.softNoThink = shouldUseWechatQwenSoftNoThink({
+      channel: msg.channel,
+      baseUrl: channelModelSettings.baseUrl,
+      model: channelModelSettings.model,
+    });
+    options.finishAfterFirstToolBatch = executionPlan.finishAfterFirstToolBatch;
+    const localFallback = resolveWechatLocalModelFallback({
+      channel: msg.channel,
+      primaryBaseUrl: channelModelSettings.baseUrl,
+      perProvider: channelModelSettings.perProvider,
+    });
+    if (localFallback) {
+      options.fallbackSettings = localFallback;
+      options.fallbackSoftNoThink = shouldUseWechatQwenSoftNoThink({
+        channel: msg.channel,
+        baseUrl: localFallback.baseUrl,
+        model: localFallback.model,
+      });
+      options.fallbackAfterMs = 15_000;
+    }
+    const selectedTools = executionPlan.mode === "soul-only"
+      ? []
+      : executionPlan.mode === "tool-loop"
+        ? filteredTools.filter((tool) => executionPlan.candidateToolIds?.includes(tool.id))
+        : filteredTools;
+    options.tools = selectedTools;
+    options.toolSystemContent = buildToolSystemPrompt(selectedTools);
+    console.log(
+      "[Channels] execution plan:",
+      `mode=${executionPlan.mode} reason=${executionPlan.reason} tools=${selectedTools.length}/${filteredTools.length}` +
+      ` history=${historyMessages.length}/${priorMessages?.length ?? 0}` +
+      (executionPlan.finishAfterFirstToolBatch ? " finishAfterFirstToolBatch=true" : "") +
+      (options.softNoThink ? " softNoThink=true" : "") +
+      (localFallback ? ` fallback=${localFallback.model} after=15000ms` : ""),
+    );
+
+    const threadId = `thread-${sessionId}-${Date.now()}`;
+    const agent = new CyreneAgent({ threadId, description: `bot:${msg.channel}:${msg.senderId}` });
+    const reply = await new Promise<string>((resolve, reject) => {
+      agent.runWithEvents(options).subscribe({
+        complete: () => {
+          resolve(agent.lastResult?.reply ?? "");
+        },
+        error: (err) => reject(err instanceof Error ? err : new Error(String(err))),
+      });
+    });
+    channelResult.text = reply;
+    if (agent.lastResult) {
+      const finished = await onAgentRunFinished(
+        agent.lastResult,
+        msg.text,
+        onRunFinishedDeps,
+        msg.channel,
+        sessionId,
+      );
+      // 把 sticker 决定透出给 dispatcher，让它纳入 OutgoingMessage.parts；
+      // 桌面聊天窗的 sticker 仍由 onAgentRunFinished 内部 IPC 广播承担，此处不重复。
+      channelResult.sticker = finished.sticker;
+    }
+    // 落历史
+    void indexConversationTurn(sessionId, msg.text, reply);
+    return channelResult;
+  });
+
+  // Phase 3.1：注入 TTS 合成 —— dispatcher 在 reply 后会用这个生成渠道音频
+  setDispatcherSynthesizeTts(async (text: string, context) => {
+    const globalCfg = loadGeneralSettings();
+    if (globalCfg.ttsEngine === "off") return null;
+    const voice = getActiveCharacter().capabilities.voice;
+    if (voice.status !== "available") return null;
+    const voiceResolution = applyVoiceProfileToTtsSettings(voice.profile, globalCfg);
+    if (voiceResolution.status !== "available") {
+      console.warn("[Channels] 当前角色 Voice Profile 所需服务不可用:", voiceResolution);
+      return null;
+    }
+    const cfg = voiceResolution.settings;
+    if (cfg.ttsEngine === "minimax" && (!cfg.ttsMinimaxKey || !cfg.ttsMinimaxVoiceId)) return null;
+    if (cfg.ttsEngine === "gptsovits" && (!cfg.ttsGptsovitsBaseUrl || !cfg.ttsGptsovitsRefAudioPath || !cfg.ttsGptsovitsPromptText)) return null;
+    if (cfg.ttsEngine === "custom-cloud" && !cfg.ttsCustomCloudEndpointUrl) return null;
+    if (cfg.ttsEngine === "mimo" && (!cfg.ttsMimoKey || !cfg.ttsMimoVoiceAudioPath)) return null;
+    // 限制 TTS 文本长度（飞书 audio 100M 限制 + 用户体验，太长应截断）
+    const ttsText = text.length > 1000 ? text.slice(0, 1000) + "…" : text;
+    try {
+      const requestedFormat = context.channel === "wechat" ? "wav" : "mp3";
+      const result = await synthesizeByEngine(cfg.ttsEngine, {
+        text: ttsText,
+        speed: cfg.ttsSpeed,
+        volume: cfg.ttsVolume,
+        // minimax
+        apiKey: cfg.ttsEngine === "mimo"
+          ? cfg.ttsMimoKey
+          : cfg.ttsEngine === "custom-cloud"
+            ? cfg.ttsCustomCloudApiKey
+            : cfg.ttsMinimaxKey,
+        voiceId: cfg.ttsEngine === "mimo"
+          ? ""
+          : cfg.ttsEngine === "custom-cloud"
+            ? cfg.ttsCustomCloudVoiceId
+            : cfg.ttsMinimaxVoiceId,
+        model: cfg.ttsMinimaxModel,
+        // gptsovits
+        baseUrl: cfg.ttsGptsovitsBaseUrl,
+        refAudioPath: cfg.ttsGptsovitsRefAudioPath,
+        promptText: cfg.ttsGptsovitsPromptText,
+        promptLang: cfg.ttsGptsovitsPromptLang,
+        textLang: cfg.ttsGptsovitsTextLang,
+        // custom-cloud
+        endpointUrl: cfg.ttsCustomCloudEndpointUrl,
+        timeoutMs: cfg.ttsCustomCloudTimeoutMs,
+        // mimo
+        voiceAudioPath: cfg.ttsMimoVoiceAudioPath,
+        stylePrompt: cfg.ttsMimoStylePrompt,
+        format: requestedFormat,
+      });
+      const headerHex = result.audio.subarray(0, 4).toString("hex");
+      console.log("[TTS verify] engine=", cfg.ttsEngine, "format=", result.format, "header=", headerHex, "size=", result.audio.length);
+      return {
+        audio: result.audio,
+        format: result.format,
+        mime: result.format === "wav" ? "audio/wav" : result.format === "pcm" ? "audio/pcm" : "audio/mpeg",
+        extension: result.format === "wav" ? ".wav" : result.format === "pcm" ? ".pcm" : ".mp3",
+      };
+    } catch (err) {
+      console.warn("[Channels] TTS 合成失败:", err instanceof Error ? err.message : err);
+      return null;
+    }
+  });
+
+  // Phase 3.2：注入桌面端镜像广播 —— 把 bot 入站/出站消息推到 chatWindow
+  setDispatcherBroadcastChat((event) => {
+    const win = chatWindow;
+    if (!win || win.isDestroyed()) return;
+    try {
+      win.webContents.send(IPC.AGUI_EVENT, {
+        type: "CUSTOM",
+        name: "cyrene.botMessage",
+        value: event,
+      });
+    } catch (err) {
+      console.warn("[Channels] botMessage 广播失败:", err);
+    }
+  });
+
+  void initChannels();
+
+  // 任务清单（todo_write 工具的持久化 + 事件广播）：
+  // - loadTodos 从磁盘恢复上次未完成的任务（跨重启延续）
+  // - onTodosChange 订阅变化，把 TodoState 作为 CUSTOM 事件转发给所有聊天窗口
+  //   渲染端收到 cyrene.todos 后渲染左上角进度面板
+  loadTodos();
+  onTodosChange((state) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      try {
+        win.webContents.send(IPC.AGUI_EVENT, {
+          type: "CUSTOM",
+          name: "cyrene.todos",
+          value: state,
+        });
+      } catch (e) {
+        console.warn("[Cyrene] todos 广播失败:", e);
+      }
+    }
+  });
+
+  const schedulerStore = getSchedulerStore();
+  schedulerStore.load();
+  const schedulerRunner = createSchedulerRunner({
+    buildOptions: async (task: ScheduledTask) => {
+      const settings = loadModelSettings();
+      if (!settings.apiKey) throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
+      const messages = [{ role: "user" as const, content: task.prompt }];
+      let alwaysOnContext = "";
+      try {
+        alwaysOnContext = await buildAlwaysOnContext(task.prompt, messages);
+      } catch (err) {
+        console.warn("[Scheduler] always-on context build failed:", err);
+      }
+      let environmentContext = "";
+      try {
+        const profile = loadUserProfile();
+        environmentContext = buildEnvironmentContext(
+          { provider: settings.provider, model: settings.model },
+          { nickname: profile.nickname, callPreference: profile.callPreference, birthday: profile.birthday, defaultCity: profile.defaultCity, timezone: profile.timezone },
+        );
+      } catch (err) {
+        console.warn("[Scheduler] environment context build failed:", err);
+      }
+      const skillCatalog = buildSkillCatalog(skillRegistry.getEnabled());
+      const systemContent =
+        (environmentContext ? environmentContext + "\n\n" : "") +
+        (alwaysOnContext ? alwaysOnContext + "\n\n" : "") +
+        buildSystemPrompt("01_default.md") +
+        (skillCatalog ? "\n\n---\n\n" + skillCatalog : "");
+      return {
+        settings: { provider: settings.provider, baseUrl: settings.baseUrl, model: settings.model, apiKey: settings.apiKey },
+        messages: [{ role: "system", content: systemContent }, ...messages],
+        timeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+      };
+    },
+    getChatWebContents: () => (chatWindow && !chatWindow.isDestroyed() ? chatWindow.webContents : null),
+    recordHistory: (entry) => schedulerStore.recordHistory(entry),
+    id: () => `hist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    now: () => new Date(),
+  });
+  schedulerEngine = new SchedulerEngine({
+    store: schedulerStore,
+    runTask: schedulerRunner.runScheduledTask,
+  });
+  registerSchedulerIpc(schedulerStore, schedulerEngine, () => toolRegistry.getAllTools());
+
+  // AG-UI 事件流桥：渲染进程 invoke(AGUI_RUN) → CyreneAgent 跑 FC 循环 → 事件透传
+  // buildOptions 负责统一构建上下文；onRunFinished 复用副作用
+  // Phase 0 重构：抽出到 orchestrator/build-options.ts，三处共用（桌面 / scheduler / bot）
+  // deps 函数签名故意宽 (unknown/ReadonlyArray)；这里做一次包装把强类型函数适配进去
+  const socialAtomStore = createSocialAtomStore(
+    () => path.join(requireActiveCharacterState().root, "social-context", "chat-social-atoms.json"),
+  );
+  const socialContextScheduler = createSocialContextScheduler({
+    store: socialAtomStore,
+    enqueue: (label, task) => enqueueLLMTask(label, task, {
+      log: false,
+      retryRateLimit: false,
+    }),
+    generate: async (input, repair) => {
+      const settings = loadModelSettings();
+      const config: VendorConfig = {
+        provider: settings.provider,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        apiKey: settings.apiKey,
+        explicitTransport: settings.explicitTransport,
+        reasoning: { mode: "off" },
+      };
+      const adapter = getAdapterForConfig(config);
+      const profile = resolveStructuredOutputProfile({
+        provider: adapter.id,
+        model: config.model,
+        transport: adapter.transport,
+        endpointKind: classifyStructuredOutputEndpoint({
+          providerId: adapter.id,
+          configuredBaseUrl: config.baseUrl,
+          officialBaseUrl: adapter.capability.baseUrl,
+        }),
+      });
+      const structuredOutput: StructuredOutputRequest = profile.mode === "provider_json_schema"
+        ? {
+            mode: "json_schema",
+            name: "chat_social_atoms",
+            schema: SOCIAL_EXTRACTION_SCHEMA,
+            strict: true,
+          }
+        : profile.mode === "provider_json_object"
+          ? { mode: "json_object" }
+          : {
+              mode: "prompt_json",
+              sendJsonObjectHint: profile.requestHints.sendJsonObject,
+            };
+      const response = await callChatCompletionsNonStream(
+        settings,
+        [
+          {
+            role: "system",
+            content: "Extract only directly supported chat continuity facts. Return exactly one JSON object and no prose.",
+          },
+          { role: "user", content: buildSocialExtractionPrompt(input, repair) },
+        ],
+        0,
+        12_000,
+        "Chat social context extraction",
+        { mode: "off" },
+        {
+          structuredOutput,
+          maxTokens: 1_000,
+          ...(profile.requestHints.reasoningSplit
+            ? { extraBody: { reasoning_split: true } }
+            : {}),
+        },
+      );
+      if (response.refusal || normalizeFinishReason(response.finishReason) !== "complete") {
+        throw new Error("CHAT_SOCIAL_EXTRACTION_INCOMPLETE");
+      }
+      return response.text;
+    },
+    recordMetric: (metric) => {
+      console.log(
+        `[ChatSocialContext] outcome=${metric.outcome} accepted=${metric.acceptedCount} rejected=${metric.rejectedCount} attempts=${metric.attempts} repairs=${metric.repairCount}`,
+      );
+    },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const buildOptionsDeps: BuildOptionsDeps = {
+    loadModelSettings: () => loadModelSettings(),
+    loadGeneralSettings: () => loadGeneralSettings(),
+    loadUserProfile: () => loadUserProfile(),
+    loadChannelUserProfile: (identity) => getWechatChannelIdentityState().loadProfile(identity),
+    buildEnvironmentContext: ((model: { provider: string; model: string }, profile: unknown) =>
+      buildEnvironmentContext(model as any, profile as any)) as BuildOptionsDeps["buildEnvironmentContext"],
+    buildSkillCatalog: ((skills: ReadonlyArray<unknown>) =>
+      buildSkillCatalog(skills as any)) as BuildOptionsDeps["buildSkillCatalog"],
+    buildAutoInjectedSkillContext: ((skills: ReadonlyArray<unknown>) =>
+      buildAutoInjectedSkillContext(skills as any, (id) => skillRegistry.getBody(id))) as BuildOptionsDeps["buildAutoInjectedSkillContext"],
+    buildAutoInjectedSoulContext: ((skills: ReadonlyArray<unknown>) =>
+      buildAutoInjectedSoulContext(skills as any, (id) => skillRegistry.getBody(id))) as BuildOptionsDeps["buildAutoInjectedSoulContext"],
+    skillRegistry: skillRegistry as unknown as BuildOptionsDeps["skillRegistry"],
+    resolveSlashActivation: ((messages: ReadonlyArray<{ role: string; content?: string }>) =>
+      resolveSlashActivation(messages as any)) as BuildOptionsDeps["resolveSlashActivation"],
+    buildToneInjection: (async (userText, messages, provider, index) =>
+      buildToneInjection(userText, messages as any, provider as any, index as any)) as BuildOptionsDeps["buildToneInjection"],
+    sceneEmbeddingIndex: sceneEmbeddingIndex as unknown,
+    getSceneEmbeddingProvider: () => getSceneEmbeddingProvider() as unknown,
+    buildAlwaysOnContext: (async (userText, messages, options) =>
+      buildAlwaysOnContext(userText, messages as any, options)) as BuildOptionsDeps["buildAlwaysOnContext"],
+    buildRelationshipContext,
+    buildChannelRelationshipContext: buildChannelConversationRelationshipContext,
+    buildSystemPrompt,
+    buildToolSystemPrompt: (enabledTools) => buildToolSystemPrompt(enabledTools as ToolDefinition[]),
+    buildSoulSystemBasePrompt,
+    readStylePrompt,
+    resolveSoulSampling: resolveSoulSamplingForStyle,
+    toolRegistry: { getEnabled: () => toolRegistry.getEnabledTools() },
+    logWorldbookInjection,
+    normalizeChatMessages: ((raw: ReadonlyArray<unknown>) =>
+      normalizeChatMessages(raw as any)) as BuildOptionsDeps["normalizeChatMessages"],
+    chatRequestTimeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+    captionImageForFallback: async (filePath: string) => {
+      const validated = validateCaptionImagePath(filePath);
+      if (!validated.ok) return { ok: false, error: validated.error };
+      const visionCfg = loadVisionConfig();
+      if (!visionCfg) return { ok: false, error: "未配置视觉模型，无法分析图片" };
+      try {
+        const { captionImage } = await import("./orchestrator/vision-captioner");
+        const caption = await captionImage(
+          { base64: validated.buffer.toString("base64"), mime: validated.mime },
+          IMAGE_CAPTION_PROMPT,
+          visionCfg,
+        );
+        if (caption.startsWith("[错误")) return { ok: false, error: caption };
+        return { ok: true, caption };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    },
+    loadActionGateSystemPrompt: () => loadPromptFile("action_gate_system.md"),
+    loadNativeFcSystemPrompt: () => loadPromptFile("native_fc_system.md"),
+    prepareCitaTurn: (input) => citaService.prepareTurn(input),
+    buildChatSocialContext: async ({ conversationId, query }) => {
+      const now = Date.now();
+      const active = socialAtomStore.listActive(conversationId, now);
+      const retrievedAtoms = rankSocialAtoms(query, active, { now, limit: 5 });
+      return {
+        contextBlock: compileSocialContextBlock(retrievedAtoms),
+        retrievedAtoms,
+      };
+    },
+  };
+  const onRunFinishedDeps: OnRunFinishedDeps = {
+    loadModelSettings: () => loadModelSettings(),
+    scheduleMemoryWrite,
+    scheduleSocialAtomExtraction: (input) => socialContextScheduler.schedule(input),
+    inferRuntimeState,
+    runtimeState,
+    feelingToExpression,
+    setRuntimeState: (next) => {
+      if (next.status !== undefined) runtimeState.status = next.status as RuntimeStatus;
+      if (next.expression !== undefined) runtimeState.expression = next.expression;
+      if (next.updatedAt !== undefined) runtimeState.updatedAt = next.updatedAt;
+      if (next.feeling !== undefined) {
+        runtimeState.feeling = next.feeling as RuntimeFeeling;
+        feelingScores = createFeelingScores(runtimeState.feeling);
+      }
+    },
+    stickerEmbeddingIndex: stickerEmbeddingIndex as unknown,
+    getStickerEmbeddingIndex: () => stickerEmbeddingIndex as unknown,
+    canUseActiveCharacterStickers: () => (
+      getActiveCharacter().capabilities.stickers.status === "available"
+    ),
+    getEmbeddingProvider: () => getEmbeddingProvider() as unknown,
+    matchSticker: (async (text, provider, index, threshold) =>
+      matchSticker(text, provider as any, index as any, threshold) as Promise<{ id: string } | null | undefined>) as OnRunFinishedDeps["matchSticker"],
+    loadStickerSettings,
+    broadcastRuntimeStateChanged,
+    observeRuntimeState: (async (settings, history, userText, reply) =>
+      observeRuntimeState(settings as any, history as any, userText, reply)) as OnRunFinishedDeps["observeRuntimeState"],
+    recordRelationshipTurn,
+    recordChannelRelationshipTurn: recordChannelConversationRelationship,
+    getChatWindow: () => chatWindow,
+  };
+  registerAgUiIpc(
+    async (input: AguiRunInput) => buildAgentRunOptions(input, buildOptionsDeps),
+    // 桌面 IPC 路径不消费 sticker（sticker 由 onAgentRunFinished 内部 IPC 广播承担）
+    async (result, latestUserText) => { await onAgentRunFinished(result, latestUserText, onRunFinishedDeps); },
+    () => chatWindow,
+    proactiveConversationLifecycle,
+  );
+
+  ipcMain.handle(IPC.CHATS_OPEN_IN_CHAT_WINDOW, (_event, sessionId: string) => {
+    createChatWindow(sessionId);
+    return true;
+  });
+  // 聊天窗口启动/切换会话时上报当前活跃 sessionId；main 广播给所有窗口
+  // 用途：设置面板"删除当前会话"时差异化提示文案
+  ipcMain.handle(IPC.CHATS_SET_ACTIVE_SESSION, (_event, sessionId: string | null) => {
+    activeChatSessionId = sessionId ?? null;
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      try { win.webContents.send(IPC.CHATS_ACTIVE_SESSION_CHANGED, activeChatSessionId); } catch { /* ignore */ }
+    }
+    return true;
+  });
+  ipcMain.handle(IPC.CHATS_GET_ACTIVE_SESSION, () => activeChatSessionId);
+
+  const generalSettings = loadGeneralSettings();
+  createWindow();
+  createChatWindow();
+  if (generalSettings.sidebarVisible) createSidebarWindow();
+  if (generalSettings.tasksVisible) createTasksWindow();
+  createTray();
+  // 权限模块初始化：必须在 createWindow 之后但任意工具调用之前
+  initPermissionFromDisk();
+  registerPermissionIpc();
+  registerChoiceIpc();
+  registerCallIpc();
+  const desktopDeviceCredentialVault = new DesktopDeviceCredentialVault({
+    rootDir: path.join(app.getPath("userData"), "remote-access"),
+    safeStorage,
+  });
+  const desktopDeviceAuthorizationClient = new DesktopDeviceAuthorizationClient({
+    vault: desktopDeviceCredentialVault,
+    request: createDesktopAuthorizationRequest(
+      (url, request) => net.fetch(url, request),
+    ),
+  });
+  desktopAvailabilityCoordinator = new DesktopAvailabilityCoordinator({
+    client: desktopDeviceAuthorizationClient,
+    onFailure: () => {
+      // 可用性是短租约；瞬时失败留给下一轮续租修复，不记录运输层原始错误。
+    },
+  });
+  void desktopAvailabilityCoordinator.start();
+  const appendRemoteCallDiagnostic = (entry: Record<string, unknown>): void => {
+    try {
+      fs.appendFileSync(
+        path.join(os.tmpdir(), "cyrene-remote-call-diagnostic.jsonl"),
+        `${JSON.stringify({
+          at: new Date().toISOString(),
+          ...entry,
+        })}\n`,
+        "utf8",
+      );
+    } catch {
+      // Diagnostics must never affect call behavior.
+    }
+  };
+  desktopRemoteCallCoordinator = new DesktopRemoteCallCoordinator({
+    client: desktopDeviceAuthorizationClient,
+    getActiveCharacter: () => {
+      const character = getActiveCharacter();
+      return { id: character.id, displayName: character.displayName };
+    },
+    assertReady: assertRemoteMobileCallReadiness,
+    startRemoteCall: async (grant, onStatus) => {
+      const settings = loadGeneralSettings();
+      await startRemoteMobileCall(
+        grant,
+        {
+          silenceMs: settings.asrVadSilenceMs,
+          threshold: settings.asrVadThreshold,
+        },
+        onStatus,
+        (event) => appendRemoteCallDiagnostic({ ...event }),
+      );
+    },
+    stopRemoteCall: stopMobileCall,
+    // [DEBUG-remote-call-stage] Temporary content-free trace for the current
+    // desktop-join investigation. It records no call/device IDs, URLs,
+    // credentials, messages, or transport details.
+    onFailure: (failure) => {
+      appendRemoteCallDiagnostic({
+        event: "CALL_SETUP_FAILED",
+        stage: failure.stage,
+        code: failure.code,
+      });
+    },
+  });
+  try {
+    fs.writeFileSync(
+      path.join(os.tmpdir(), "cyrene-remote-call-diagnostic.jsonl"),
+      `${JSON.stringify({
+        at: new Date().toISOString(),
+        event: "COORDINATOR_STARTED",
+      })}\n`,
+      "utf8",
+    );
+  } catch {
+    // Diagnostics must never affect application startup.
+  }
+  desktopRemoteCallCoordinator.start();
+  powerMonitor.on("suspend", () => {
+    void desktopAvailabilityCoordinator?.suspend();
+    void desktopRemoteCallCoordinator?.suspend();
+  });
+  powerMonitor.on("resume", () => {
+    void desktopAvailabilityCoordinator?.resume();
+    desktopRemoteCallCoordinator?.resume();
+  });
+  const pairingQrCode = require("qrcode") as {
+    toDataURL(
+      text: string,
+      options?: {
+        width?: number;
+        margin?: number;
+        errorCorrectionLevel?: string;
+      },
+    ): Promise<string>;
+  };
+  registerDevicePairingIpc({
+    ipcMain,
+    client: desktopDeviceAuthorizationClient,
+    toDataUrl: pairingQrCode.toDataURL,
+  });
+  // 手机端通话的私钥仅在桌面主进程读取。renderer 只拿到二维码图片与
+  // 过期时间；不会拿到可复制的配对链接、原始手机 JWT 或桌面 Agent Token。
+  const broadcastMobileCallStatus = (status: MobileCallStatus): void => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      try { win.webContents.send(IPC.CALL_MOBILE_STATUS, status); } catch { /* ignore closing windows */ }
+    }
+  };
+  ipcMain.handle(IPC.CALL_MOBILE_START, async () => {
+    const settings = loadGeneralSettings();
+    const pairing = await startMobileCall(
+      {
+        serverUrl: settings.mobileCallLiveKitUrl,
+        apiKey: settings.mobileCallLiveKitApiKey,
+        apiSecret: settings.mobileCallLiveKitApiSecret,
+      },
+      undefined,
+      {
+        silenceMs: settings.asrVadSilenceMs,
+        threshold: settings.asrVadThreshold,
+      },
+      broadcastMobileCallStatus,
+    );
+    try {
+      // qrcode 没有官方声明文件；主进程以窄接口调用，避免把生成器放进
+      // 渲染进程，也确保链接不会被写入任何持久化状态。
+      const qrCode = require("qrcode") as {
+        toDataURL(text: string, options?: { width?: number; margin?: number; errorCorrectionLevel?: string }): Promise<string>;
+      };
+      const qrDataUrl = await qrCode.toDataURL(pairing.mobileLink, {
+        width: 260,
+        margin: 1,
+        errorCorrectionLevel: "M",
+      });
+      return {
+        callId: pairing.callId,
+        roomName: pairing.roomName,
+        expiresAt: pairing.expiresAt,
+        qrDataUrl,
+      };
+    } catch (error) {
+      // If QR rendering fails after the bridge joined, do not leave an
+      // unreachable room alive in the background.
+      await stopMobileCall();
+      throw error;
+    }
+  });
+  ipcMain.handle(IPC.CALL_MOBILE_STOP, async () => {
+    await stopMobileCall();
+    broadcastMobileCallStatus({ state: "ended" });
+    return { ok: true };
+  });
+  console.log("[Cyrene] 当前 agent 权限档位:", getCurrentLevel());
+  try {
+    const modelSettings = loadModelSettings();
+    await initRAG("auto", undefined, undefined, modelSettings.embeddingModel);
+    try {
+      await reconcileUserMemoryIndex();
+    } catch (err) {
+      console.warn("[Memory/RAG] startup reconciliation failed:", err);
+    }
+    // 初始化 MCP Manager；scheduler 启动前等待一次，避免近即时任务早于 MCP 工具恢复。
+    await initMcpManager();
+    console.log("[Cyrene] RAG initialized OK");
+
+    await initReranker(modelSettings.rerankerMode);
+  } catch (err) {
+    console.error("[Cyrene] RAG init FAILED:", err);
+  }
+
+  scheduleStartupEmbeddingRefreshes();
+
+  schedulerEngine.start();
+});
+
+app.on("window-all-closed", () => {});
+
+// 应用退出前把 token 用量缓存落盘（防抖未触发的最后一次写）
+app.on("before-quit", () => {
+  void desktopAvailabilityCoordinator?.stop();
+  void desktopRemoteCallCoordinator?.stop();
+  stopCall();
+  void stopMobileCall();
+  disposeAsr();
+  petWindowMoveController.dispose();
+  schedulerEngine?.stop();
+  stopProactiveTrigger();
+  flushTokenUsage();
+  void shutdownChannels();
+  cleanupScreenshotOnQuit();
+});
+
+app.on("activate", () => {
+  if (mainWindow === null) {
+    createWindow();
+  }
+});

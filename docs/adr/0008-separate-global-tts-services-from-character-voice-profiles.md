@@ -1,0 +1,3 @@
+# Separate global TTS Services from character Voice Profiles
+
+TTS endpoints, credentials, timeouts, and local process configuration are global TTS Services, while each Character Package owns a credential-free Voice Profile that references a service and supplies its voice ID or reference audio, languages, speed, style, and output preferences. Switching changes only the Voice Profile; a missing service makes that character’s TTS capability unavailable and never falls back to the previous voice, keeping secrets out of importable packages while allowing different characters to select different configured engines.

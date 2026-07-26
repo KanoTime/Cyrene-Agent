@@ -1,0 +1,45 @@
+# EAS upload policy. Keep the normal local/generated/sensitive exclusions from
+# .gitignore explicit so a build invoked from this app directory never uploads
+# node_modules, local Expo state, generated native projects, or local secrets.
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env
+.env.*
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+/ios
+/android

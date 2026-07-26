@@ -1,0 +1,3 @@
+# Keep Application Policy above Character Content
+
+Character Packages control Character Content such as identity, soul, style, examples, worldbooks, call persona, proactive tone, and character-facing tool expression, while Application Policy retains exclusive authority over tool protocols, permissions, confirmations, file and network safety, memory writes, channels, and prompt-injection resistance. Runtime prompt composition uses a fixed precedence in which imported Markdown is restricted data below Application Policy, allowing complete personalities without letting a package grant itself capabilities or rewrite global safeguards.

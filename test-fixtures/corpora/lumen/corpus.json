@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "characterId": "fixture.lumen",
+  "corpusVersion": "1.0.0",
+  "thresholds": {
+    "verifiedJapanese": 1,
+    "officialChinesePairs": 1,
+    "sourceCategories": 1,
+    "requiredScenarios": {
+      "daily_relaxed": 1
+    }
+  },
+  "sources": [
+    {
+      "id": "lumen-official-fixture",
+      "title": "流明原创许可安全语料",
+      "category": "official-site",
+      "authorityLevel": 1,
+      "url": "https://example.invalid/cyrene-agent/lumen",
+      "contentHash": "sha256:6e5043d5b768afe4bba79a24da14d5c360e6694f2f04ffb1445334beeb65b7fb"
+    }
+  ],
+  "exceptions": []
+}

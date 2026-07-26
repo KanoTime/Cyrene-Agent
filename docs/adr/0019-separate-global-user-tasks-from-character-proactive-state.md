@@ -1,0 +1,3 @@
+# Separate Global User Tasks from Character Proactive State
+
+Todos, schedules, reminders, and tool-created obligations are Global User Tasks that survive character switches and are expressed by whichever character is active when they fire, without becoming that character’s relationship memory. Openers, idle-chat cooldowns, unanswered counts, character occasions, and proactive voice belong to Character Proactive State; inactive characters are paused and expired casual prompts are not replayed when they become active again, preventing background messages from identities the user is not currently using.

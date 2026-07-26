@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "actions": {
+    "neutral": { "kind": "motion", "group": "动作#6", "motionName": "动作回正" },
+    "wink": { "kind": "motion", "group": "动作#6", "motionName": "Wink~" },
+    "cute": { "kind": "motion", "group": "动作#6", "motionName": "我可爱吧~" },
+    "smile": { "kind": "motion", "group": "动作#6", "motionName": "笑一笑吧~" },
+    "cool": { "kind": "expression", "name": "墨镜" },
+    "question": { "kind": "expression", "name": "问号" },
+    "sparkle": { "kind": "expression", "name": "闪耀" },
+    "star_eyes": { "kind": "expression", "name": "星星眼" },
+    "dizzy": { "kind": "expression", "name": "圈圈眼" },
+    "happy_eyes": { "kind": "expression", "name": "开心眼" }
+  }
+}

@@ -1,0 +1,3 @@
+# Complete first-version switches through a Controlled Relaunch
+
+After target preflight and old-state persistence, the first version records both target and previous Character IDs, gracefully shuts down calls, workers, TTS, and character background activity, then uses a Controlled Relaunch to bind and revalidate the target at startup. Startup failure restores the previous character and reports the error; this brief automatic restart is preferred over rebuilding every startup-initialized singleton and cache in one process before character-resource access has been consolidated behind reliable seams.
