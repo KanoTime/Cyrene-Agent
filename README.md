@@ -8,6 +8,8 @@
 
 </div>
 
+> **私有开发仓说明**：`Liyang0701/Cyrene-agent-private` 用于保存个人本地开发与适配版本；后续从官方 `Playa-0v0/Cyrene-Agent` 拉取更新，并在本仓完成兼容、验证和合入。
+
 **Cyrene-Agent 是一个以《崩坏：星穹铁道》昔涟为核心角色的 Windows Live2D AI 桌面伴侣。**
 
 > 基于 Electron + TypeScript 开发的桌面端 Live2D 智能对话 Agent。  
