@@ -1,7 +1,7 @@
 # Cyrene 移动端语音通话实现与从零构建指南
 
 > 维护日期：2026-07-27
-> 适用版本：Cyrene Voice `1.0.10`（Android `versionCode 11`）及同日桌面端代码
+> 适用版本：Cyrene Voice `1.0.11`（Android `versionCode 12`）及同日桌面端代码
 > 目标读者：接手维护、重新部署、从零复现或升级这条语音链路的开发者
 > 安全说明：本文只记录变量名和示例值，不记录生产域名、Owner/设备标识或任何真实凭据
 
@@ -18,6 +18,7 @@
 - 手机长期凭据进入 SecureStore；LiveKit token 和每通 E2EE key 只短时驻留内存；
 - 网络短暂中断时尝试重连，最终以 HTTPS 权威状态收敛；
 - 桌面角色语音以 48 kHz、单声道、20 ms 帧发布。用户实测音色与桌面一致且无沙声；
+- 移动通话页复用桌面端的深紫背景、当前角色身份、通话计时、状态波形、字幕和圆形挂断视觉；内置昔涟头像只由稳定 `characterId=cyrene` 选择，其他角色在没有安全头像资源时使用中性首字占位，避免用可重复显示名错配角色资源；
 - 相同 application ID 和签名的 APK 可覆盖安装并保留配对。
 
 当前不支持后台来电、系统电话界面、推送唤醒、视频、群聊、多 Owner、多桌面排队或桌面离线云端 Agent。iOS 工程具备基础配置，但本轮生产验收对象是 Android。
@@ -101,13 +102,16 @@
 
 | 路径 | 职责 |
 |---|---|
-| `mobile/App.tsx` | 配对、呼叫、静音、挂断和状态展示 |
+| `mobile/App.tsx` | 配对、呼叫、静音、挂断、LiveKit 事件和 UI 状态编排 |
+| `mobile/src/call-presentation.ts` | 纯函数归约通话阶段、桌面同款文案、颜色和动效语义 |
+| `mobile/src/mobile-call-screen.tsx` | 通话页视觉、真实头像/安全 fallback、计时、波形、紧凑布局与减少动态效果适配 |
 | `mobile/index.ts` | 在加载 App 前注册 LiveKit WebRTC globals |
 | `mobile/src/device-pairing.ts` | challenge claim/outcome 与长期设备授权落盘 |
 | `mobile/src/device-authorization-store.ts` | SecureStore 读写与迁移 |
 | `mobile/src/entry-link.ts` | 只允许长期配对入口，明确拒绝旧无 E2EE 直连链接 |
 | `mobile/src/control-plane-origin.ts` | 必须显式提供控制面 origin；缺失时 fail-closed |
 | `mobile/src/remote-call.ts` | 发起/读取/结束呼叫，领取授权和媒体就绪 |
+| `mobile/src/remote-call-parser.ts` | 解析权威呼叫状态并保留稳定 Character ID |
 | `mobile/src/remote-call-state-monitor.ts` | 权威状态轮询与终态收敛 |
 | `mobile/App.tsx` 的 `EncryptedCallRoom` | LiveKit Room、音频会话、轨道订阅和 E2EE |
 | `mobile/src/call-credentials.ts` | 已停用旧直连协议的遗留解析器，仅供迁移辨识，不是生产入口 |
@@ -198,7 +202,8 @@ Android 麦克风 → WebRTC/Opus → rtc-node AudioStream
 - 桌面 `@livekit/rtc-node 0.13.31`、`livekit-server-sdk 2.17.0`；
 - 移动 `Expo 56.0.16`、`React Native 0.85.3`；
 - `@livekit/react-native 2.11.1`、`react-native-webrtc 144.1.1`、`livekit-client 2.20.2`；
-- `expo-secure-store 56.0.4`、`expo-camera 56.0.8`。
+- `expo-secure-store 56.0.4`、`expo-camera 56.0.8`；
+- 通话视觉使用 `expo-linear-gradient 56.0.4`、`@expo/vector-icons 15.1.1`，并显式锁定 SDK 56 的 `expo-font 56.0.7`，防止重复原生模块。
 
 不要单独升级其中一个 LiveKit/React Native 包；它们是需要一起构建和真人回归的兼容组。
 

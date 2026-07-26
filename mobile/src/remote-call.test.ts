@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StoredMobileDeviceAuthorization } from "./device-authorization-store";
 import { resolveControlPlaneOrigin } from "./control-plane-origin";
+import { parseRemoteVoiceCall } from "./remote-call-parser";
 
 function authorization(
   controlPlaneOrigin?: string,
@@ -25,5 +26,19 @@ describe("remote call control-plane routing", () => {
   it("fails closed instead of falling back to an obsolete deployment", () => {
     expect(() => resolveControlPlaneOrigin(authorization().controlPlaneOrigin))
       .toThrow("CONTROL_PLANE_ORIGIN_REQUIRED");
+  });
+});
+
+describe("remote call active character identity", () => {
+  it("keeps the stable character id alongside the display name", () => {
+    expect(parseRemoteVoiceCall({
+      callId: "call-1",
+      phase: "CONNECTING_MEDIA",
+      characterId: "cyrene",
+      characterName: "昔涟",
+    })).toMatchObject({
+      characterId: "cyrene",
+      characterName: "昔涟",
+    });
   });
 });

@@ -1,6 +1,7 @@
 import * as Crypto from "expo-crypto";
 import type { StoredMobileDeviceAuthorization } from "./device-authorization-store";
 import { resolveControlPlaneOrigin } from "./control-plane-origin";
+import { parseRemoteVoiceCall } from "./remote-call-parser";
 
 export type RemoteVoiceCallPhase =
   | "AWAITING_DESKTOP"
@@ -12,6 +13,7 @@ export type RemoteVoiceCallPhase =
 export interface RemoteVoiceCall {
   callId: string;
   phase: RemoteVoiceCallPhase;
+  characterId?: string;
   characterName?: string;
   terminationReason?: string;
 }
@@ -43,7 +45,7 @@ export async function requestRemoteVoiceCall(
     return { status: "REJECTED", reason: payload.reason };
   }
   if (payload.status !== "CALL_CREATED") throw new Error("REMOTE_CALL_RESPONSE_INVALID");
-  return { status: "CALL_CREATED", call: parseCall(payload.call) };
+  return { status: "CALL_CREATED", call: parseRemoteVoiceCall(payload.call) };
 }
 
 export async function readRemoteVoiceCall(
@@ -55,7 +57,7 @@ export async function readRemoteVoiceCall(
     "/v1/calls/status",
     { callId },
   );
-  return parseCall(payload.call);
+  return parseRemoteVoiceCall(payload.call);
 }
 
 export async function takeRemoteMediaGrant(
@@ -133,7 +135,7 @@ export async function reportRemoteMediaReady(
     { callId },
     options,
   );
-  return parseCall(payload.call);
+  return parseRemoteVoiceCall(payload.call);
 }
 
 async function authenticatedPost(
@@ -159,33 +161,4 @@ async function authenticatedPost(
       : "CONTROL_PLANE_REQUEST_FAILED");
   }
   return payload;
-}
-
-function parseCall(value: unknown): RemoteVoiceCall {
-  if (!value || typeof value !== "object") {
-    throw new Error("REMOTE_CALL_RESPONSE_INVALID");
-  }
-  const input = value as Record<string, unknown>;
-  if (
-    typeof input.callId !== "string"
-    || (
-      input.phase !== "AWAITING_DESKTOP"
-      && input.phase !== "CONNECTING_MEDIA"
-      && input.phase !== "ACTIVE"
-      && input.phase !== "RECONNECTING"
-      && input.phase !== "ENDED"
-    )
-  ) {
-    throw new Error("REMOTE_CALL_RESPONSE_INVALID");
-  }
-  return {
-    callId: input.callId,
-    phase: input.phase,
-    ...(typeof input.characterName === "string"
-      ? { characterName: input.characterName }
-      : {}),
-    ...(typeof input.terminationReason === "string"
-      ? { terminationReason: input.terminationReason }
-      : {}),
-  };
 }

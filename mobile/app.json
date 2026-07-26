@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cyrene Voice",
     "slug": "cyrene-voice",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "scheme": "cyrene",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.cyrene.agent.voice",
-      "versionCode": 11,
+      "versionCode": 12,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
@@ -49,7 +49,8 @@
       ],
       "@livekit/react-native-expo-plugin",
       "@config-plugins/react-native-webrtc",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-font"
     ],
     "extra": {
       "eas": {

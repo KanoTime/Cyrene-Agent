@@ -16,6 +16,7 @@ import {
   LiveKitRoom,
   RNE2EEManager,
   RNKeyProvider,
+  useIsSpeaking,
   useLocalParticipant,
   useRoomContext,
 } from "@livekit/react-native";
@@ -61,23 +62,22 @@ import {
 } from "./src/e2ee-session-readiness";
 import { createCallTransportStateHandlers } from "./src/call-transport-state";
 import { recoverUnexpectedRoomDisconnect } from "./src/unexpected-disconnect-recovery";
+import {
+  getMobileCallPresentation,
+  type MobileCallPhase,
+} from "./src/call-presentation";
+import { MobileCallScreen } from "./src/mobile-call-screen";
 
-type EncryptedCallCredentials = RemoteMediaJoinGrant & { characterName?: string };
+type EncryptedCallCredentials = RemoteMediaJoinGrant & {
+  characterId?: string;
+  characterName?: string;
+};
 
 type CallEvent =
   | { type: "state"; state: string }
   | { type: "transcript"; partial?: string; final?: string }
   | { type: "error"; message: string }
   | { type: "bridge"; state: string };
-
-const CALL_STATE_LABELS: Record<string, string> = {
-  ASR: "正在聆听",
-  THINKING: "Cyrene 正在思考…",
-  SPEAKING: "Cyrene 正在说话…",
-  LISTENING: "正在聆听",
-  ERROR: "通话暂时出错",
-  ENDED: "通话已结束",
-};
 
 function parseCallEvent(payload: Uint8Array): CallEvent | null {
   try {
@@ -107,20 +107,50 @@ function parseCallEvent(payload: Uint8Array): CallEvent | null {
 function ActiveCall({
   onHangUp,
   onRemoteEndHint,
+  characterId,
   characterName = "Cyrene",
   secureMediaReady = true,
 }: {
   onHangUp: () => void;
   onRemoteEndHint?: () => void;
+  characterId?: string;
   characterName?: string;
   secureMediaReady?: boolean;
 }): React.JSX.Element {
   const room = useRoomContext();
   const { isMicrophoneEnabled, localParticipant, lastMicrophoneError } = useLocalParticipant();
-  const [callState, setCallState] = useState("正在连接语音通话…");
+  const isLocalSpeaking = useIsSpeaking(localParticipant);
+  const [callPhase, setCallPhase] = useState<MobileCallPhase>("CONNECTING");
+  const [callDetail, setCallDetail] = useState<string | undefined>("正在连接语音通话…");
   const [transcript, setTranscript] = useState("");
   const secureMediaReadyRef = useRef(secureMediaReady);
   secureMediaReadyRef.current = secureMediaReady;
+  const resolvedCharacterName = characterName || "Cyrene";
+  const presentation = getMobileCallPresentation({
+    phase: callPhase,
+    characterName: resolvedCharacterName,
+    detail: callDetail,
+  });
+
+  const setTransportState = useCallback((state: string) => {
+    if (state.includes("聆听") && !state.includes("等待")) {
+      setCallPhase("LISTENING");
+      setCallDetail(undefined);
+      return;
+    }
+    if (state.includes("重连") || state.includes("恢复")) {
+      setCallPhase("RECONNECTING");
+      setCallDetail(state);
+      return;
+    }
+    if (state.includes("断开")) {
+      setCallPhase("ERROR");
+      setCallDetail(state);
+      return;
+    }
+    setCallPhase("CONNECTING");
+    setCallDetail(state);
+  }, []);
 
   useEffect(() => {
     const {
@@ -128,21 +158,41 @@ function ActiveCall({
       onReconnecting,
       onReconnected,
       onDisconnected,
-    } = createCallTransportStateHandlers(secureMediaReadyRef, setCallState);
+    } = createCallTransportStateHandlers(secureMediaReadyRef, setTransportState);
     const onData = (payload: Uint8Array, _participant: unknown, _kind: unknown, topic?: string) => {
       if (topic !== "cyrene.call.event") return;
       const event = parseCallEvent(payload);
       if (!event) return;
-      if (event.type === "state") setCallState(CALL_STATE_LABELS[event.state] ?? event.state);
+      if (event.type === "state") {
+        if (
+          event.state === "ASR"
+          || event.state === "THINKING"
+          || event.state === "SPEAKING"
+          || event.state === "LISTENING"
+          || event.state === "ERROR"
+          || event.state === "ENDED"
+        ) {
+          setCallPhase(event.state);
+          setCallDetail(undefined);
+        }
+      }
       if (event.type === "transcript") setTranscript(event.final ?? event.partial ?? "");
-      if (event.type === "error") setCallState(`通话出错：${event.message}`);
+      if (event.type === "error") {
+        setCallPhase("ERROR");
+        setCallDetail(`通话出错：${event.message}`);
+      }
       if (event.type === "bridge") {
         if (event.state === "connected" && secureMediaReady) {
-          setCallState("正在聆听");
+          setCallPhase("LISTENING");
+          setCallDetail(undefined);
         }
-        if (event.state === "reconnecting") setCallState("网络波动，正在自动重连…");
+        if (event.state === "reconnecting") {
+          setCallPhase("RECONNECTING");
+          setCallDetail("网络波动，正在自动重连…");
+        }
         if (event.state === "ended") {
-          setCallState("正在确认通话状态…");
+          setCallPhase("RECONNECTING");
+          setCallDetail("正在确认通话状态…");
           onRemoteEndHint?.();
         }
       }
@@ -161,10 +211,13 @@ function ActiveCall({
       room.off(RoomEvent.Disconnected, onDisconnected);
       room.off(RoomEvent.DataReceived, onData);
     };
-  }, [onRemoteEndHint, room, secureMediaReady]);
+  }, [onRemoteEndHint, room, secureMediaReady, setTransportState]);
 
   useEffect(() => {
-    if (secureMediaReady) setCallState("正在聆听");
+    if (secureMediaReady) {
+      setCallPhase("LISTENING");
+      setCallDetail(undefined);
+    }
   }, [secureMediaReady]);
 
   useEffect(() => {
@@ -181,34 +234,17 @@ function ActiveCall({
     }
   }, [isMicrophoneEnabled, localParticipant]);
 
-  const hangUp = useCallback(async () => {
-    onHangUp();
-  }, [onHangUp]);
-
   return (
-    <View style={styles.callContainer}>
-      <View style={styles.avatar} accessibilityLabel="Cyrene">
-        <Text style={styles.avatarText}>C</Text>
-      </View>
-      <Text style={styles.characterName}>{characterName}</Text>
-      <Text style={styles.callState}>{callState}</Text>
-      {transcript ? <Text style={styles.transcript} numberOfLines={3}>{transcript}</Text> : null}
-      <Text style={styles.hint}>通话由已配对的桌面端 Cyrene 处理。保持桌面端在线，才能继续对话。</Text>
-
-      <View style={styles.controls}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={isMicrophoneEnabled ? "静音" : "打开麦克风"}
-          onPress={() => void toggleMicrophone()}
-          style={[styles.secondaryButton, isMicrophoneEnabled && styles.secondaryButtonActive]}
-        >
-          <Text style={styles.secondaryButtonText}>{isMicrophoneEnabled ? "静音" : "开麦"}</Text>
-        </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="挂断" onPress={() => void hangUp()} style={styles.hangUpButton}>
-          <Text style={styles.hangUpButtonText}>挂断</Text>
-        </Pressable>
-      </View>
-    </View>
+    <MobileCallScreen
+      characterId={characterId}
+      characterName={resolvedCharacterName}
+      presentation={presentation}
+      transcript={transcript}
+      isMicrophoneEnabled={isMicrophoneEnabled}
+      microphoneSignalActive={isLocalSpeaking}
+      onToggleMicrophone={() => void toggleMicrophone()}
+      onHangUp={onHangUp}
+    />
   );
 }
 
@@ -430,10 +466,20 @@ function EncryptedCallRoom({
 
   if (!e2eeReady) {
     return (
-      <View style={styles.callContainer}>
-        <ActivityIndicator color="#f2ecff" />
-        <Text style={styles.callState}>正在建立端到端加密…</Text>
-      </View>
+      <MobileCallScreen
+        characterId={credentials.characterId}
+        characterName={credentials.characterName || "Cyrene"}
+        presentation={getMobileCallPresentation({
+          phase: "CONNECTING",
+          characterName: credentials.characterName || "Cyrene",
+          detail: "正在建立端到端加密…",
+        })}
+        transcript=""
+        isMicrophoneEnabled={false}
+        showMuteControl={false}
+        onToggleMicrophone={() => undefined}
+        onHangUp={hangUpIntentionally}
+      />
     );
   }
   return (
@@ -452,6 +498,7 @@ function EncryptedCallRoom({
       <ActiveCall
         onHangUp={hangUpIntentionally}
         onRemoteEndHint={onRemoteEndHint}
+        characterId={credentials.characterId}
         characterName={credentials.characterName}
         secureMediaReady={secureMediaReady}
       />
@@ -579,7 +626,11 @@ export default function App(): React.JSX.Element {
           );
           await AudioSession.startAudioSession();
           callActiveRef.current = true;
-          setCredentials({ ...grant, characterName: call.characterName });
+          setCredentials({
+            ...grant,
+            characterId: call.characterId,
+            characterName: call.characterName,
+          });
           return;
         }
         if (call.phase === "ENDED") {
