@@ -111,7 +111,7 @@ npm run dev
 
 2. **🎙️ TTS 设置**（可选）：选择 Mossland、MiniMax、MiMo、GPT-SoVITS 或自定义云端语音合成服务。
 
-3. **🎧 ASR 设置**（可选）：如需使用语音通话，配置阿里云实时 ASR 的 AppKey 与 AccessKey。
+3. **🎧 ASR 设置**（可选）：如需使用语音通话，配置本地或云端 ASR。手机公网语音通话的架构、部署和 APK 构建见[移动端语音通话实现指南](docs/mobile-voice-call-implementation-guide.md)。
 
 4. **📱 外部渠道**（可选）：根据需要连接飞书或微信 iLink，在手机端与 Cyrene 对话。
 
@@ -127,7 +127,7 @@ npm run dev
 | 💬 日常聊天（Chat） | ✅ 可用 | 独立角色聊天流程，不暴露或执行工具，结合近期消息、社交上下文与用户风格生成回复 |
 | 🛠️ 辅助工作（Work） | ✅ 可用 | 完整 Agent 工作流：CITA → Action Gate → Native FC → Execution Policy → Tool Runtime → Soul |
 | 🧠 个性化记忆 | ✅ 可用 | L0 / L1 / L2 分层记忆、自研 DMAE Worldbook、关系画像与长期互动沉淀 |
-| 🔊 语音交互 | ✅ 可用 | 支持多 TTS 引擎、实时 ASR、语音通话与 VAD 静默检测，部分功能需要额外配置 |
+| 🔊 语音交互 | ✅ 可用 | 支持多 TTS 引擎、实时 ASR、桌面通话，以及长期配对、LiveKit 媒体 E2EE 的 Android 公网语音通话 |
 | 🧰 内置工具 | ✅ 可用 | 支持联网搜索、网页读取、文件操作、文档生成、生活服务、音乐等工具 |
 | 🔌 多模型厂商适配 | ✅ 可用 | 根据厂商能力使用 A / B / M / D 分级 Structured Output 与 Function Calling Profile |
 | ✨ Skill 系统 | ✅ 可用 | 支持内置 Skill、用户自定义 Skill、Slash 命令与参考资料读取 |
@@ -474,6 +474,10 @@ src/
 │   ├── types/        # 共享类型定义
 │   └── ui/           # 通用 UI 组件（modal / theme / chart 等）
 └── shared/           # 主进程与渲染进程共享代码
+
+mobile/               # Expo / React Native 手机语音客户端
+cloudflare/           # Worker + Durable Object 公网控制面
+docs/mobile-voice-call-implementation-guide.md  # 移动语音完整维护指南
 
 dist/renderer/        # Vite 构建产物（构建产物 gitignore，产品资源已跟踪）
 ├── assets/           # 打包后的 JS/CSS（构建产物，gitignore）

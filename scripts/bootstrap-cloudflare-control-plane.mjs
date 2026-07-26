@@ -11,14 +11,27 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLOUDBASE_ENV_ID = "cyrene-agent-d2gfztehj201e3df3";
-const ORIGIN =
+const DEFAULT_CONTROL_PLANE_ORIGIN =
   "https://cyrene-device-authorization.cyrene-agent.workers.dev";
+const ORIGIN = new URL(
+  process.env.CYRENE_CONTROL_PLANE_ORIGIN?.trim()
+  || DEFAULT_CONTROL_PLANE_ORIGIN,
+).origin;
+if (!ORIGIN.startsWith("https://")) {
+  throw new Error("CONTROL_PLANE_ORIGIN_HTTPS_REQUIRED");
+}
 const KEYCHAIN_ACCOUNT = userInfo().username;
+const KEYCHAIN_NAMESPACE =
+  process.env.CYRENE_KEYCHAIN_NAMESPACE?.trim()
+  || "cyrene-agent-d2gfztehj201e3df3";
+const DESKTOP_LABEL =
+  process.env.CYRENE_DESKTOP_LABEL?.trim() || "家中 Mac";
 const BOOTSTRAP_SERVICE =
-  `Cyrene Deployment Bootstrap Code - ${CLOUDBASE_ENV_ID}`;
+  process.env.CYRENE_DEPLOYMENT_BOOTSTRAP_KEYCHAIN_SERVICE?.trim()
+  || `Cyrene Deployment Bootstrap Code - ${KEYCHAIN_NAMESPACE}`;
 const RECOVERY_KEY_SERVICE =
-  "Cyrene Owner Recovery Key - Cloudflare cyrene-device-authorization";
+  process.env.CYRENE_OWNER_RECOVERY_KEYCHAIN_SERVICE?.trim()
+  || `Cyrene Owner Recovery Key - ${KEYCHAIN_NAMESPACE}`;
 const ELECTRON_BINARY_PATH = fileURLToPath(
   new URL(
     "../node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
@@ -94,11 +107,16 @@ try {
   bootstrap = request(
     "/v1/owner/bootstrap",
     `DeploymentBootstrap ${deploymentBootstrapCode}`,
-    { label: "家中 Mac" },
+    { label: DESKTOP_LABEL },
   );
 } catch (error) {
   if (!(error instanceof Error) || error.message !== "OWNER_ALREADY_BOOTSTRAPPED") {
     throw error;
+  }
+  if (process.env.CYRENE_ALLOW_OWNER_RECOVERY !== "1") {
+    throw new Error(
+      "OWNER_ALREADY_BOOTSTRAPPED_RECOVERY_REQUIRES_EXPLICIT_OPT_IN",
+    );
   }
   const recoveryKey = readKeychainValue(RECOVERY_KEY_SERVICE);
   if (!/^cy_rk_[A-Za-z0-9_-]{40,}$/.test(recoveryKey)) {
@@ -110,7 +128,7 @@ try {
   const recovered = request(
     "/v1/owner/recover",
     `OwnerRecovery ${recoveryKey}`,
-    { recoveryReceipt, label: "家中 Mac" },
+    { recoveryReceipt, label: DESKTOP_LABEL },
   );
   bootstrap = {
     deviceId: recovered.device?.deviceId,

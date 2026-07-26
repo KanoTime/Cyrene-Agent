@@ -3,8 +3,10 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 
-const CLOUDBASE_ENV_ID = "cyrene-agent-d2gfztehj201e3df3";
 const KEYCHAIN_ACCOUNT = userInfo().username;
+const KEYCHAIN_NAMESPACE =
+  process.env.CYRENE_KEYCHAIN_NAMESPACE?.trim()
+  || "cyrene-agent-d2gfztehj201e3df3";
 const CONFIG_PATH = fileURLToPath(
   new URL("../cloudflare/wrangler.jsonc", import.meta.url),
 );
@@ -13,12 +15,20 @@ const WRANGLER_PATH = fileURLToPath(
 );
 const SERVICES = {
   deploymentBootstrapCode:
-    `Cyrene Deployment Bootstrap Code - ${CLOUDBASE_ENV_ID}`,
-  liveKitServerUrl: `Cyrene LiveKit Server URL - ${CLOUDBASE_ENV_ID}`,
-  liveKitApiKey: `Cyrene LiveKit API Key - ${CLOUDBASE_ENV_ID}`,
-  liveKitApiSecret: `Cyrene LiveKit API Secret - ${CLOUDBASE_ENV_ID}`,
+    process.env.CYRENE_DEPLOYMENT_BOOTSTRAP_KEYCHAIN_SERVICE?.trim()
+    || `Cyrene Deployment Bootstrap Code - ${KEYCHAIN_NAMESPACE}`,
+  liveKitServerUrl:
+    process.env.CYRENE_LIVEKIT_SERVER_URL_KEYCHAIN_SERVICE?.trim()
+    || `Cyrene LiveKit Server URL - ${KEYCHAIN_NAMESPACE}`,
+  liveKitApiKey:
+    process.env.CYRENE_LIVEKIT_API_KEY_KEYCHAIN_SERVICE?.trim()
+    || `Cyrene LiveKit API Key - ${KEYCHAIN_NAMESPACE}`,
+  liveKitApiSecret:
+    process.env.CYRENE_LIVEKIT_API_SECRET_KEYCHAIN_SERVICE?.trim()
+    || `Cyrene LiveKit API Secret - ${KEYCHAIN_NAMESPACE}`,
   mediaEnvelopeMasterKey:
-    `Cyrene Media Envelope Master Key - ${CLOUDBASE_ENV_ID}`,
+    process.env.CYRENE_MEDIA_ENVELOPE_MASTER_KEY_KEYCHAIN_SERVICE?.trim()
+    || `Cyrene Media Envelope Master Key - ${KEYCHAIN_NAMESPACE}`,
 };
 
 function readKeychainValue(service) {

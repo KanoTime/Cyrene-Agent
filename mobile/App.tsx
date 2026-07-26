@@ -29,10 +29,6 @@ import {
   type RemoteTrackPublication,
 } from "livekit-client";
 import {
-  parseMobileCallPairing,
-  type MobileCallCredentials,
-} from "./src/call-credentials";
-import {
   loadMobileDeviceAuthorization,
   type StoredMobileDeviceAuthorization,
 } from "./src/device-authorization-store";
@@ -42,6 +38,7 @@ import {
   readMobilePairingOutcome,
   type PendingMobilePairing,
 } from "./src/device-pairing";
+import { assertSupportedMobileEntryLink } from "./src/entry-link";
 import {
   endRemoteVoiceCall,
   readRemoteVoiceCall,
@@ -65,18 +62,7 @@ import {
 import { createCallTransportStateHandlers } from "./src/call-transport-state";
 import { recoverUnexpectedRoomDisconnect } from "./src/unexpected-disconnect-recovery";
 
-type ActiveCallCredentials = MobileCallCredentials
-  & Partial<Pick<
-    RemoteMediaJoinGrant,
-    "e2eeKey" | "participantIdentity" | "peerIdentity"
-  >>
-  & { characterName?: string };
-
-type EncryptedCallCredentials = ActiveCallCredentials
-  & Required<Pick<
-    RemoteMediaJoinGrant,
-    "e2eeKey" | "participantIdentity" | "peerIdentity"
-  >>;
+type EncryptedCallCredentials = RemoteMediaJoinGrant & { characterName?: string };
 
 type CallEvent =
   | { type: "state"; state: string }
@@ -233,65 +219,20 @@ function CallRoom({
   onSecureConnected,
   onRemoteEndHint,
 }: {
-  credentials: ActiveCallCredentials;
+  credentials: EncryptedCallCredentials;
   onHangUp: () => void;
   onError: (message: string) => void;
   onSecureConnected?: () => void;
   onRemoteEndHint?: () => void;
 }): React.JSX.Element {
-  if (
-    credentials.e2eeKey
-    && credentials.participantIdentity
-    && credentials.peerIdentity
-  ) {
-    return (
-      <EncryptedCallRoom
-        credentials={credentials as EncryptedCallCredentials}
-        onHangUp={onHangUp}
-        onError={onError}
-        onSecureConnected={onSecureConnected}
-        onRemoteEndHint={onRemoteEndHint}
-      />
-    );
-  }
-  if (credentials.e2eeKey) {
-    return (
-      <EncryptedCallContractFailure onError={onError} />
-    );
-  }
   return (
-    <LiveKitRoom
-      serverUrl={credentials.serverUrl}
-      token={credentials.participantToken}
-      connect
-      audio
-      video={false}
-      onDisconnected={onHangUp}
-      onError={(error) => onError(error.message)}
-      onMediaDeviceFailure={() => onError("麦克风不可用，请在系统设置中允许 Cyrene Voice 使用麦克风。")}
-    >
-      <ActiveCall
-        onHangUp={onHangUp}
-        onRemoteEndHint={onRemoteEndHint}
-        characterName={credentials.characterName}
-      />
-    </LiveKitRoom>
-  );
-}
-
-function EncryptedCallContractFailure({
-  onError,
-}: {
-  onError: (message: string) => void;
-}): React.JSX.Element {
-  useEffect(() => {
-    onError("E2EE_GRANT_IDENTITY_INVALID");
-  }, [onError]);
-  return (
-    <View style={styles.callContainer}>
-      <ActivityIndicator color="#f2ecff" />
-      <Text style={styles.callState}>正在校验端到端加密身份…</Text>
-    </View>
+    <EncryptedCallRoom
+      credentials={credentials}
+      onHangUp={onHangUp}
+      onError={onError}
+      onSecureConnected={onSecureConnected}
+      onRemoteEndHint={onRemoteEndHint}
+    />
   );
 }
 
@@ -519,7 +460,7 @@ function EncryptedCallRoom({
 }
 
 export default function App(): React.JSX.Element {
-  const [credentials, setCredentials] = useState<ActiveCallCredentials | null>(null);
+  const [credentials, setCredentials] = useState<EncryptedCallCredentials | null>(null);
   const [pairedDevice, setPairedDevice] = useState<StoredMobileDeviceAuthorization | null>(null);
   const [pendingPairing, setPendingPairing] = useState<PendingMobilePairing | null>(null);
   const [pairingStatus, setPairingStatus] = useState("");
@@ -675,18 +616,11 @@ export default function App(): React.JSX.Element {
     setStarting(true);
     setError(null);
     try {
-      const parsedLink = new URL(url.trim());
-      if (parsedLink.protocol === "cyrene:" && parsedLink.hostname === "pair") {
-        const invitation = parseMobilePairingInvitation(url);
-        const pending = await claimMobilePairing(invitation, "Android 手机");
-        setPendingPairing(pending);
-        setPairingStatus("等待桌面确认");
-        return;
-      }
-      const nextCredentials = parseMobileCallPairing(url);
-      await AudioSession.startAudioSession();
-      callActiveRef.current = true;
-      setCredentials(nextCredentials);
+      assertSupportedMobileEntryLink(url);
+      const invitation = parseMobilePairingInvitation(url);
+      const pending = await claimMobilePairing(invitation, "Android 手机");
+      setPendingPairing(pending);
+      setPairingStatus("等待桌面确认");
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : String(startError));
       void AudioSession.stopAudioSession();
