@@ -2598,6 +2598,275 @@ body {
   line-height: 1.6;
 }
 
+/* 手机端 LiveKit 配对：复用 ASR/TTS 面板的轻量表单语言。短时 Token 仅
+   由主进程写入二维码图片，绝不显示、复制或持久化到 renderer。 */
+.mobile-call-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.mobile-call-actions .save-status {
+  min-height: 20px;
+}
+
+.mobile-call-pairing {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(236, 72, 153, 0.28);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mobile-call-pairing[hidden] {
+  display: none;
+}
+
+.mobile-call-pairing img {
+  width: 130px;
+  height: 130px;
+  padding: 6px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.mobile-call-pairing__content {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 7px;
+}
+
+.mobile-call-pairing__content strong {
+  color: var(--rb-text-default);
+  font-size: 13px;
+}
+
+.mobile-call-pairing__content span {
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+
+.device-pairing-card {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid rgba(236, 72, 153, 0.24);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(236, 72, 153, 0.12), transparent 42%),
+    rgba(255, 255, 255, 0.035);
+}
+
+.device-pairing-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.device-pairing-card__header strong,
+.device-pairing-divider strong {
+  color: var(--rb-text-default);
+  font-size: 14px;
+}
+
+.device-pairing-card__header p {
+  max-width: 580px;
+  margin: 5px 0 0;
+  color: var(--rb-text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.device-pairing-state {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: var(--rb-text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+}
+
+.device-pairing-state.is-ready {
+  border-color: rgba(74, 222, 128, 0.28);
+  color: rgba(187, 247, 208, 0.95);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.device-pairing-state.is-error {
+  border-color: rgba(248, 113, 113, 0.3);
+  color: rgba(254, 202, 202, 0.96);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.device-pairing-invitation {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(236, 72, 153, 0.28);
+  border-radius: 14px;
+  background: rgba(15, 10, 28, 0.24);
+}
+
+.device-pairing-invitation[hidden],
+.device-pairing-review[hidden],
+.owner-bootstrap-panel[hidden],
+.owner-recover-panel[hidden],
+.owner-recovery-panel[hidden] {
+  display: none;
+}
+
+.owner-bootstrap-panel,
+.owner-recover-panel,
+.owner-recovery-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(129, 140, 248, 0.28);
+  border-radius: 14px;
+  background: rgba(99, 102, 241, 0.07);
+}
+
+.owner-bootstrap-panel > strong,
+.owner-recover-panel > strong,
+.owner-recovery-panel > strong {
+  color: var(--rb-text-default);
+  font-size: 14px;
+}
+
+.owner-bootstrap-panel > p,
+.owner-recover-panel > p,
+.owner-recovery-panel > p {
+  margin: 0;
+  color: var(--rb-text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.owner-bootstrap-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.55fr);
+  gap: 10px;
+}
+
+.owner-bootstrap-grid__wide {
+  grid-column: 1 / -1;
+}
+
+.owner-bootstrap-grid label,
+.owner-recovery-panel label {
+  display: grid;
+  gap: 6px;
+  color: var(--rb-text-muted);
+  font-size: 11px;
+}
+
+.owner-bootstrap-grid input,
+.owner-recovery-panel input {
+  min-width: 0;
+}
+
+.owner-recovery-panel code {
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border-radius: 9px;
+  color: rgba(255, 238, 249, 0.98);
+  background: rgba(236, 72, 153, 0.14);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  user-select: text;
+}
+
+@media (max-width: 720px) {
+  .owner-bootstrap-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .owner-bootstrap-grid__wide {
+    grid-column: auto;
+  }
+}
+
+.device-pairing-invitation img {
+  width: 130px;
+  height: 130px;
+  padding: 6px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.device-pairing-invitation__content {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+
+.device-pairing-invitation__content strong {
+  color: var(--rb-text-default);
+  font-size: 13px;
+}
+
+.device-pairing-invitation code,
+.device-pairing-review code {
+  width: fit-content;
+  padding: 7px 10px;
+  border-radius: 9px;
+  color: rgba(255, 238, 249, 0.98);
+  background: rgba(236, 72, 153, 0.14);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  letter-spacing: 0.08em;
+}
+
+.device-pairing-review {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(250, 204, 21, 0.32);
+  border-radius: 14px;
+  background: rgba(250, 204, 21, 0.07);
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+
+.device-pairing-review > strong {
+  color: var(--rb-text-default);
+  font-size: 14px;
+}
+
+.device-pairing-review__eyebrow {
+  color: rgba(254, 240, 138, 0.92);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.device-pairing-divider {
+  display: grid;
+  gap: 4px;
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.device-pairing-divider span {
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+
 .opener-pack-warning {
   display: flex;
   align-items: flex-start;

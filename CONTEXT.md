@@ -223,3 +223,155 @@ _Avoid_: Hot swap, model reload
 **Controlled Relaunch（受控重启）**:
 The first-version completion boundary of a Character Switch Transaction: after preflight and persistence, the application shuts down character-bound resources, relaunches itself, and binds the target package at startup with the previous Character ID available for rollback.
 _Avoid_: Manual restart, hot reload, crash recovery
+
+**Public Control Plane（公网控制面）**:
+手机与家中桌面实例都能稳定访问的托管无服务器协调边界，只保存长期配对、设备授权、在线状态、呼叫协调和短期媒体凭据签发所必需的最少数据；通话音频、转写、角色记忆、模型输入输出及本地模型凭据不进入该边界。它不承载 LiveKit 媒体传输，也不要求家中 Mac 接受公网入站连接。
+_Avoid_: 云服务器, 音频中继, 公网桌面服务, LiveKit 媒体服务
+
+**Opaque Wake Signal（不透明唤醒信号）**:
+只表示“公网控制面可能有新状态，请重新查询”的无业务内容通知；它最多含订阅者原本已知的固定路由标识和无语义随机变化值，不携带 Call Request、呼叫者或参与者身份、呼叫或角色状态、凭据、媒体信息或秘密，也不赋予任何操作权限。桌面实例必须使用 Device Credential 重新读取权威状态后才能行动。
+_Avoid_: 呼叫通知负载, 权威状态, 接听凭据, 设备消息, 业务事件
+
+**Owner（所有者）**:
+唯一有权管理一套 Cyrene 设备的安全所有权主体；V1 的每个公网控制面部署只允许首台桌面实例初始化一个 Owner，不含邮箱、用户名、密码、公开注册或其他租户，未来的 passkey 或 OAuth 只为同一 Owner 增加恢复方式。Owner 与本地 Global User Profile、角色关系和显示昵称相互独立。
+_Avoid_: Account, Global User Profile, 用户昵称, Sensei
+
+**Owner Recovery Key（所有者恢复密钥）**:
+Owner 初始化或成功恢复后仅向用户展示一次、由用户在 Cyrene 之外安全保管的高熵单次恢复秘密；公网控制面只保存验证信息。它只能让新桌面恢复原 Owner 的管理权，成功使用后立即失效并轮换，不能直接发起通话、取得媒体凭据或充当日常设备凭据。
+_Avoid_: 账号密码, 设备凭据, LiveKit Secret, 桌面备份
+
+**Owner Recovery（所有者恢复）**:
+所有已授权桌面均不可用时，新桌面用可验证的 Owner Recovery Key 恢复同一 Owner 管理权、撤销旧桌面实例并重新审查既有移动设备的灾难处理流程。它不是日常新增设备的 Pairing Challenge，也不同于授权记录已丢失时的 Authorization Rebootstrap。
+_Avoid_: 新桌面配对, Authorization Rebootstrap, token 刷新, 账号登录
+
+**Deployment Bootstrap Code（部署引导码）**:
+公网控制面首次部署时仅在受控部署环境显示、一次性且短时有效的高熵秘密，用于让首台桌面实例创建唯一 Owner 和最初设备凭据。Owner 建立后匿名初始化入口永久关闭；它不用于新增设备、日常认证或 Owner Recovery，只能在授权数据不可恢复丢失后的 Authorization Rebootstrap 中重新签发。
+_Avoid_: Owner Recovery Key, Pairing Challenge, 默认密码, 长期管理员密钥
+
+**Authorization Rebootstrap（授权重建）**:
+公网控制面的授权事实不可恢复丢失后，将所有旧 Device Credential、Owner Recovery Key 与进行中的 Voice Call 一律视为失效，并以新的 Deployment Bootstrap Code 建立新的授权根、让所有设备重新配对的灾难恢复流程。它不从本地备份复活旧授权，也不同于仍可验证 Owner Recovery Key 的 Owner Recovery。
+_Avoid_: Owner Recovery, token 刷新, 数据库回滚, 旧授权恢复
+
+**Desktop Instance（桌面实例）**:
+一份持有独立实例 ID 和桌面凭据、归属于一个 Owner 的 Cyrene Agent 安装；改名、系统升级或应用普通升级不改变其身份，但应用数据被清除或重装且凭据丢失后必须登记为新实例。桌面实例不通过硬件序列号、MAC 地址或其他设备指纹恢复身份。
+_Avoid_: 物理 Mac, 设备名称, 硬件指纹, 桌面会话
+
+**Preferred Desktop（首选桌面）**:
+一个移动设备为一键呼叫明确选择的桌面实例；只有一个候选时可自动设定，之后只能由用户更改。首选桌面不可用时，呼叫不得静默转移或广播到同一 Owner 的其他桌面。
+_Avoid_: 任意在线桌面, 自动故障转移目标, 全局唯一 Mac
+
+**Call Availability（呼叫可用性）**:
+桌面实例向其 Owner 的移动设备公开的临时聚合状态，表明它当前是否能立即接受呼叫，并可包含 Active Character 的 ID、显示名称及语音能力是否就绪。它只能在桌面持续续约的短期有效期内成立；普通合盖、系统睡眠、退出或失去运行时后，不能继续把旧状态当作可接听。它不暴露角色内容、记忆、关系、模型配置、凭据或本机路径，桌面离线后也不形成长期角色历史。
+_Avoid_: 在线心跳, 设备健康日志, 角色历史, 模型诊断
+
+**Desktop Suspension（桌面挂起）**:
+普通合盖、系统睡眠或用户主动睡眠造成的预期本机中断；它使 Desktop Instance 不再可立即呼叫，但不撤销 Device Credential、不要求重新配对，也不为错过的来电建立队列。若来不及上报不可用，Call Availability 的短期有效期必须自然失效。
+_Avoid_: Device Revocation, Authorization Rebootstrap, 永久离线, 崩溃重启
+
+**Wake Reconciliation（唤醒复核）**:
+Desktop Suspension 结束后，Desktop Instance 丢弃旧运输层订阅和旧的本机“可用”结论，重新取得应用授权、重新建立运输层订阅，并用权威 HTTPS 读取当前状态；只有本机运行时与权威状态均通过后才重新报告 Call Availability。它不能恢复或补发睡眠前的 Call Request / Voice Call。
+_Avoid_: SDK 自动续订, 自动补拨, 旧通话复活, 运输层状态恢复
+
+**Mobile Device（移动设备）**:
+一份持有独立设备 ID 和设备凭据、通过配对归属于一个 Owner 的 Cyrene Voice 安装；普通应用升级保留其身份，但卸载、清除应用数据或安全存储丢失后必须重新配对为新设备。移动设备不通过 IMEI、Android ID 或其他设备指纹恢复授权。
+_Avoid_: 物理手机, 手机型号, 设备名称, 已登录账号
+
+**Manual QR Voice Session（手动二维码语音会话）**:
+Beta 0 中由在线桌面临时生成二维码、移动端扫描后加入的一对一前台 LiveKit 语音会话。二维码及其房间资料只用于当前短时会话，桌面仍需在线；它验证移动端麦克风、桌面 ASR/模型/TTS、静音、挂断和有限网络重连，不建立持久 Device Credential、Pairing Challenge 或异地一键呼叫能力。
+_Avoid_: Pairing Challenge, 长期设备配对, Device Credential, 远程来电, 长期 LiveKit 房间
+
+**Pairing Candidate（配对候选）**:
+已使用 Pairing Invitation 提交登记请求、但尚未被现有桌面批准的新安装；它不是 Desktop Instance 或 Mobile Device，没有 Device Credential、Device Access Token、呼叫能力或对 Owner 数据的读取权。
+_Avoid_: 已配对设备, 临时登录, 未确认账号, 扫码成功的手机
+
+**Pairing Invitation（配对邀请）**:
+由现有桌面在一个开放 Pairing Challenge 中展示的短时不透明载体，可表现为二维码或手动输入短码；它只允许一个 Pairing Candidate 请求桌面审查，既不是长期凭据，也不单独授予设备归属或任何业务权限。
+_Avoid_: 登录二维码, Device Credential, LiveKit Token, 授权链接, 恢复密钥
+
+**Pairing Verification Code（配对校验码）**:
+绑定到同一个 Pairing Challenge 和 Pairing Candidate、供手机与现有桌面人工比对的短时值；它用于发现错配或误扫，不能替代 Pairing Approval，也不应被视为长期秘密或设备凭据。
+_Avoid_: 配对密码, Device Credential, 恢复码, LiveKit Token
+
+**Pairing Challenge（配对挑战）**:
+由已授权桌面实例发起、一次性且短时有效的新设备登记提议；Pairing Invitation 只能让一个 Pairing Candidate 提交待审批请求，Pairing Verification Code 匹配且用户在现有桌面明确允许后，配对挑战才能建立设备归属并签发独立设备凭据。Owner Recovery Key 只用于所有授权桌面均不可用时的灾难恢复，不是日常配对方式。
+_Avoid_: 配对凭据, 登录二维码, LiveKit Token, 扫码即授权, 恢复密钥登录
+
+**Pairing Approval（配对批准）**:
+现有已授权桌面对指定 Pairing Candidate 作出的明确一次性允许动作；只有控制面在批准时重新验证批准者、挑战、候选设备类型和同类设备上限后，才能原子地建立新设备及其独立 Device Credential。
+_Avoid_: 扫码成功, 短码正确, 自动授权, Owner Recovery
+
+**Device Credential（设备凭据）**:
+授予单个桌面实例或移动设备、可轮换且可独立撤销的长期授权，其秘密端由该设备的系统安全存储保存，公网控制面只保留可验证的哈希与凭据链状态。每台设备拥有独立秘密并按设备类型获得不同能力；设备凭据只能换取短期应用访问，不能直接授权加入 LiveKit 房间，也不能由多台设备共享。
+_Avoid_: 登录状态, 账号密码, 永久 Token, LiveKit Token, Owner 共享密钥
+
+**Device Revocation（设备撤销）**:
+Owner 对一个 Device Credential 及其 Credential Family 作出的不可逆授权终止；它立即使该设备的 Device Access Token 失效、取消或结束该设备参与的 Voice Call，并保留最小化的 Security Audit Event。被撤销的安装不能恢复原设备身份，只能通过新的 Pairing Challenge 重新成为新设备。
+_Avoid_: 临时离线, 卸载, 配对拒绝, Owner 删除
+
+**Device Access Token（设备访问令牌）**:
+单个设备用当前 Device Credential 换取的 15 分钟短期应用授权，只代表该设备在有限时间内的已授予能力，设备或 Credential Family 撤销后必须立即失效。它不是 CloudBase 运输层登录凭据，也不能代替每通电话的 LiveKit Token。
+_Avoid_: Device Credential, CloudBase Access Token, 登录会话, LiveKit Token
+
+**Credential Family（凭据链）**:
+一个桌面实例或移动设备的设备凭据在连续轮换中形成的授权谱系；正常刷新只消费上一代秘密并产生下一代，异常重放或设备撤销会废止整条谱系而不影响其他设备。
+_Avoid_: 共享设备凭据, Owner 凭据, LiveKit Token 链
+
+**Credential Rotation（凭据轮换）**:
+同一 Credential Family 内原子地消费当前 Device Credential、签发下一代并使旧代退休的已认证操作；同一设备在短暂的幂等结果窗口内只能重取同一轮换结果，窗口外使用已退休凭据是 Credential Replay，不会生成第二条谱系或第二个当前凭据。
+_Avoid_: 延长旧凭据, 登录重试, 共享更新, 新设备配对
+
+**Credential Replay（凭据重放）**:
+Credential Family 当前代之外的 Device Credential 在其允许的同一轮换幂等窗口外再次被提交的安全事件；控制面废止该 Family 并立即执行相应的 Device Revocation，而不是猜测哪个请求合法或继续签发新凭据。
+_Avoid_: 正常网络重试, Access Token 过期, 短码错误, 临时离线
+
+**Call Request（呼叫请求）**:
+由一个已授权移动设备幂等提交、要求其首选桌面立即开始一通电话的短时协调请求；它会原子占用目标桌面和 Owner 的唯一远程通话能力，目标离线、未就绪、忙碌或同一 Owner 已在其他桌面通话时立即失败，永不排队、广播、抢占或在桌面恢复后自动补拨。
+_Avoid_: 待办任务, 来电队列, LiveKit 房间, 自动重试通话
+
+**Call Coordination Record（呼叫协调记录）**:
+公网控制面为一个未终态 Voice Call 暂存的最小操作状态，包括相关设备 ID、阶段、权威期限、最小终态理由、锁定角色的 ID/显示名，以及仅为即时媒体撤销所需的当前房间和 call-scoped participant identity 映射。它进入终态时立即封住媒体资料领取，并只把该映射移交给短时的 Media Revocation Work Item；收到媒体服务撤销确认后删除映射，只留下不含媒体与秘密的 Security Audit Event。它不是可浏览的通话历史。
+_Avoid_: 通话录音, 转写, 聊天记录, 角色记忆, 永久 Room 历史
+
+**Media Revocation Work Item（媒体撤销工作项）**:
+一个已进入终态的 Voice Call 为强制结束媒体而短时保留的安全操作资料：仅含随机房间名、两个 call-scoped participant identity、撤销截止点和媒体服务确认/重试状态。它使控制面能对两个 identity 完成媒体撤销后再删除映射，并在确认前保持 Owner 的媒体安全占用，防止同一 Owner 出现第二通物理媒体会话；它不能重新打开 Voice Call、签发或重取 Media Join Grant，也不含 Token、密钥或媒体内容。云端确认前的失败保持 fail-closed 并显式记录，不能静默丢弃或变成长期通话历史。
+_Avoid_: 可恢复通话, 媒体录音, JWT 黑名单, 后台呼叫队列, 永久撤销日志
+
+**Call Rejection Reason（呼叫拒绝原因）**:
+控制面在创建 Call Request 和 Voice Call 前，向发起端返回“本次动作不能立即进入呼叫”的稳定最小归类；它说明授权、桌面可用性、Owner 忙线、成本保护或媒体容量保护等外部可理解的结果，但不暴露内部诊断、凭据链或重试指令。它不是已创建 Voice Call 的终态。
+_Avoid_: Call Termination Reason, 错误堆栈, 来电队列票据, 自动重试命令
+
+**Cost Protection（成本保护）**:
+公网控制面在当月已计量费用或保守费用预测先达到 ¥50 上限时进入的保护状态；它拒绝新的 Pairing Challenge、Call Request 和 Media Join Grant，却不切断已在既定 4 小时上限内的 Voice Call，也不阻止 Device Revocation、Owner Recovery、Authorization Rebootstrap 与最小审计查询。20 元和 40 元只触发分级告警；成本保护不自动购买资源、提高额度或在下月前自行解除。
+_Avoid_: 付费升级, 排队延后执行, 已有通话的强制挂断, 自动加预算
+
+**Media Capacity Protection（媒体容量保护）**:
+已选媒体服务因免费或 Owner 已明确批准的容量不足而权威地拒绝新媒体会话时的独立保护状态；若建立前已知则拒绝新的 Call Request 或 Media Join Grant，若只在已创建 Voice Call 的媒体建立中得知则以 `MEDIA_CAPACITY_UNAVAILABLE` 终止该通，且不自动购买、升级、排队或仅因后续容量状态变化切断既有通话。
+_Avoid_: Cost Protection, 隐性超额, 自动套餐升级, 媒体呼叫队列
+
+**Call E2EE Key（通话 E2EE 密钥）**:
+一个 Voice Call 为其两个已指定端点新生成、用于配置同一 LiveKit E2EE 会话的随机共享密钥。V1 允许被选定的公网控制面作为受信的短暂分发组件直接生成并读取它，再经两份 Media Join Grant 交给手机和桌面；明文不持久化。为适配无状态云函数，两份 grant 可按 ADR-0038 分别成为最长 30 秒、端点专属、单次领取的 AES-256-GCM 加密信封；资料领取窗口结束或电话终态时清除。它不授予设备或 Owner 身份，也不能跨通话、跨端点或跨重新配对复用。
+_Avoid_: Device Credential, Device Access Token, LiveKit Token, Owner 共享秘密, 密钥库
+
+**Media Join Grant（媒体加入授权）**:
+控制面只在已确认的 Voice Call 仍允许建立媒体时，分别交给手机或桌面的、仅限本通电话并在端点内存使用的资料；它包含该端最小权限的 LiveKit Token 与同一个 Call E2EE Key。V1 选择直接资料分发：控制面短暂保有该通密钥，再分别交付给两个端点。明文 grant 不能持久化；无状态调用之间只允许以 ADR-0038 定义的 30 秒端点专属加密信封交接。它不能作为 Device Credential、Device Access Token 或配对资料复用。
+_Avoid_: Device Credential, 登录会话, 配对二维码, 长期 LiveKit Token, 共享密钥库
+
+**LiveKit Media Session（LiveKit 媒体会话）**:
+一个已接受呼叫请求在 LiveKit 上形成的临时一对一端到端加密音频传输边界，只允许请求中的移动设备和桌面实例以各自的 Media Join Grant 加入。房间、参与者身份、Token 和媒体密钥均按通电话创建，密钥只在端点内存中持有且结束后全部丢弃；它不拥有设备配对、呼叫协调、对话内容或角色状态。
+_Avoid_: Call Request, 长期房间, 设备连接, 配对会话
+
+**Voice Call（语音通话）**:
+一个移动设备向一个桌面实例发起的单次一对一实时语音尝试，从呼叫请求开始，并在成功建连时由唯一的 LiveKit 媒体会话承载；每个 Owner 同一时间最多存在一通。其当前阶段与终止原因分别表达，任何终态都不可恢复或复用；再次通话必须创建新的呼叫请求。
+_Avoid_: VoiceSession, Call Request, LiveKit 房间, 可恢复任务
+
+**Valid Voice Interaction（有效语音交互）**:
+一通 `ACTIVE` Voice Call 内足以重置连续空闲计时的、无内容的端点事件：Mobile Device 本地识别到有效说话片段，或 Desktop Instance 实际开始输出本次锁定 Active Character 的角色语音。它只向控制面报告该通电话、端点类别和时间，不上传音频、转写、文本或角色内容；媒体/网络保活、`watch()`、Token 轮换、页面操作、单纯本地启动与重连都不是有效语音交互。
+_Avoid_: 媒体包, 在线心跳, ASR 文本, TTS 队列, 用户点击, 网络恢复
+
+**Call Termination Reason（通话终止原因）**:
+已创建的 Voice Call 进入 `ENDED` 时不可变的、面向双方和最小审计的结束归类，区分用户结束、就绪或超时、安全撤销、媒体/E2EE/容量失败与运行时限制。它独立于当前通话阶段，也不同于创建前的 Call Rejection Reason；不包含原始异常、凭据、媒体内容或重试指令。
+_Avoid_: Call Rejection Reason, 错误堆栈, 当前状态, 日志正文, 自动重拨命令
+
+**Security Audit Event（安全审计事件）**:
+公网控制面为配对、设备凭据、Owner Recovery、Authorization Rebootstrap、桌面认证、呼叫协调和 Secret 轮换记录的最小化安全事实，只包含相关主体、时间、结果与必要原因，并在 90 天后删除。它不是通话历史，不得包含任何凭据秘密、音频、转写、模型输出、角色记忆或用户资料。
+_Avoid_: 通话记录, 对话日志, 请求正文, 行为画像

@@ -1,18 +1,15 @@
-// 通话轮次协调器 —— 编排 ASR → agent → TTS 的轮次循环。
+// 桌面通话 Adapter —— 将 Electron IPC 接到平台无关的 VoiceSession。
 //
-// 状态机：
-//   IDLE → LISTENING → (VAD 静默) → THINKING → (agent+TTS) → SPEAKING → (播完) → LISTENING
-//
-// 配置通过 setCallSettings 注入 getter（避免 import index.ts 循环依赖）。
+// VoiceSession owns ASR → agent → TTS 的轮次生命周期；本文件只保留
+// 桌面窗口、当前配置和 Active Character 的适配。移动端可以复用同一个
+// VoiceSession Module，而不依赖 BrowserWindow 或 ipcMain。
 
 import { BrowserWindow, ipcMain } from "electron";
 import { IPC } from "../../shared/ipc-channels";
-import { getAsrConfig } from "../asr/volcano-asr-engine";
+import type { MobileCallStatus } from "../../shared/mobile-call-status";
 import { createAsrSession, requireAsrConfig } from "../asr/asr-service";
-import type { AsrConfig, AsrSession } from "../asr/types";
 import { synthesizeByEngine } from "../tts/tts-dispatcher";
 import type { TtsEngine } from "../../shared/tts-types";
-import { runFunctionCallingLoop } from "../orchestrator";
 import { getAdapter, buildVendorUrlByProvider } from "../orchestrator/vendors";
 import type { ChatMessage } from "../orchestrator/vendors/types";
 import { getActiveCharacter } from "../character/active-character";
@@ -20,69 +17,83 @@ import {
   applySpeechRecognitionHints,
   applyVoiceProfileToTtsSettings,
 } from "../character/character-speech";
+import {
+  VoiceSession,
+  type VoiceSessionEvent,
+  type VoiceSessionState,
+} from "./voice-session";
+import {
+  createMobileCallCredentials,
+  normalizeLiveKitServerUrl,
+  type LiveKitMobileCallConfig,
+  type MobileCallCredentials,
+} from "../mobile-call/livekit-call-credentials";
+import type {
+  LiveKitVoiceBridge,
+  LiveKitVoiceBridgeDiagnostic,
+} from "../mobile-call/livekit-voice-bridge";
+import type { MediaJoinGrant } from "../remote-access/media-grant-envelope";
 
 const LOG_PREFIX = "[CallManager]";
 
-export type CallState = "IDLE" | "LISTENING" | "ASR" | "THINKING" | "SPEAKING" | "ERROR" | "ENDED";
+export type CallState = VoiceSessionState;
+
+type ModelSettings = {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+};
+
+type CallTtsSettings = {
+  ttsEngine: TtsEngine;
+  ttsMinimaxKey: string;
+  ttsMinimaxVoiceId: string;
+  ttsMinimaxModel: "speech-2.8-hd" | "speech-2.8-turbo";
+  ttsSpeed: number;
+  ttsVolume: number;
+  ttsGptsovitsBaseUrl: string;
+  ttsGptsovitsRefAudioPath: string;
+  ttsGptsovitsPromptText: string;
+  ttsGptsovitsPromptLang: "auto" | "zh" | "en" | "ja";
+  ttsGptsovitsTextLang: "auto" | "zh" | "en" | "ja";
+  ttsGptsovitsFormat: "wav" | "mp3";
+  ttsCustomCloudEndpointUrl: string;
+  ttsCustomCloudApiKey: string;
+  ttsCustomCloudVoiceId: string;
+  ttsCustomCloudFormat: "wav" | "mp3";
+  ttsCustomCloudTimeoutMs: number;
+  ttsMimoKey: string;
+  ttsMimoVoiceAudioPath: string;
+  ttsMimoStylePrompt: string;
+};
 
 let callWindow: BrowserWindow | null = null;
-let asrStream: AsrSession | null = null;
+let callSession: VoiceSession | null = null;
+let mobileCallBridge: LiveKitVoiceBridge | null = null;
 let currentState: CallState = "IDLE";
-let finalText = "";
-let active = false;
-let callGeneration = 0;
 
-/** 通话上下文：保留最近 N 轮对话历史（每轮 = user + assistant 一对）。
- * 主聊天窗口（src/main/index.ts:1276 normalizeChatMessages）默认保留 24 条（12 轮）。
- * 通话场景对短上下文敏感度低，但用户希望"加点内存"——给到 24 轮（48 条），
- * 短上下文模型如果爆了由 settings 里的 model context_length 兜底。 */
+/** 通话上下文：保留最近 N 轮对话历史（每轮 = user + assistant 一对）。 */
 const MAX_CALL_CONTEXT_TURNS = 24;
 const callHistory: ChatMessage[] = [];
 
-/** 滑动窗口截断：每次 push 两轮后调用，保留最近 MAX_CALL_CONTEXT_TURNS 轮。
- * 这样 callHistory 数组本身有界（48 条），不会被长通话撑爆内存。 */
+/** 滑动窗口截断，保证长通话不会无界增长。 */
 function trimCallHistory(): void {
   if (callHistory.length > MAX_CALL_CONTEXT_TURNS * 2) {
     callHistory.splice(0, callHistory.length - MAX_CALL_CONTEXT_TURNS * 2);
   }
 }
 
-// 注入的配置 getter（由 index.ts 启动时设置，避免循环依赖）
-let modelSettingsGetter: (() => {
-  provider: string; baseUrl: string; model: string; apiKey: string;
-}) | null = null;
-let ttsSettingsGetter: (() => {
-  ttsEngine: TtsEngine;
-  ttsMinimaxKey: string; ttsMinimaxVoiceId: string;
-  ttsMinimaxModel: "speech-2.8-hd" | "speech-2.8-turbo";
-  ttsSpeed: number; ttsVolume: number;
-  // GPT-SoVITS
-  ttsGptsovitsBaseUrl: string; ttsGptsovitsRefAudioPath: string;
-  ttsGptsovitsPromptText: string; ttsGptsovitsPromptLang: "auto" | "zh" | "en" | "ja";
-  ttsGptsovitsTextLang: "auto" | "zh" | "en" | "ja"; ttsGptsovitsFormat: "wav" | "mp3";
-  ttsCustomCloudEndpointUrl: string; ttsCustomCloudApiKey: string; ttsCustomCloudVoiceId: string;
-  ttsCustomCloudFormat: "wav" | "mp3"; ttsCustomCloudTimeoutMs: number;
-  ttsMimoKey: string; ttsMimoVoiceAudioPath: string; ttsMimoStylePrompt: string;
-}) | null = null;
-
-/** index.ts 启动时注入模型配置、TTS 配置和 system prompt 构建器。 */
+// 配置 getter 由 index.ts 启动时注入，避免 index.ts 的循环依赖。
+let modelSettingsGetter: (() => ModelSettings) | null = null;
+let ttsSettingsGetter: (() => CallTtsSettings) | null = null;
 let systemPromptBuilder: ((userText: string) => Promise<string>) | null = null;
 let weatherHandler: ((userText: string) => Promise<string | null>) | null = null;
 
+/** index.ts 启动时注入模型配置、TTS 配置和 system prompt 构建器。 */
 export function setCallSettings(
-  modelGetter: () => { provider: string; baseUrl: string; model: string; apiKey: string },
-  ttsGetter: () => {
-    ttsEngine: TtsEngine;
-    ttsMinimaxKey: string; ttsMinimaxVoiceId: string;
-    ttsMinimaxModel: "speech-2.8-hd" | "speech-2.8-turbo";
-    ttsSpeed: number; ttsVolume: number;
-    ttsGptsovitsBaseUrl: string; ttsGptsovitsRefAudioPath: string;
-    ttsGptsovitsPromptText: string; ttsGptsovitsPromptLang: "auto" | "zh" | "en" | "ja";
-    ttsGptsovitsTextLang: "auto" | "zh" | "en" | "ja"; ttsGptsovitsFormat: "wav" | "mp3";
-    ttsCustomCloudEndpointUrl: string; ttsCustomCloudApiKey: string; ttsCustomCloudVoiceId: string;
-    ttsCustomCloudFormat: "wav" | "mp3"; ttsCustomCloudTimeoutMs: number;
-    ttsMimoKey: string; ttsMimoVoiceAudioPath: string; ttsMimoStylePrompt: string;
-  },
+  modelGetter: () => ModelSettings,
+  ttsGetter: () => CallTtsSettings,
   systemPromptFn: (userText: string) => Promise<string>,
   weatherFn: (userText: string) => Promise<string | null>,
 ): void {
@@ -99,7 +110,7 @@ export function setCallWindow(win: BrowserWindow | null): void {
 
 /** 是否正在通话中。 */
 export function isCallActive(): boolean {
-  return active;
+  return (callSession?.isActive ?? false) || (mobileCallBridge?.isActive ?? false);
 }
 
 function sendState(state: CallState): void {
@@ -129,239 +140,323 @@ function sendTtsAudio(base64: string): void {
   }
 }
 
-/** 开始通话：初始化 ASR 流，进入 LISTENING。 */
-export async function startCall(): Promise<void> {
-  if (active) return;
-  let cfg: AsrConfig;
-  try {
-    cfg = applySpeechRecognitionHints(requireAsrConfig(), getActiveCharacter().speechRecognitionHints);
-  } catch (error) {
-    sendError(error instanceof Error ? error.message : String(error));
-    sendState("ERROR");
+function sendVoiceSessionEvent(event: VoiceSessionEvent): void {
+  if (event.type === "state") {
+    sendState(event.state);
     return;
   }
+  if (event.type === "error") {
+    sendError(event.message);
+    return;
+  }
+  if (event.type === "transcript") {
+    sendAsrResult(event.partial, event.final);
+    return;
+  }
+  sendTtsAudio(event.audio.toString("base64"));
+}
 
-  active = true;
-  const generation = ++callGeneration;
-  finalText = "";
-  callHistory.length = 0;
-  console.log(LOG_PREFIX, "startCall 重置: finalText 清空, history 清空");
-  sendState("ASR");
-  try {
-    await startAsrStream(cfg);
-    if (active && generation === callGeneration) sendState("LISTENING");
-  } catch (error) {
-    if (!active || generation !== callGeneration) return;
-    sendError(`ASR 启动失败：${error instanceof Error ? error.message : String(error)}`);
-    active = false;
-    sendState("ERROR");
+function createCallVoiceSession(emit: (event: VoiceSessionEvent) => void): VoiceSession {
+  return new VoiceSession({
+    getAsrConfig: () => applySpeechRecognitionHints(
+      requireAsrConfig(),
+      getActiveCharacter().speechRecognitionHints,
+    ),
+    createAsrSession,
+    generateReply: runAgentTurn,
+    synthesizeReply: synthesizeCallReply,
+    emit,
+  });
+}
+
+function createDesktopVoiceSession(): VoiceSession {
+  return createCallVoiceSession(sendVoiceSessionEvent);
+}
+
+/** Resolves the active character's voice profile against the current global TTS service. */
+function resolveCallTtsSettings(): CallTtsSettings {
+  const globalTts = ttsSettingsGetter?.();
+  const voiceCapability = getActiveCharacter().capabilities.voice;
+  if (!globalTts || globalTts.ttsEngine === "off") {
+    throw new Error("TTS 未配置：请在设置中启用 TTS 引擎");
+  }
+  if (voiceCapability.status !== "available") {
+    throw new Error(`当前角色 ${getActiveCharacter().displayName} 未提供 Voice Profile，已禁用 TTS`);
+  }
+  const voiceResolution = applyVoiceProfileToTtsSettings(voiceCapability.profile, globalTts);
+  if (voiceResolution.status !== "available") {
+    throw new Error(`当前角色需要 TTS Service ${voiceResolution.requiredService ?? "已启用服务"}，当前为 ${voiceResolution.configuredService}`);
+  }
+  return voiceResolution.settings;
+}
+
+function assertCallTtsSettingsReady(tts: CallTtsSettings): void {
+  if (tts.ttsEngine === "minimax" && (!tts.ttsMinimaxKey || !tts.ttsMinimaxVoiceId)) {
+    throw new Error("TTS 未配置：请在设置中配置 MiniMax API Key 和音色 ID");
+  }
+  if (tts.ttsEngine === "gptsovits" && (!tts.ttsGptsovitsBaseUrl || !tts.ttsGptsovitsRefAudioPath || !tts.ttsGptsovitsPromptText)) {
+    throw new Error("TTS 未配置：请在设置中配置 GPT-SoVITS baseUrl、参考音频和文本");
+  }
+  if (tts.ttsEngine === "custom-cloud" && !tts.ttsCustomCloudEndpointUrl) {
+    throw new Error("TTS 未配置：请在设置中配置自定义云端 Endpoint URL");
+  }
+  if (tts.ttsEngine === "mimo" && (!tts.ttsMimoKey || !tts.ttsMimoVoiceAudioPath)) {
+    throw new Error("TTS 未配置：请在设置中配置小米 MiMo API Key 和角色参考音频");
   }
 }
 
-/** 创建并启动一个 ASR 流。 */
-async function startAsrStream(cfg: AsrConfig): Promise<void> {
-  asrStream?.dispose();
-  const session = createAsrSession({
-    onPartial: (text) => sendAsrResult(text, undefined),
-    onFinal: (text) => { finalText = text; sendAsrResult(undefined, text); },
-    onError: (error) => sendError(`ASR 错误：${error.message}`),
-  }, cfg);
-  asrStream = session;
+/** Fails before creating a short-lived room when desktop-only dependencies are not ready. */
+function assertMobileCallReadiness(): void {
+  // Use the same Active Character hints as the eventual VoiceSession so a
+  // disabled/misconfigured ASR is reported before the user scans a QR code.
+  applySpeechRecognitionHints(requireAsrConfig(), getActiveCharacter().speechRecognitionHints);
+
+  const modelSettings = modelSettingsGetter?.();
+  if (!modelSettings?.apiKey.trim()) {
+    throw new Error("模型配置缺失或未填写 API Key");
+  }
+  if (!modelSettings.baseUrl.trim() || !modelSettings.model.trim()) {
+    throw new Error("模型配置缺少 Base URL 或模型名");
+  }
+  if (!getAdapter(modelSettings.provider)) {
+    throw new Error(`不支持的模型 provider: ${modelSettings.provider}`);
+  }
+
+  const tts = resolveCallTtsSettings();
+  assertCallTtsSettingsReady(tts);
+  if (tts.ttsEngine === "gptsovits" && tts.ttsGptsovitsFormat !== "wav") {
+    throw new Error("手机通话要求 GPT-SoVITS 输出 PCM16 WAV；请在 TTS 设置中选择 wav");
+  }
+  if (tts.ttsEngine === "custom-cloud" && tts.ttsCustomCloudFormat !== "wav") {
+    throw new Error("手机通话要求自定义云端 TTS 输出 PCM16 WAV；请在 TTS 设置中选择 wav");
+  }
+}
+
+export function assertRemoteMobileCallReadiness(): void {
+  if (callSession?.isActive || mobileCallBridge?.isActive) {
+    throw new Error("OWNER_BUSY");
+  }
+  assertMobileCallReadiness();
+}
+
+/** 开始通话：初始化 ASR 流，进入 LISTENING。 */
+export async function startCall(): Promise<void> {
+  if (mobileCallBridge?.isActive) {
+    sendError("手机实时通话正在进行，请先在设置中结束手机通话");
+    return;
+  }
+  if (callSession?.isActive) return;
+  callHistory.length = 0;
+  const session = createDesktopVoiceSession();
+  callSession = session;
   await session.start();
 }
 
-/** 结束本轮（VAD 静默）：停 ASR → 跑 agent → TTS → 播放。 */
+/** 结束本轮（VAD 静默）：VoiceSession 负责 ASR → agent → TTS。 */
 export async function endTurn(): Promise<void> {
-  console.log(LOG_PREFIX, "endTurn 入口: active=", active, "state=", currentState, "finalText.length=", finalText.length);
-  if (!active || currentState !== "LISTENING") return;
-  // 先离开 LISTENING，保证重复的 VAD turnEnd 不会启动第二次推理。
-  sendState("ASR");
-  const generation = callGeneration;
-  const session = asrStream;
-  asrStream = null;
-  let text = "";
-  try {
-    text = (await session?.finish() ?? "").trim();
-  } catch (error) {
-    if (!active || generation !== callGeneration) return;
-    sendError(`ASR 识别失败：${error instanceof Error ? error.message : String(error)}`);
-    await restartAsr();
-    return;
-  }
-  if (!active || generation !== callGeneration) return;
-  finalText = "";
-
-  if (!text) {
-    // 空文本，直接重启 ASR 回 LISTENING
-    console.log(LOG_PREFIX, "endTurn 空文本，直接重启 ASR");
-    await restartAsr();
-    return;
-  }
-
-  sendState("THINKING");
-
-  try {
-    // 调 agent 获取回复
-    console.log(LOG_PREFIX, "runAgentTurn 开始, text.length=", text.length);
-    const reply = await runAgentTurn(text);
-    console.log(LOG_PREFIX, "runAgentTurn 结果: reply.length=", reply?.length ?? "null");
-    if (!reply) {
-      sendError("未收到 agent 回复");
-      await restartAsr();
-      return;
-    }
-
-    // TTS 合成（按 ttsEngine 分发到对应引擎）
-    const globalTts = ttsSettingsGetter?.();
-    const voiceCapability = getActiveCharacter().capabilities.voice;
-    if (!globalTts || globalTts.ttsEngine === "off") {
-      sendError("TTS 未配置：请在设置中启用 TTS 引擎");
-      await restartAsr();
-      return;
-    }
-    if (voiceCapability.status !== "available") {
-      sendError(`当前角色 ${getActiveCharacter().displayName} 未提供 Voice Profile，已禁用 TTS`);
-      await restartAsr();
-      return;
-    }
-    const voiceResolution = applyVoiceProfileToTtsSettings(voiceCapability.profile, globalTts);
-    if (voiceResolution.status !== "available") {
-      sendError(`当前角色需要 TTS Service ${voiceResolution.requiredService ?? "已启用服务"}，当前为 ${voiceResolution.configuredService}`);
-      await restartAsr();
-      return;
-    }
-    const tts = voiceResolution.settings;
-
-    // 引擎配置完整性检查
-    if (tts.ttsEngine === "minimax" && (!tts.ttsMinimaxKey || !tts.ttsMinimaxVoiceId)) {
-      sendError("TTS 未配置：请在设置中配置 MiniMax API Key 和音色 ID");
-      await restartAsr();
-      return;
-    }
-    if (tts.ttsEngine === "gptsovits" && (!tts.ttsGptsovitsBaseUrl || !tts.ttsGptsovitsRefAudioPath || !tts.ttsGptsovitsPromptText)) {
-      sendError("TTS 未配置：请在设置中配置 GPT-SoVITS baseUrl、参考音频和文本");
-      await restartAsr();
-      return;
-    }
-    if (tts.ttsEngine === "custom-cloud" && !tts.ttsCustomCloudEndpointUrl) {
-      sendError("TTS 未配置：请在设置中配置自定义云端 Endpoint URL");
-      await restartAsr();
-      return;
-    }
-    if (tts.ttsEngine === "mimo" && (!tts.ttsMimoKey || !tts.ttsMimoVoiceAudioPath)) {
-      sendError("TTS 未配置：请在设置中配置小米 MiMo API Key 和角色参考音频");
-      await restartAsr();
-      return;
-    }
-
-    sendState("SPEAKING");
-    try {
-      const result = await synthesizeByEngine(tts.ttsEngine, {
-        text: reply,
-        speed: tts.ttsSpeed,
-        volume: tts.ttsVolume,
-        // minimax
-        apiKey: tts.ttsEngine === "mimo"
-          ? tts.ttsMimoKey
-          : tts.ttsEngine === "custom-cloud"
-            ? tts.ttsCustomCloudApiKey
-            : tts.ttsMinimaxKey,
-        voiceId: tts.ttsEngine === "mimo"
-          ? ""
-          : tts.ttsEngine === "custom-cloud"
-            ? tts.ttsCustomCloudVoiceId
-            : tts.ttsMinimaxVoiceId,
-        model: tts.ttsMinimaxModel,
-        // gptsovits
-        baseUrl: tts.ttsGptsovitsBaseUrl,
-        refAudioPath: tts.ttsGptsovitsRefAudioPath,
-        promptText: tts.ttsGptsovitsPromptText,
-        promptLang: tts.ttsGptsovitsPromptLang,
-        textLang: tts.ttsGptsovitsTextLang,
-        format: tts.ttsGptsovitsFormat,
-        // custom-cloud
-        endpointUrl: tts.ttsCustomCloudEndpointUrl,
-        timeoutMs: tts.ttsCustomCloudTimeoutMs,
-        voiceAudioPath: tts.ttsMimoVoiceAudioPath,
-        stylePrompt: tts.ttsMimoStylePrompt,
-        ...(tts.ttsEngine === "custom-cloud" ? { format: tts.ttsCustomCloudFormat } : {}),
-      });
-      sendTtsAudio(result.audio.toString("base64"));
-      // 等渲染端 CALL_TTS_DONE 后恢复 LISTENING
-    } catch (ttsErr) {
-      const msg = ttsErr instanceof Error ? ttsErr.message : String(ttsErr);
-      sendError("TTS 合成失败：" + msg);
-      await restartAsr();
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    sendError("通话出错：" + msg);
-    await restartAsr();
-  }
+  await callSession?.endTurn();
 }
 
-/** TTS 播完后恢复 LISTENING，重新开始 ASR。 */
+/** TTS 播完后恢复 LISTENING。 */
 export function onTtsDone(): void {
-  if (!active) return;
-  void restartAsr();
-}
-
-/** 重新开始一轮 ASR 识别。 */
-async function restartAsr(): Promise<void> {
-  const rawConfig = getAsrConfig();
-  const cfg = rawConfig
-    ? applySpeechRecognitionHints(rawConfig, getActiveCharacter().speechRecognitionHints)
-    : null;
-  if (!cfg || cfg.engine === "off" || !active) return;
-  asrStream?.dispose();
-  asrStream = null;
-  finalText = "";
-  sendState("ASR");
-  try {
-    await startAsrStream(cfg);
-    if (active) sendState("LISTENING");
-  } catch (error) {
-    if (!active) return;
-    sendError(`ASR 重启失败：${error instanceof Error ? error.message : String(error)}`);
-    sendState("ERROR");
-  }
+  void callSession?.onSpeechFinished();
 }
 
 /** 挂断：清理一切。 */
 export function stopCall(): void {
-  active = false;
-  callGeneration += 1;
   callHistory.length = 0;
-  if (asrStream) {
-    asrStream.dispose();
-    asrStream = null;
+  const session = callSession;
+  callSession = null;
+  const bridge = mobileCallBridge;
+  mobileCallBridge = null;
+  if (session) {
+    session.stop();
+  } else if (currentState !== "ENDED") {
+    sendState("ENDED");
   }
-  sendState("ENDED");
+  // `CALL_STOP` is also used by shared application lifecycle paths. Ensure a
+  // mobile bridge cannot outlive a desktop "hang up" or shutdown request.
+  if (bridge) void bridge.stop();
 }
 
-/** 处理音频帧：转发给 ASR。 */
+export type MobileCallPairing = Pick<
+  MobileCallCredentials,
+  "callId" | "roomName" | "expiresAt"
+>;
+
+type MobileCallPairingWithLink = MobileCallPairing & Pick<MobileCallCredentials, "mobileLink">;
+
+/**
+ * Starts a personal mobile-call room. The desktop joins as Cyrene and keeps
+ * ASR, model, character state, and TTS local; only a short-lived mobile token
+ * is returned to the caller for pairing via QR/deep link.
+ */
+export async function startMobileCall(
+  config: LiveKitMobileCallConfig,
+  deviceName?: string,
+  vad: { silenceMs: number; threshold: number } = { silenceMs: 1_000, threshold: 0.01 },
+  onStatus?: (status: MobileCallStatus) => void,
+): Promise<MobileCallPairingWithLink> {
+  if (callSession?.isActive || mobileCallBridge?.isActive) {
+    throw new Error("已有语音通话正在进行，请先挂断后再连接手机");
+  }
+
+  assertMobileCallReadiness();
+  // 手机与桌面通话都复用角色对话上下文；新会话必须从空历史开始，避免
+  // 前一通电话的内容越过角色边界或泄露到下一次配对。
+  callHistory.length = 0;
+  const serverUrl = normalizeLiveKitServerUrl(config.serverUrl);
+  const credentials = await createMobileCallCredentials({ ...config, serverUrl }, { deviceName });
+  const { LiveKitVoiceBridge } = await import("../mobile-call/livekit-voice-bridge");
+  const bridge = new LiveKitVoiceBridge({
+    serverUrl,
+    agentToken: credentials.agentToken,
+    mobileIdentity: credentials.mobileIdentity,
+    vadSilenceMs: vad.silenceMs,
+    vadThreshold: vad.threshold,
+  }, {
+    createVoiceSession: createCallVoiceSession,
+    onError: sendError,
+    onStateChange: (state, message) => onStatus?.({ state, ...(message ? { message } : {}) }),
+  });
+
+  mobileCallBridge = bridge;
+  try {
+    await bridge.start();
+  } catch (error) {
+    if (mobileCallBridge === bridge) mobileCallBridge = null;
+    throw error;
+  }
+
+  return {
+    callId: credentials.callId,
+    roomName: credentials.roomName,
+    expiresAt: credentials.expiresAt,
+    mobileLink: credentials.mobileLink,
+  };
+}
+
+/**
+ * Starts a formal paired-device call from a control-plane Media Join Grant.
+ * Unlike the legacy QR path, this function never signs a token locally and
+ * refuses to connect unless a valid per-call E2EE key is already in memory.
+ */
+export async function startRemoteMobileCall(
+  grant: MediaJoinGrant,
+  vad: { silenceMs: number; threshold: number } = {
+    silenceMs: 1_000,
+    threshold: 0.01,
+  },
+  onStatus?: (status: MobileCallStatus) => void,
+  onDiagnostic?: (event: LiveKitVoiceBridgeDiagnostic) => void,
+): Promise<void> {
+  if (callSession?.isActive || mobileCallBridge?.isActive) {
+    throw new Error("已有语音通话正在进行，请先挂断后再连接手机");
+  }
+  if (
+    !grant.callId
+    || !grant.participantToken
+    || !grant.peerIdentity
+    || !/^[A-Za-z0-9_-]{43}$/.test(grant.e2eeKey)
+    || Date.parse(grant.expiresAt) <= Date.now()
+  ) {
+    throw new Error("E2EE_REQUIRED");
+  }
+
+  assertMobileCallReadiness();
+  callHistory.length = 0;
+  const { LiveKitVoiceBridge } = await import("../mobile-call/livekit-voice-bridge");
+  const bridge = new LiveKitVoiceBridge({
+    serverUrl: normalizeLiveKitServerUrl(grant.serverUrl),
+    agentToken: grant.participantToken,
+    mobileIdentity: grant.peerIdentity,
+    e2eeKey: grant.e2eeKey,
+    vadSilenceMs: vad.silenceMs,
+    vadThreshold: vad.threshold,
+  }, {
+    createVoiceSession: createCallVoiceSession,
+    onError: sendError,
+    onDiagnostic,
+    onStateChange: (state, message) =>
+      onStatus?.({ state, ...(message ? { message } : {}) }),
+  });
+
+  mobileCallBridge = bridge;
+  try {
+    await bridge.start();
+  } catch (error) {
+    if (mobileCallBridge === bridge) mobileCallBridge = null;
+    throw error;
+  }
+}
+
+export async function stopMobileCall(): Promise<void> {
+  const bridge = mobileCallBridge;
+  mobileCallBridge = null;
+  callHistory.length = 0;
+  await bridge?.stop();
+}
+
+/** 处理桌面 renderer 送来的 PCM 音频帧。 */
 export function handleAudioFrame(frame: Buffer): void {
-  if (asrStream && currentState === "LISTENING") {
-    asrStream.sendAudio(frame);
-  }
+  callSession?.pushAudio(frame);
 }
 
-/** 天气关键词正则匹配 */
+async function synthesizeCallReply(reply: string): Promise<{ audio: Buffer; format: "wav" | "mp3" }> {
+  const tts = resolveCallTtsSettings();
+  assertCallTtsSettingsReady(tts);
+
+  // LiveKit's desktop bridge consumes PCM16 WAV. MiniMax can generate WAV
+  // directly, MiMo already returns WAV, and the other engines retain their
+  // explicit output setting for ordinary desktop calls.
+  const format = tts.ttsEngine === "custom-cloud"
+    ? tts.ttsCustomCloudFormat
+    : tts.ttsEngine === "gptsovits"
+      ? tts.ttsGptsovitsFormat
+      : "wav";
+
+  return synthesizeByEngine(tts.ttsEngine, {
+    text: reply,
+    speed: tts.ttsSpeed,
+    volume: tts.ttsVolume,
+    apiKey: tts.ttsEngine === "mimo"
+      ? tts.ttsMimoKey
+      : tts.ttsEngine === "custom-cloud"
+        ? tts.ttsCustomCloudApiKey
+        : tts.ttsMinimaxKey,
+    voiceId: tts.ttsEngine === "mimo"
+      ? ""
+      : tts.ttsEngine === "custom-cloud"
+        ? tts.ttsCustomCloudVoiceId
+        : tts.ttsMinimaxVoiceId,
+    model: tts.ttsMinimaxModel,
+    baseUrl: tts.ttsGptsovitsBaseUrl,
+    refAudioPath: tts.ttsGptsovitsRefAudioPath,
+    promptText: tts.ttsGptsovitsPromptText,
+    promptLang: tts.ttsGptsovitsPromptLang,
+    textLang: tts.ttsGptsovitsTextLang,
+    format,
+    endpointUrl: tts.ttsCustomCloudEndpointUrl,
+    timeoutMs: tts.ttsCustomCloudTimeoutMs,
+    voiceAudioPath: tts.ttsMimoVoiceAudioPath,
+    stylePrompt: tts.ttsMimoStylePrompt,
+  });
+}
+
+/** 天气关键词正则匹配。 */
 const WEATHER_REGEX = /天气|今天.*热|今天.*冷|下雨|下雪|气温|几度|多少度|穿什么/;
 
 /**
- * 获取回复文本。
- * 1. 先正则匹配天气 → 直接查天气
- * 2. 否则直接调 LLM（不走 FC loop，不调工具），用通话专用 system prompt
- * 3. 回复过滤掉 [sticker:xxx] 表情包标记
+ * 获取通话回复。
+ * 1. 天气走快捷路径。
+ * 2. 其余请求用通话专用 system prompt 直接调模型。
+ * 3. 不让表情包标记进入 TTS。
  */
 async function runAgentTurn(userText: string): Promise<string | null> {
   try {
-    // 1. 天气正则匹配
     if (WEATHER_REGEX.test(userText) && weatherHandler) {
       const weatherReply = await weatherHandler(userText);
       if (weatherReply) {
-        // 天气走快捷路径，也记入上下文
         callHistory.push({ role: "user", content: userText });
         callHistory.push({ role: "assistant", content: weatherReply });
         trimCallHistory();
@@ -369,48 +464,49 @@ async function runAgentTurn(userText: string): Promise<string | null> {
       }
     }
 
-    // 2. 直接调 LLM（不走 FC loop）
-    const ms = modelSettingsGetter?.();
-    if (!ms || !ms.apiKey) {
+    const modelSettings = modelSettingsGetter?.();
+    if (!modelSettings || !modelSettings.apiKey) {
       throw new Error("模型配置缺失或未填写 API Key");
     }
 
-    const adapter = getAdapter(ms.provider);
+    const adapter = getAdapter(modelSettings.provider);
     if (!adapter) {
-      throw new Error(`不支持的模型 provider: ${ms.provider}`);
+      throw new Error(`不支持的模型 provider: ${modelSettings.provider}`);
     }
 
-    const url = buildVendorUrlByProvider(ms.provider, ms.baseUrl);
+    const url = buildVendorUrlByProvider(modelSettings.provider, modelSettings.baseUrl);
     const systemPrompt = await systemPromptBuilder?.(userText) ?? "";
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
-      // 取最近 MAX_CALL_CONTEXT_TURNS 轮历史（每轮 2 条：user + assistant）
       ...callHistory.slice(-MAX_CALL_CONTEXT_TURNS * 2),
       { role: "user", content: userText },
     ];
 
-    const req = adapter.buildRequest(
-      { model: ms.model, messages, temperature: 0.8 },
-      { provider: ms.provider, baseUrl: ms.baseUrl, model: ms.model, apiKey: ms.apiKey },
+    const request = adapter.buildRequest(
+      { model: modelSettings.model, messages, temperature: 0.8 },
+      {
+        provider: modelSettings.provider,
+        baseUrl: modelSettings.baseUrl,
+        model: modelSettings.model,
+        apiKey: modelSettings.apiKey,
+      },
     );
 
-    const httpResp = await fetch(url, {
+    const httpResponse = await fetch(url, {
       method: "POST",
-      headers: { ...req.headers, "Content-Type": "application/json" },
-      body: req.body,
-      signal: AbortSignal.timeout(30000),
+      headers: { ...request.headers, "Content-Type": "application/json" },
+      body: request.body,
+      signal: AbortSignal.timeout(30_000),
     });
 
-    if (!httpResp.ok) {
-      throw new Error(`LLM 请求失败: ${httpResp.status}`);
+    if (!httpResponse.ok) {
+      throw new Error(`LLM 请求失败: ${httpResponse.status}`);
     }
 
-    const raw = await httpResp.json();
-    const resp = adapter.parseResponse(raw);
-    // 过滤掉表情包标记
-    const reply = (resp.text || "").replace(/\[sticker:[^\]]+\]/g, "").trim();
+    const raw = await httpResponse.json();
+    const response = adapter.parseResponse(raw);
+    const reply = (response.text || "").replace(/\[sticker:[^\]]+\]/g, "").trim();
 
-    // 记入通话上下文
     if (reply) {
       callHistory.push({ role: "user", content: userText });
       callHistory.push({ role: "assistant", content: reply });
@@ -418,14 +514,14 @@ async function runAgentTurn(userText: string): Promise<string | null> {
     }
 
     return reply || null;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(LOG_PREFIX, "LLM 调用失败:", msg);
-    throw new Error(`LLM 调用失败: ${msg}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(LOG_PREFIX, "LLM 调用失败:", message);
+    throw new Error(`LLM 调用失败: ${message}`);
   }
 }
 
-/** 注册通话 IPC handlers（main 启动时调一次）。 */
+/** 注册桌面通话 IPC handlers（main 启动时调一次）。 */
 export function registerCallIpc(): void {
   ipcMain.on(IPC.CALL_START, () => void startCall());
   ipcMain.on(IPC.CALL_AUDIO_FRAME, (_event, frame: ArrayBuffer) => handleAudioFrame(Buffer.from(frame)));

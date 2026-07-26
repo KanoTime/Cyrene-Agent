@@ -42,6 +42,13 @@ tmp/
 tmpr-build.log
 tmprenderer-build.log
 
+# Mobile voice call local/generated deployment artifacts
+/app.json
+/cloudbaserc.json
+/cloudbase/**/dist/
+/cloudflare/**/dist/
+/mobile/src/e2ee-key-material.js
+
 # Playwright CLI scratch
 .playwright-cli/
 

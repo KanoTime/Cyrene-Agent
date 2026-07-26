@@ -1,0 +1,26 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "cyrene-device-authorization",
+  "main": "device-authorization/index.ts",
+  "compatibility_date": "2026-07-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CYRENE_DEVICE_AUTHORIZATION",
+        "class_name": "DeviceAuthorizationDurableObject"
+      }
+    ]
+  },
+  "exports": {
+    "DeviceAuthorizationDurableObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

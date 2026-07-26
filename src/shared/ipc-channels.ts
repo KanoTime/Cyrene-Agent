@@ -251,6 +251,18 @@ export const IPC = {
   CALL_STATE: "call:state",               // main → renderer：状态变更
   CALL_ERROR: "call:error",               // main → renderer：错误
   CALL_STOP: "call:stop",                 // renderer → main：挂断
+  // 手机端 LiveKit 配对（renderer 只接收二维码图片，Agent Token 留在 main）
+  CALL_MOBILE_START: "call:mobile-start",
+  CALL_MOBILE_STOP: "call:mobile-stop",
+  CALL_MOBILE_STATUS: "call:mobile-status",
+  // 长期设备配对（renderer 只接收二维码图片与待审显示资料）
+  DEVICE_AUTHORIZATION_STATUS: "device-authorization:status",
+  OWNER_BOOTSTRAP: "owner:bootstrap",
+  OWNER_RECOVERY_CONFIRM: "owner:recovery-confirm",
+  OWNER_RECOVER: "owner:recover",
+  DEVICE_PAIRING_BEGIN: "device-pairing:begin",
+  DEVICE_PAIRING_REVIEW: "device-pairing:review",
+  DEVICE_PAIRING_DECIDE: "device-pairing:decide",
 
   // 多渠道（Phase 0 骨架，Phase 1+ 实装微信/飞书）
   CHANNELS_GET_CONFIG: "channels:get-config",

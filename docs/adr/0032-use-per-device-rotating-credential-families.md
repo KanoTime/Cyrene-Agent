@@ -1,0 +1,3 @@
+# 每台设备使用独立轮换的凭据链
+
+每个 Desktop Instance 和 Mobile Device 都拥有独立 Device Credential 与 Credential Family，控制面只保存可验证哈希；每次轮换消费上一代 Device Credential 并签发下一代，同一设备同一幂等键可在 30 秒内重取首次结果，窗口外的 Credential Replay 则撤销该设备整条凭据链而不影响其他设备。两类设备的 Device Access Token 都为 15 分钟：它是仅用于权威应用 HTTPS 读写的短期授权，不是 CloudBase 自定义登录的运输层 token；后者即使暂未过期，也不得绕过 Credential Family 的撤销。每个受保护的控制面授权决定都必须验证 Family 仍为有效，或验证等价的撤销版本；因此 Device Revocation 不会被尚未到期的 15 分钟 Device Access Token 延后。移动设备连续 180 天未使用或首次配对满 1 年即须重新配对；持续在线且正常轮换的桌面不设绝对期限，但连续离线 180 天后凭据过期。撤销设备立即废止其凭据链、取消待处理呼叫并结束活动通话。V1 暂不加入 DPoP 或自研设备签名协议，依靠平台安全存储、严格轮换、重放检测和独立撤销；数据模型与认证边界应允许未来增加标准化的设备公钥绑定，但不能把当前 bearer credential 描述为硬件绑定凭据。具体状态、重试、过期和审计边界见 [设备凭据链契约](../research/device-credential-family-contract.md)。

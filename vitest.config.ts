@@ -7,6 +7,8 @@ export default defineConfig({
       "src/main/**/*.test.ts",
       "src/renderer/**/*.test.ts",
       "src/shared/**/*.test.ts",
+      "cloudflare/**/*.test.ts",
+      "mobile/src/**/*.test.ts",
       "skills/**/tests/**/*.test.ts",
     ],
   },

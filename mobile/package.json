@@ -1,0 +1,38 @@
+{
+  "name": "@cyrene/mobile",
+  "version": "1.0.9",
+  "main": "index.ts",
+  "dependencies": {
+    "@config-plugins/react-native-webrtc": "^15.0.1",
+    "@livekit/react-native": "^2.11.1",
+    "@livekit/react-native-expo-plugin": "^1.0.2",
+    "@livekit/react-native-webrtc": "^144.1.1",
+    "expo": "~56.0.16",
+    "expo-camera": "~56.0.8",
+    "expo-crypto": "~56.0.4",
+    "expo-dev-client": "~56.0.23",
+    "expo-linking": "~56.0.15",
+    "expo-secure-store": "~56.0.4",
+    "expo-status-bar": "~56.0.4",
+    "expo-system-ui": "~56.0.5",
+    "livekit-client": "^2.20.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "^0.85.3"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "postinstall": "node ./scripts/ensure-gradle9-foojay-compatible.mjs",
+    "start": "expo start --dev-client",
+    "android:check": "node ./scripts/run-android.mjs --check",
+    "android": "node ./scripts/run-android.mjs",
+    "test:android-bootstrap": "node --test ./scripts/ensure-gradle9-foojay-compatible.test.mjs",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit"
+  },
+  "private": true
+}
