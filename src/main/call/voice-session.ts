@@ -13,6 +13,7 @@ export type VoiceSessionState = "IDLE" | "LISTENING" | "ASR" | "THINKING" | "SPE
 export type VoiceSessionEvent =
   | { type: "state"; state: VoiceSessionState }
   | { type: "transcript"; partial?: string; final?: string }
+  | { type: "turn"; userText: string; assistantText: string }
   | { type: "audio"; audio: Buffer; format: "wav" | "mp3" }
   | { type: "error"; message: string };
 
@@ -131,6 +132,11 @@ export class VoiceSession {
       return;
     }
 
+    this.dependencies.emit({
+      type: "turn",
+      userText: text,
+      assistantText: reply,
+    });
     this.emitState("SPEAKING");
     try {
       const result = await this.dependencies.synthesizeReply(reply);

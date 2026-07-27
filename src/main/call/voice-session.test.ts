@@ -49,6 +49,7 @@ describe("VoiceSession", () => {
       { type: "state", state: "ASR" },
       { type: "state", state: "LISTENING" },
       { type: "state", state: "THINKING" },
+      { type: "turn", userText: "你好", assistantText: "回复：你好" },
       { type: "state", state: "SPEAKING" },
       { type: "audio", audio: Buffer.from("audio"), format: "wav" },
     ]));

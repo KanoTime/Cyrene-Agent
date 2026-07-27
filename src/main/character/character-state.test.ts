@@ -22,6 +22,7 @@ describe("Character State Root", () => {
     expect(cyrene).toMatchObject({
       root: path.join(userDataRoot, "characters", "cyrene"),
       chatsRoot: path.join(userDataRoot, "characters", "cyrene", "chats"),
+      voiceConversationsRoot: path.join(userDataRoot, "characters", "cyrene", "voice-conversations"),
       channelHistoryRoot: path.join(userDataRoot, "characters", "cyrene", "chats", "channels", "history"),
       channelLogFile: path.join(userDataRoot, "characters", "cyrene", "chats", "channels", "log.jsonl"),
       memoryFile: path.join(userDataRoot, "characters", "cyrene", "memory", "memory.json"),

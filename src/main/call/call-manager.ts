@@ -33,6 +33,9 @@ import type {
   LiveKitVoiceBridgeDiagnostic,
 } from "../mobile-call/livekit-voice-bridge";
 import type { MediaJoinGrant } from "../remote-access/media-grant-envelope";
+import { requireActiveCharacterState } from "../character/character-state";
+import { VoiceConversationStore } from "./voice-conversation-store";
+import { VoiceConversationRuntime } from "./voice-conversation-runtime";
 
 const LOG_PREFIX = "[CallManager]";
 
@@ -71,6 +74,7 @@ type CallTtsSettings = {
 let callWindow: BrowserWindow | null = null;
 let callSession: VoiceSession | null = null;
 let mobileCallBridge: LiveKitVoiceBridge | null = null;
+let mobileConversationRuntime: VoiceConversationRuntime | null = null;
 let currentState: CallState = "IDLE";
 
 /** 通话上下文：保留最近 N 轮对话历史（每轮 = user + assistant 一对）。 */
@@ -153,6 +157,7 @@ function sendVoiceSessionEvent(event: VoiceSessionEvent): void {
     sendAsrResult(event.partial, event.final);
     return;
   }
+  if (event.type === "turn") return;
   sendTtsAudio(event.audio.toString("base64"));
 }
 
@@ -247,6 +252,7 @@ export async function startCall(): Promise<void> {
   }
   if (callSession?.isActive) return;
   callHistory.length = 0;
+  mobileConversationRuntime = null;
   const session = createDesktopVoiceSession();
   callSession = session;
   await session.start();
@@ -265,6 +271,7 @@ export function onTtsDone(): void {
 /** 挂断：清理一切。 */
 export function stopCall(): void {
   callHistory.length = 0;
+  mobileConversationRuntime = null;
   const session = callSession;
   callSession = null;
   const bridge = mobileCallBridge;
@@ -305,6 +312,7 @@ export async function startMobileCall(
   // 手机与桌面通话都复用角色对话上下文；新会话必须从空历史开始，避免
   // 前一通电话的内容越过角色边界或泄露到下一次配对。
   callHistory.length = 0;
+  mobileConversationRuntime = null;
   const serverUrl = normalizeLiveKitServerUrl(config.serverUrl);
   const credentials = await createMobileCallCredentials({ ...config, serverUrl }, { deviceName });
   const { LiveKitVoiceBridge } = await import("../mobile-call/livekit-voice-bridge");
@@ -365,6 +373,20 @@ export async function startRemoteMobileCall(
 
   assertMobileCallReadiness();
   callHistory.length = 0;
+  const conversationRuntime = new VoiceConversationRuntime(
+    new VoiceConversationStore(requireActiveCharacterState().voiceConversationsRoot),
+    {
+      onSelected: (turns) => {
+        callHistory.length = 0;
+        for (const turn of turns) {
+          callHistory.push({ role: "user", content: turn.userText });
+          callHistory.push({ role: "assistant", content: turn.assistantText });
+        }
+        trimCallHistory();
+      },
+    },
+  );
+  mobileConversationRuntime = conversationRuntime;
   const { LiveKitVoiceBridge } = await import("../mobile-call/livekit-voice-bridge");
   const bridge = new LiveKitVoiceBridge({
     serverUrl: normalizeLiveKitServerUrl(grant.serverUrl),
@@ -373,8 +395,10 @@ export async function startRemoteMobileCall(
     e2eeKey: grant.e2eeKey,
     vadSilenceMs: vad.silenceMs,
     vadThreshold: vad.threshold,
+    requireConversationSelection: true,
   }, {
     createVoiceSession: createCallVoiceSession,
+    conversations: conversationRuntime,
     onError: sendError,
     onDiagnostic,
     onStateChange: (state, message) =>
@@ -386,6 +410,9 @@ export async function startRemoteMobileCall(
     await bridge.start();
   } catch (error) {
     if (mobileCallBridge === bridge) mobileCallBridge = null;
+    if (mobileConversationRuntime === conversationRuntime) {
+      mobileConversationRuntime = null;
+    }
     throw error;
   }
 }
@@ -393,6 +420,7 @@ export async function startRemoteMobileCall(
 export async function stopMobileCall(): Promise<void> {
   const bridge = mobileCallBridge;
   mobileCallBridge = null;
+  mobileConversationRuntime = null;
   callHistory.length = 0;
   await bridge?.stop();
 }
@@ -461,9 +489,7 @@ async function runAgentTurn(userText: string): Promise<string | null> {
     if (WEATHER_REGEX.test(userText) && weatherHandler) {
       const weatherReply = await weatherHandler(userText);
       if (weatherReply) {
-        callHistory.push({ role: "user", content: userText });
-        callHistory.push({ role: "assistant", content: weatherReply });
-        trimCallHistory();
+        recordCallTurn(userText, weatherReply);
         return weatherReply;
       }
     }
@@ -512,9 +538,7 @@ async function runAgentTurn(userText: string): Promise<string | null> {
     const reply = (response.text || "").replace(/\[sticker:[^\]]+\]/g, "").trim();
 
     if (reply) {
-      callHistory.push({ role: "user", content: userText });
-      callHistory.push({ role: "assistant", content: reply });
-      trimCallHistory();
+      recordCallTurn(userText, reply);
     }
 
     return reply || null;
@@ -523,6 +547,16 @@ async function runAgentTurn(userText: string): Promise<string | null> {
     console.error(LOG_PREFIX, "LLM 调用失败:", message);
     throw new Error(`LLM 调用失败: ${message}`);
   }
+}
+
+function recordCallTurn(userText: string, assistantText: string): void {
+  if (mobileConversationRuntime) {
+    const persisted = mobileConversationRuntime.appendTurn(userText, assistantText);
+    if (!persisted) throw new Error("请先选择或创建语音对话");
+  }
+  callHistory.push({ role: "user", content: userText });
+  callHistory.push({ role: "assistant", content: assistantText });
+  trimCallHistory();
 }
 
 /** 注册桌面通话 IPC handlers（main 启动时调一次）。 */

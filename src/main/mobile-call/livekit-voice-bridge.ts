@@ -12,12 +12,25 @@ import {
   TrackSource,
 } from "@livekit/rtc-node";
 import { VoiceSession, type VoiceSessionEvent } from "../call/voice-session";
-import { PcmVad } from "./pcm-vad";
+import {
+  MOBILE_CALL_CONTROL_TOPIC,
+  MOBILE_CALL_CONVERSATION_PAGE_SIZE,
+  MOBILE_CALL_EVENT_TOPIC,
+  parseMobileCallControl,
+  type MobileCallControl,
+  type MobileCallConversationEvent,
+} from "../../shared/mobile-call-control";
+import type {
+  VoiceConversation,
+  VoiceConversationMeta,
+} from "../../shared/voice-conversation";
+import { AudioTurnGate } from "./audio-turn-gate";
 import {
   LIVEKIT_OUTPUT_SAMPLE_RATE,
   LIVEKIT_SAMPLES_PER_FRAME,
   prepareWavForLiveKit,
 } from "./pcm-wav";
+import { CallDataCipher } from "./call-data-cipher";
 
 export interface LiveKitVoiceBridgeConfig {
   serverUrl: string;
@@ -27,10 +40,21 @@ export interface LiveKitVoiceBridgeConfig {
   vadThreshold: number;
   /** Formal remote calls require a 32-byte base64url key before connect. */
   e2eeKey?: string;
+  /** Formal mobile calls do not admit PCM until a persisted conversation is selected. */
+  requireConversationSelection?: boolean;
+}
+
+export interface LiveKitVoiceConversationAdapter {
+  list(): VoiceConversationMeta[];
+  create(title: string): VoiceConversation | null;
+  select(id: string): VoiceConversation | null;
+  rename(id: string, title: string): VoiceConversation | null;
+  current(): VoiceConversation | null;
 }
 
 export interface LiveKitVoiceBridgeDependencies {
   createVoiceSession(emit: (event: VoiceSessionEvent) => void): VoiceSession;
+  conversations?: LiveKitVoiceConversationAdapter;
   onError?(message: string): void;
   onStateChange?(state: LiveKitVoiceBridgeState, message?: string): void;
   onDiagnostic?(event: LiveKitVoiceBridgeDiagnostic): void;
@@ -107,16 +131,27 @@ export class LiveKitVoiceBridge {
   private resolveStartupReady: (() => void) | null = null;
   private mobileAudioGeneration = 0;
   private mobileReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly vad: PcmVad;
+  private dataCipher: CallDataCipher | null = null;
+  private readonly turnGate: AudioTurnGate;
 
   constructor(
     private readonly config: LiveKitVoiceBridgeConfig,
     private readonly dependencies: LiveKitVoiceBridgeDependencies,
   ) {
-    this.vad = new PcmVad({
+    this.turnGate = new AudioTurnGate({
+      sampleRate: 16_000,
       threshold: Math.max(0.001, Math.min(0.5, config.vadThreshold)),
       silenceMs: Math.max(300, Math.min(30_000, Math.round(config.vadSilenceMs))),
-    }, () => { void this.voiceSession?.endTurn(); });
+      minimumSpeechMs: 200,
+      preRollMs: 200,
+    }, {
+      onAudio: (frame) => {
+        const pcm = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength);
+        this.voiceSession?.pushAudio(Buffer.from(pcm));
+      },
+      onTurnEnd: () => { void this.voiceSession?.endTurn(); },
+    });
+    this.turnGate.setConversationReady(!config.requireConversationSelection);
   }
 
   get isActive(): boolean {
@@ -141,6 +176,12 @@ export class LiveKitVoiceBridge {
       const e2eeKey = this.config.e2eeKey
         ? decodeE2eeKey(this.config.e2eeKey)
         : undefined;
+      if (this.config.requireConversationSelection && !e2eeKey) {
+        throw new Error("E2EE_REQUIRED");
+      }
+      this.dataCipher = e2eeKey
+        ? new CallDataCipher(e2eeKey, "desktop")
+        : null;
       // rtc-node 0.13.31 declares only the older subset of these options, but
       // its locked 0.12.60 FFI protobuf marks every field below as required.
       // Supplying the native defaults explicitly keeps the options encodable
@@ -175,6 +216,24 @@ export class LiveKitVoiceBridge {
           void this.publishConnectedIfSecure();
           const generation = ++this.mobileAudioGeneration;
           void this.consumeMobileAudio(remoteTrack as RemoteAudioTrack, generation);
+        })
+        .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+          if (
+            topic !== MOBILE_CALL_CONTROL_TOPIC
+            || participant?.identity !== this.config.mobileIdentity
+          ) {
+            return;
+          }
+          let plaintext = payload;
+          if (this.dataCipher) {
+            try {
+              plaintext = this.dataCipher.decrypt(payload);
+            } catch {
+              return;
+            }
+          }
+          const control = parseMobileCallControl(plaintext);
+          if (control) void this.handleControl(control);
         })
         .on(RoomEvent.ParticipantDisconnected, (participant) => {
           if (participant.identity === this.config.mobileIdentity) {
@@ -288,9 +347,11 @@ export class LiveKitVoiceBridge {
     this.peerEncrypted = false;
     this.releaseStartupWaiters();
     this.setState(finalState, message);
-    this.vad.reset();
+    this.turnGate.reset();
     this.voiceSession?.stop();
     this.voiceSession = null;
+    this.dataCipher?.dispose();
+    this.dataCipher = null;
 
     const room = this.room;
     const track = this.localTrack;
@@ -318,18 +379,16 @@ export class LiveKitVoiceBridge {
         for await (const frame of audio) {
           if (!this.active || !this.voiceSession || generation !== this.mobileAudioGeneration) return;
           if (this.voiceSession.state !== "LISTENING") {
-            this.vad.reset();
+            this.turnGate.cancelCurrentTurn();
             continue;
           }
-          const pcm = Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-          this.voiceSession.pushAudio(Buffer.from(pcm));
-          this.vad.push(frame.data);
+          this.turnGate.push(frame.data);
         }
 
         // rtc-node can occasionally finish the decoded stream while the
         // participant and track remain subscribed. Recreate the adapter from
         // the same remote track instead of leaving the UI falsely LISTENING.
-        this.vad.reset();
+        this.turnGate.cancelCurrentTurn();
       }
 
       if (this.active && generation === this.mobileAudioGeneration) {
@@ -343,6 +402,10 @@ export class LiveKitVoiceBridge {
   }
 
   private handleVoiceSessionEvent(event: VoiceSessionEvent): void {
+    if (event.type === "turn") {
+      void this.publishConversationTurn();
+      return;
+    }
     if (event.type === "audio") {
       this.playbackQueue = this.playbackQueue
         .then(() => this.publishSynthesizedAudio(event.audio, event.format))
@@ -350,6 +413,19 @@ export class LiveKitVoiceBridge {
       return;
     }
     void this.publishClientEvent(event);
+  }
+
+  private async publishConversationTurn(): Promise<void> {
+    const conversations = this.dependencies.conversations;
+    const current = conversations?.current();
+    const meta = current
+      ? conversations?.list().find((candidate) => candidate.id === current.id)
+      : undefined;
+    if (!meta) return;
+    await this.publishClientEvent({
+      type: "conversation.updated",
+      conversation: meta,
+    });
   }
 
   private async publishSynthesizedAudio(audio: Buffer, format: "wav" | "mp3"): Promise<void> {
@@ -398,16 +474,22 @@ export class LiveKitVoiceBridge {
   }
 
   private async publishClientEvent(
-    event: VoiceSessionEvent | { type: "bridge"; state: LiveKitVoiceBridgeState },
+    event:
+      | VoiceSessionEvent
+      | MobileCallConversationEvent
+      | { type: "bridge"; state: LiveKitVoiceBridgeState },
   ): Promise<void> {
     const participant = this.room?.localParticipant;
     if (!participant) return;
-    const payload = Buffer.from(JSON.stringify(event), "utf8");
+    const plaintext = Buffer.from(JSON.stringify(event), "utf8");
     try {
+      const payload = this.dataCipher
+        ? this.dataCipher.encrypt(plaintext)
+        : plaintext;
       await participant.publishData(payload, {
         reliable: true,
         destination_identities: [this.config.mobileIdentity],
-        topic: "cyrene.call.event",
+        topic: MOBILE_CALL_EVENT_TOPIC,
       });
     } catch (error) {
       if (this.active) this.dependencies.onError?.(`移动端状态同步失败：${errorMessage(error)}`);
@@ -424,7 +506,7 @@ export class LiveKitVoiceBridge {
     this.peerPresent = false;
     this.peerEncrypted = false;
     this.mobileAudioGeneration += 1;
-    this.vad.reset();
+    this.turnGate.cancelCurrentTurn();
     this.setState("reconnecting");
     void this.publishClientEvent({ type: "bridge", state: "reconnecting" });
     this.mobileReconnectTimer = setTimeout(() => {
@@ -454,6 +536,7 @@ export class LiveKitVoiceBridge {
     }
     this.setState("connected");
     await this.publishClientEvent({ type: "bridge", state: "connected" });
+    await this.publishConversationCatalog();
   }
 
   private setState(state: LiveKitVoiceBridgeState, message?: string): void {
@@ -464,6 +547,138 @@ export class LiveKitVoiceBridge {
     } catch {
       // A diagnostics listener must never break the media bridge.
     }
+  }
+
+  private async handleControl(
+    control: MobileCallControl,
+  ): Promise<void> {
+    if (!control || !this.active) return;
+    const conversations = this.dependencies.conversations;
+
+    if (control.type === "conversation.list") {
+      await this.publishConversationCatalog(control.after);
+      return;
+    }
+    if (
+      control.type === "conversation.create"
+      || control.type === "conversation.select"
+      || control.type === "conversation.rename"
+    ) {
+      if (!conversations) {
+        this.reportControlError("当前通话不支持持久化语音对话");
+        return;
+      }
+      if (this.voiceSession?.state !== "LISTENING" || this.turnGate.isManualTurnOpen) {
+        this.reportControlError("请在角色正在聆听时切换语音对话");
+        return;
+      }
+
+      if (control.type === "conversation.rename") {
+        const renamed = conversations.rename(control.conversationId, control.title);
+        if (!renamed) {
+          this.reportControlError("找不到指定的语音对话");
+          return;
+        }
+        if (conversations.current()?.id === renamed.id) {
+          await this.publishSelectedConversation(renamed);
+        }
+        await this.publishConversationCatalog();
+        return;
+      }
+
+      const selected = control.type === "conversation.create"
+        ? conversations.create(control.title)
+        : conversations.select(control.conversationId);
+      if (!selected) {
+        this.reportControlError("找不到指定的语音对话");
+        return;
+      }
+      this.turnGate.cancelCurrentTurn();
+      this.turnGate.setConversationReady(true);
+      await this.publishSelectedConversation(selected);
+      await this.publishConversationCatalog();
+      return;
+    }
+
+    if (this.config.requireConversationSelection && !conversations?.current()) {
+      this.reportControlError("请先选择或创建语音对话");
+      return;
+    }
+    if (control.type === "turn.mode") {
+      if (this.voiceSession?.state !== "LISTENING") {
+        this.reportControlError("请在角色正在聆听时切换输入模式");
+        return;
+      }
+      this.turnGate.setMode(control.mode);
+      await this.publishClientEvent({
+        type: "turn.mode",
+        mode: this.turnGate.inputMode,
+        manualTurnOpen: this.turnGate.isManualTurnOpen,
+      });
+      return;
+    }
+    if (control.type === "turn.begin") {
+      if (this.voiceSession?.state !== "LISTENING" || !this.turnGate.beginManualTurn()) {
+        this.reportControlError("当前不能开始手动语音轮次");
+        return;
+      }
+      await this.publishClientEvent({
+        type: "turn.mode",
+        mode: this.turnGate.inputMode,
+        manualTurnOpen: true,
+      });
+      return;
+    }
+    if (control.type === "turn.commit") {
+      if (!this.turnGate.commitManualTurn()) {
+        this.reportControlError("当前没有可提交的手动语音轮次");
+        return;
+      }
+      await this.publishClientEvent({
+        type: "turn.mode",
+        mode: this.turnGate.inputMode,
+        manualTurnOpen: false,
+      });
+    }
+  }
+
+  private async publishConversationCatalog(after?: string): Promise<void> {
+    const conversations = this.dependencies.conversations;
+    if (!conversations) return;
+    const all = conversations.list();
+    const afterIndex = after
+      ? all.findIndex((conversation) => conversation.id === after)
+      : -1;
+    const start = after && afterIndex >= 0 ? afterIndex + 1 : 0;
+    const page = all.slice(start, start + MOBILE_CALL_CONVERSATION_PAGE_SIZE);
+    const hasMore = start + page.length < all.length;
+    await this.publishClientEvent({
+      type: "conversation.catalog",
+      conversations: page,
+      selectedId: conversations.current()?.id,
+      mode: this.turnGate.inputMode,
+      replace: !after,
+      ...(hasMore && page.length > 0
+        ? { nextCursor: page.at(-1)!.id }
+        : {}),
+    });
+  }
+
+  private reportControlError(message: string): void {
+    void this.publishClientEvent({ type: "control.error", message });
+  }
+
+  private async publishSelectedConversation(
+    conversation: VoiceConversation,
+  ): Promise<void> {
+    const meta = this.dependencies.conversations?.list()
+      .find((candidate) => candidate.id === conversation.id);
+    if (!meta) return;
+    await this.publishClientEvent({
+      type: "conversation.selected",
+      conversation: meta,
+      mode: this.turnGate.inputMode,
+    });
   }
 
   private releaseStartupWaiters(): void {

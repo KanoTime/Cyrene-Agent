@@ -1,5 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import * as Linking from "expo-linking";
+import * as Crypto from "expo-crypto";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -67,42 +68,22 @@ import {
   type MobileCallPhase,
 } from "./src/call-presentation";
 import { MobileCallScreen } from "./src/mobile-call-screen";
+import {
+  MOBILE_CALL_CONTROL_TOPIC,
+  MOBILE_CALL_EVENT_TOPIC,
+  encodeMobileCallControl,
+  parseMobileCallEvent,
+  type MobileCallControl,
+  type MobileCallTurnMode,
+  type MobileVoiceConversationMeta,
+} from "./src/call-control-protocol";
+import { VoiceConversationPicker } from "./src/voice-conversation-picker";
+import { CallDataCipher } from "./src/call-data-cipher";
 
 type EncryptedCallCredentials = RemoteMediaJoinGrant & {
   characterId?: string;
   characterName?: string;
 };
-
-type CallEvent =
-  | { type: "state"; state: string }
-  | { type: "transcript"; partial?: string; final?: string }
-  | { type: "error"; message: string }
-  | { type: "bridge"; state: string };
-
-function parseCallEvent(payload: Uint8Array): CallEvent | null {
-  try {
-    const value = JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>;
-    if (value.type === "state" && typeof value.state === "string") {
-      return { type: "state", state: value.state };
-    }
-    if (value.type === "transcript") {
-      return {
-        type: "transcript",
-        ...(typeof value.partial === "string" ? { partial: value.partial } : {}),
-        ...(typeof value.final === "string" ? { final: value.final } : {}),
-      };
-    }
-    if (value.type === "error" && typeof value.message === "string") {
-      return { type: "error", message: value.message };
-    }
-    if (value.type === "bridge" && typeof value.state === "string") {
-      return { type: "bridge", state: value.state };
-    }
-  } catch {
-    // Ignore unrelated data packets in the shared media room.
-  }
-  return null;
-}
 
 function ActiveCall({
   onHangUp,
@@ -110,12 +91,14 @@ function ActiveCall({
   characterId,
   characterName = "Cyrene",
   secureMediaReady = true,
+  dataCipher,
 }: {
   onHangUp: () => void;
   onRemoteEndHint?: () => void;
   characterId?: string;
   characterName?: string;
   secureMediaReady?: boolean;
+  dataCipher: CallDataCipher;
 }): React.JSX.Element {
   const room = useRoomContext();
   const { isMicrophoneEnabled, localParticipant, lastMicrophoneError } = useLocalParticipant();
@@ -123,14 +106,35 @@ function ActiveCall({
   const [callPhase, setCallPhase] = useState<MobileCallPhase>("CONNECTING");
   const [callDetail, setCallDetail] = useState<string | undefined>("正在连接语音通话…");
   const [transcript, setTranscript] = useState("");
+  const [catalogReady, setCatalogReady] = useState(false);
+  const [conversationBusy, setConversationBusy] = useState(false);
+  const [conversationError, setConversationError] = useState<string | undefined>();
+  const [conversations, setConversations] = useState<MobileVoiceConversationMeta[]>([]);
+  const [nextConversationCursor, setNextConversationCursor] = useState<string | undefined>();
+  const [selectedConversation, setSelectedConversation] =
+    useState<MobileVoiceConversationMeta | null>(null);
+  const [inputMode, setInputMode] = useState<MobileCallTurnMode>("automatic");
+  const [manualTurnOpen, setManualTurnOpen] = useState(false);
   const secureMediaReadyRef = useRef(secureMediaReady);
   secureMediaReadyRef.current = secureMediaReady;
+  const selectedConversationRef = useRef<MobileVoiceConversationMeta | null>(null);
+  selectedConversationRef.current = selectedConversation;
   const resolvedCharacterName = characterName || "Cyrene";
   const presentation = getMobileCallPresentation({
     phase: callPhase,
     characterName: resolvedCharacterName,
     detail: callDetail,
   });
+
+  const sendControl = useCallback(async (control: MobileCallControl) => {
+    await localParticipant.publishData(
+      dataCipher.encrypt(encodeMobileCallControl(control)),
+      {
+        reliable: true,
+        topic: MOBILE_CALL_CONTROL_TOPIC,
+      },
+    );
+  }, [dataCipher, localParticipant]);
 
   const setTransportState = useCallback((state: string) => {
     if (state.includes("聆听") && !state.includes("等待")) {
@@ -160,8 +164,14 @@ function ActiveCall({
       onDisconnected,
     } = createCallTransportStateHandlers(secureMediaReadyRef, setTransportState);
     const onData = (payload: Uint8Array, _participant: unknown, _kind: unknown, topic?: string) => {
-      if (topic !== "cyrene.call.event") return;
-      const event = parseCallEvent(payload);
+      if (topic !== MOBILE_CALL_EVENT_TOPIC) return;
+      let plaintext: Uint8Array;
+      try {
+        plaintext = dataCipher.decrypt(payload);
+      } catch {
+        return;
+      }
+      const event = parseMobileCallEvent(plaintext);
       if (!event) return;
       if (event.type === "state") {
         if (
@@ -172,19 +182,37 @@ function ActiveCall({
           || event.state === "ERROR"
           || event.state === "ENDED"
         ) {
+          if (
+            event.state === "LISTENING"
+            && !selectedConversationRef.current
+          ) {
+            setCallPhase("CONNECTING");
+            setCallDetail("请选择一段语音对话");
+            return;
+          }
           setCallPhase(event.state);
           setCallDetail(undefined);
         }
       }
       if (event.type === "transcript") setTranscript(event.final ?? event.partial ?? "");
       if (event.type === "error") {
+        setConversationBusy(false);
+        if (!selectedConversationRef.current) {
+          setConversationError(event.message);
+          return;
+        }
         setCallPhase("ERROR");
         setCallDetail(`通话出错：${event.message}`);
       }
       if (event.type === "bridge") {
         if (event.state === "connected" && secureMediaReady) {
-          setCallPhase("LISTENING");
-          setCallDetail(undefined);
+          if (selectedConversationRef.current) {
+            setCallPhase("LISTENING");
+            setCallDetail(undefined);
+          } else {
+            setCallPhase("CONNECTING");
+            setCallDetail("请选择一段语音对话");
+          }
         }
         if (event.state === "reconnecting") {
           setCallPhase("RECONNECTING");
@@ -195,6 +223,56 @@ function ActiveCall({
           setCallDetail("正在确认通话状态…");
           onRemoteEndHint?.();
         }
+      }
+      if (event.type === "conversation.catalog") {
+        setConversations((current) => {
+          if (event.replace) return event.conversations;
+          const merged = new Map(current.map((conversation) => [
+            conversation.id,
+            conversation,
+          ]));
+          for (const conversation of event.conversations) {
+            merged.set(conversation.id, conversation);
+          }
+          return Array.from(merged.values());
+        });
+        setNextConversationCursor(event.nextCursor);
+        setCatalogReady(true);
+        setConversationBusy(false);
+        setConversationError(undefined);
+        setInputMode(event.mode);
+        if (event.selectedId) {
+          const selected = event.conversations.find(
+            (conversation) => conversation.id === event.selectedId,
+          );
+          if (selected) setSelectedConversation(selected);
+        }
+      }
+      if (event.type === "conversation.selected") {
+        setSelectedConversation(event.conversation);
+        setInputMode(event.mode);
+        setManualTurnOpen(false);
+        setConversationBusy(false);
+        setConversationError(undefined);
+        setCallPhase("LISTENING");
+        setCallDetail(undefined);
+        void localParticipant.setMicrophoneEnabled(true);
+      }
+      if (event.type === "conversation.updated") {
+        setSelectedConversation((current) =>
+          current?.id === event.conversation.id ? event.conversation : current);
+        setConversations((current) => [
+          event.conversation,
+          ...current.filter((item) => item.id !== event.conversation.id),
+        ]);
+      }
+      if (event.type === "turn.mode") {
+        setInputMode(event.mode);
+        setManualTurnOpen(event.manualTurnOpen);
+      }
+      if (event.type === "control.error") {
+        setConversationBusy(false);
+        Alert.alert("操作没有完成", event.message);
       }
     };
     room.on(RoomEvent.Connected, onConnected);
@@ -211,14 +289,28 @@ function ActiveCall({
       room.off(RoomEvent.Disconnected, onDisconnected);
       room.off(RoomEvent.DataReceived, onData);
     };
-  }, [onRemoteEndHint, room, secureMediaReady, setTransportState]);
+  }, [
+    localParticipant,
+    dataCipher,
+    onRemoteEndHint,
+    room,
+    secureMediaReady,
+    setTransportState,
+  ]);
 
   useEffect(() => {
     if (secureMediaReady) {
-      setCallPhase("LISTENING");
-      setCallDetail(undefined);
+      if (selectedConversationRef.current) {
+        setCallPhase("LISTENING");
+        setCallDetail(undefined);
+      } else {
+        setCallPhase("CONNECTING");
+        setCallDetail("请选择一段语音对话");
+        void localParticipant.setMicrophoneEnabled(false);
+        void sendControl({ type: "conversation.list" });
+      }
     }
-  }, [secureMediaReady]);
+  }, [localParticipant, secureMediaReady, sendControl]);
 
   useEffect(() => {
     if (lastMicrophoneError) {
@@ -234,15 +326,73 @@ function ActiveCall({
     }
   }, [isMicrophoneEnabled, localParticipant]);
 
+  const sendConversationControl = useCallback((control: MobileCallControl) => {
+    setConversationBusy(true);
+    setConversationError(undefined);
+    void sendControl(control).catch((controlError) => {
+      setConversationBusy(false);
+      setConversationError(
+        `无法更新语音对话：${
+          controlError instanceof Error ? controlError.message : String(controlError)
+        }`,
+      );
+    });
+  }, [sendControl]);
+
+  if (secureMediaReady && !selectedConversation) {
+    return (
+      <VoiceConversationPicker
+        busy={conversationBusy}
+        catalogReady={catalogReady}
+        errorMessage={conversationError}
+        characterName={resolvedCharacterName}
+        conversations={conversations}
+        onCreate={(title) => sendConversationControl({
+          type: "conversation.create",
+          title,
+        })}
+        onHangUp={onHangUp}
+        hasMore={Boolean(nextConversationCursor)}
+        onLoadMore={() => {
+          if (!nextConversationCursor) return;
+          sendConversationControl({
+            type: "conversation.list",
+            after: nextConversationCursor,
+          });
+        }}
+        onRename={(conversationId, title) => sendConversationControl({
+          type: "conversation.rename",
+          conversationId,
+          title,
+        })}
+        onSelect={(conversationId) => sendConversationControl({
+          type: "conversation.select",
+          conversationId,
+        })}
+      />
+    );
+  }
+
   return (
     <MobileCallScreen
       characterId={characterId}
       characterName={resolvedCharacterName}
       presentation={presentation}
       transcript={transcript}
+      conversationTitle={selectedConversation?.title}
+      inputMode={inputMode}
+      manualTurnOpen={manualTurnOpen}
       isMicrophoneEnabled={isMicrophoneEnabled}
       microphoneSignalActive={isLocalSpeaking}
       onToggleMicrophone={() => void toggleMicrophone()}
+      onChangeInputMode={(mode) => {
+        void sendControl({ type: "turn.mode", mode });
+      }}
+      onManualTurnAction={() => {
+        void sendControl({
+          type: manualTurnOpen ? "turn.commit" : "turn.begin",
+        });
+      }}
       onHangUp={onHangUp}
     />
   );
@@ -263,6 +413,7 @@ function CallRoom({
 }): React.JSX.Element {
   return (
     <EncryptedCallRoom
+      key={credentials.callId}
       credentials={credentials}
       onHangUp={onHangUp}
       onError={onError}
@@ -285,14 +436,22 @@ function EncryptedCallRoom({
   onSecureConnected?: () => void;
   onRemoteEndHint?: () => void;
 }): React.JSX.Element {
-  const [{ room, keyProvider }] = useState(() => {
+  const [{ room, keyProvider, dataCipher }] = useState(() => {
     const transportPolicy = mobileE2eeTransportPolicy();
     const provider = new RNKeyProvider({});
     const e2eeManager = new RNE2EEManager(
       provider,
       transportPolicy.dataChannelEncryption,
     );
+    const callKey = toNativeE2eeKeyMaterial(credentials.e2eeKey);
+    const dataCipher = new CallDataCipher(
+      callKey,
+      "mobile",
+      (length) => Crypto.getRandomBytes(length),
+    );
+    callKey.fill(0);
     return {
+      dataCipher,
       keyProvider: provider,
       room: new Room({
         [transportPolicy.roomOption]: { e2eeManager },
@@ -331,9 +490,10 @@ function EncryptedCallRoom({
     return () => {
       cancelled = true;
       void room.disconnect();
+      dataCipher.dispose();
       keyProvider.dispose();
     };
-  }, [credentials.e2eeKey, keyProvider, room]);
+  }, [credentials.e2eeKey, dataCipher, keyProvider, room]);
 
   const observeAudioPublication = useCallback((input: {
     participantIdentity: string;
@@ -501,6 +661,7 @@ function EncryptedCallRoom({
         characterId={credentials.characterId}
         characterName={credentials.characterName}
         secureMediaReady={secureMediaReady}
+        dataCipher={dataCipher}
       />
     </LiveKitRoom>
   );

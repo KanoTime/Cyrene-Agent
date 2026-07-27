@@ -155,7 +155,9 @@ vi.mock("@livekit/rtc-node", () => ({
   },
   AudioStream: class {
     async *[Symbol.asyncIterator](): AsyncGenerator<{ data: Int16Array }> {
-      yield { data: new Int16Array([4_000, -4_000]) };
+      for (let index = 0; index < 10; index += 1) {
+        yield { data: new Int16Array(320).fill(index % 2 === 0 ? 4_000 : -4_000) };
+      }
       if (liveKit.shouldEndAudioStream()) return;
       await new Promise<void>(() => undefined);
     }
@@ -176,6 +178,7 @@ vi.mock("@livekit/rtc-node", () => ({
     Disconnected: "disconnected",
     EncryptionError: "encryptionError",
     ParticipantEncryptionStatusChanged: "participantEncryptionStatusChanged",
+    DataReceived: "dataReceived",
   },
   EncryptionType: { GCM: "gcm" },
   TrackKind: { KIND_AUDIO: "audio" },
@@ -189,6 +192,9 @@ import {
   type LiveKitVoiceBridgeDiagnostic,
   type LiveKitVoiceBridgeState,
 } from "./livekit-voice-bridge";
+import { CallDataCipher } from "./call-data-cipher";
+
+const TEST_E2EE_KEY = new Uint8Array(32);
 
 function createBridge(states: Array<{ state: LiveKitVoiceBridgeState; message?: string }>) {
   const errors: string[] = [];
@@ -237,6 +243,81 @@ function createEncryptedBridge(states: Array<{ state: LiveKitVoiceBridgeState; m
     onStateChange: (state, message) => states.push({ state, ...(message ? { message } : {}) }),
   });
   return { bridge, voiceSession };
+}
+
+function createConversationBridge(
+  states: Array<{ state: LiveKitVoiceBridgeState; message?: string }>,
+  conversationCount = 1,
+) {
+  const voiceSession = {
+    state: "LISTENING",
+    start: vi.fn(async () => undefined),
+    stop: vi.fn(),
+    endTurn: vi.fn(async () => undefined),
+    pushAudio: vi.fn(),
+    onSpeechFinished: vi.fn(async () => undefined),
+  };
+  const conversation = {
+    id: "00000000-0000-4000-8000-000000000001",
+    title: "晚间闲聊",
+    createdAt: 1,
+    updatedAt: 1,
+    schemaVersion: 1 as const,
+    turns: [],
+  };
+  const conversationMetas = Array.from({ length: conversationCount }, (_, index) => ({
+    id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    title: index === 0 ? conversation.title : `历史 ${index + 1}`,
+    createdAt: index + 1,
+    updatedAt: conversationCount - index,
+    turnCount: 0,
+    preview: "",
+  }));
+  let selected = false;
+  const bridge = new LiveKitVoiceBridge({
+    serverUrl: "wss://test.livekit.cloud",
+    agentToken: "agent-token",
+    mobileIdentity: "cyrene-mobile-test",
+    vadSilenceMs: 1_000,
+    vadThreshold: 0.01,
+    e2eeKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    requireConversationSelection: true,
+  }, {
+    createVoiceSession: () => voiceSession as never,
+    conversations: {
+      list: () => conversationMetas,
+      create: vi.fn(() => conversation),
+      select: vi.fn((id: string) => {
+        selected = id === conversation.id;
+        return selected ? conversation : null;
+      }),
+      rename: vi.fn(() => conversation),
+      current: () => selected ? conversation : null,
+    },
+    onStateChange: (state, message) => states.push({ state, ...(message ? { message } : {}) }),
+  });
+  return {
+    bridge,
+    voiceSession,
+    conversation,
+    mobileCipher: new CallDataCipher(TEST_E2EE_KEY, "mobile"),
+  };
+}
+
+function sendMobileControl(
+  room: InstanceType<typeof liveKit.FakeRoom>,
+  mobile: { identity: string },
+  control: Record<string, unknown>,
+  cipher?: CallDataCipher,
+): void {
+  const plaintext = new TextEncoder().encode(JSON.stringify(control));
+  room.emit(
+    "dataReceived",
+    cipher ? cipher.encrypt(plaintext) : plaintext,
+    mobile,
+    0,
+    "cyrene.call.control",
+  );
 }
 
 describe("LiveKitVoiceBridge lifecycle", () => {
@@ -346,7 +427,7 @@ describe("LiveKitVoiceBridge lifecycle", () => {
     await start;
 
     await vi.waitFor(() => {
-      expect(voiceSession.pushAudio).toHaveBeenCalledOnce();
+      expect(voiceSession.pushAudio).toHaveBeenCalled();
     });
   });
 
@@ -362,8 +443,142 @@ describe("LiveKitVoiceBridge lifecycle", () => {
     room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
 
     await vi.waitFor(() => {
-      expect(voiceSession.pushAudio).toHaveBeenCalledTimes(2);
+      expect(voiceSession.pushAudio.mock.calls.length).toBeGreaterThanOrEqual(20);
     });
+  });
+
+  it("keeps ASR closed until the mobile selects a persisted Voice Conversation", async () => {
+    const states: Array<{ state: LiveKitVoiceBridgeState; message?: string }> = [];
+    const {
+      bridge,
+      voiceSession,
+      conversation,
+      mobileCipher,
+    } = createConversationBridge(states);
+    await bridge.start();
+    const room = liveKit.instances[0];
+    const mobile = { identity: "cyrene-mobile-test" };
+    room.remoteParticipants.set(mobile.identity, mobile);
+    room.emit("participantConnected", mobile);
+    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(voiceSession.pushAudio).not.toHaveBeenCalled();
+
+    sendMobileControl(room, mobile, {
+      type: "conversation.select",
+      conversationId: conversation.id,
+    }, mobileCipher);
+    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+
+    await vi.waitFor(() => {
+      expect(voiceSession.pushAudio).toHaveBeenCalled();
+    });
+    const events = room.localParticipant.publishData.mock.calls
+      .map(([payload]) => JSON.parse(new TextDecoder().decode(
+        mobileCipher.decrypt(payload as Uint8Array),
+      )) as { type: string });
+    expect(events).toContainEqual(expect.objectContaining({ type: "conversation.catalog" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "conversation.selected" }));
+  });
+
+  it("manual mode forwards only an explicitly opened turn and commits immediately", async () => {
+    const states: Array<{ state: LiveKitVoiceBridgeState; message?: string }> = [];
+    const {
+      bridge,
+      voiceSession,
+      conversation,
+      mobileCipher,
+    } = createConversationBridge(states);
+    await bridge.start();
+    const room = liveKit.instances[0];
+    const mobile = { identity: "cyrene-mobile-test" };
+    room.remoteParticipants.set(mobile.identity, mobile);
+    room.emit("participantConnected", mobile);
+    sendMobileControl(room, mobile, {
+      type: "conversation.select",
+      conversationId: conversation.id,
+    }, mobileCipher);
+    sendMobileControl(
+      room,
+      mobile,
+      { type: "turn.mode", mode: "manual" },
+      mobileCipher,
+    );
+    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(voiceSession.pushAudio).not.toHaveBeenCalled();
+
+    sendMobileControl(room, mobile, { type: "turn.begin" }, mobileCipher);
+    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    await vi.waitFor(() => {
+      expect(voiceSession.pushAudio).toHaveBeenCalled();
+    });
+    sendMobileControl(room, mobile, { type: "turn.commit" }, mobileCipher);
+    await vi.waitFor(() => {
+      expect(voiceSession.endTurn).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("paginates conversation metadata within the reliable packet limit", async () => {
+    const {
+      bridge,
+      mobileCipher,
+    } = createConversationBridge([], 13);
+    await bridge.start();
+    const room = liveKit.instances[0];
+    const mobile = { identity: "cyrene-mobile-test" };
+
+    sendMobileControl(room, mobile, { type: "conversation.list" }, mobileCipher);
+    await vi.waitFor(() => {
+      expect(room.localParticipant.publishData.mock.calls.length).toBeGreaterThan(1);
+    });
+    const firstPage = room.localParticipant.publishData.mock.calls
+      .map(([payload]) => JSON.parse(new TextDecoder().decode(
+        mobileCipher.decrypt(payload as Uint8Array),
+      )) as {
+        type: string;
+        conversations?: unknown[];
+        replace?: boolean;
+        nextCursor?: string;
+      })
+      .find((event) => event.type === "conversation.catalog");
+
+    expect(firstPage).toMatchObject({
+      replace: true,
+      conversations: expect.any(Array),
+      nextCursor: "00000000-0000-4000-8000-000000000012",
+    });
+    expect(firstPage?.conversations).toHaveLength(12);
+
+    sendMobileControl(room, mobile, {
+      type: "conversation.list",
+      after: firstPage?.nextCursor,
+    }, mobileCipher);
+    await vi.waitFor(() => {
+      const catalogs = room.localParticipant.publishData.mock.calls.filter(([payload]) => {
+        const event = JSON.parse(new TextDecoder().decode(
+          mobileCipher.decrypt(payload as Uint8Array),
+        )) as { type: string };
+        return event.type === "conversation.catalog";
+      });
+      expect(catalogs).toHaveLength(2);
+    });
+    const secondPage = JSON.parse(new TextDecoder().decode(
+      mobileCipher.decrypt(
+        room.localParticipant.publishData.mock.calls.at(-1)?.[0] as Uint8Array,
+      ),
+    )) as {
+      conversations: unknown[];
+      replace: boolean;
+      nextCursor?: string;
+    };
+    expect(secondPage).toMatchObject({
+      replace: false,
+      conversations: expect.any(Array),
+    });
+    expect(secondPage.conversations).toHaveLength(1);
+    expect(secondPage.nextCursor).toBeUndefined();
   });
 
   it("does not leave the call permanently speaking when rtc-node frame capture stalls", async () => {

@@ -200,6 +200,18 @@ _Avoid_: Single WeChat adapter, contact list, shared login
 Conversation-derived data owned by one Character Package, including chat history, inferred preferences, secrets, nicknames, promises, relationship state, long-term memory, worldbook activation state, proactive-message state, and TTS caches. It is invisible to other characters unless the user explicitly shares it.
 _Avoid_: User profile, global memory
 
+**Voice Conversation（语音对话）**:
+A durable, user-named sequence of user and Active Character turns that belongs to one Character ID and may be resumed across multiple Voice Calls. Its authoritative text history stays in the owning Character State Root; a Mobile Device may browse its minimum catalogue metadata and select it during an encrypted call but does not become its owner.
+_Avoid_: Voice Call, mobile transcript cache, chat window session
+
+**Encrypted Call Data Envelope（加密通话数据包）**:
+An application-layer authenticated-encryption envelope for LiveKit control and event data. It derives independent directional keys from the current per-call E2EE key, uses a fresh extended nonce for each packet, and carries only the minimum metadata needed by the Mobile Device; it complements media-frame E2EE because the locked desktop SDK does not encrypt LiveKit user data packets.
+_Avoid_: Media E2EE, HTTPS control-plane state, plaintext LiveKit data packet
+
+**Voice Turn Input Mode（语音轮次输入模式）**:
+The per-call choice between `automatic`, where confirmed speech and silence delimit a user turn, and `manual`, where the Mobile Device explicitly opens and commits the turn. It changes audio admission and turn boundaries, not the selected Voice Conversation or its persisted content.
+_Avoid_: Microphone mute, ASR engine, noise-cancellation mode
+
 **Character State Root（角色状态根目录）**:
 The physically separate application-owned storage root for one Character ID’s chats, memory and vector index, relationship, worldbook state, proactive state, and TTS cache. Shared inference engines may open it, but no other character may query or mount it.
 _Avoid_: Character Package, shared database, scoped table

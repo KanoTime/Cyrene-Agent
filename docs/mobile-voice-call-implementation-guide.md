@@ -1,7 +1,7 @@
 # Cyrene 移动端语音通话实现与从零构建指南
 
 > 维护日期：2026-07-27
-> 适用版本：Cyrene Voice `1.0.11`（Android `versionCode 12`）及同日桌面端代码
+> 适用版本：Cyrene Voice `1.0.12`（Android `versionCode 13`）及同日桌面端代码
 > 目标读者：接手维护、重新部署、从零复现或升级这条语音链路的开发者
 > 安全说明：本文只记录变量名和示例值，不记录生产域名、Owner/设备标识或任何真实凭据
 
@@ -14,10 +14,13 @@
 - 桌面在线时接听并执行本地 ASR → 模型 → 当前角色 TTS；
 - 整通电话锁定接通时的 Active Character；
 - LiveKit 承载双向媒体，音频媒体帧强制 E2EE；
+- LiveKit 控制/事件 data packet 使用每通密钥派生的双向 XChaCha20-Poly1305 应用层加密；
 - 控制面使用 Cloudflare Worker + 单个 SQLite-backed Durable Object；
 - 手机长期凭据进入 SecureStore；LiveKit token 和每通 E2EE key 只短时驻留内存；
 - 网络短暂中断时尝试重连，最终以 HTTPS 权威状态收敛；
 - 桌面角色语音以 48 kHz、单声道、20 ms 帧发布。用户实测音色与桌面一致且无沙声；
+- 手机可创建、重命名和分页选择当前角色的语音对话；正文只保存在桌面角色状态目录，退出应用后重新呼叫仍可续聊；
+- 安静环境可免手动自动分轮；嘈杂或有人声干扰时可切换手动轮次，只有点击开始后音频才进入 ASR；
 - 移动通话页复用桌面端的深紫背景、当前角色身份、通话计时、状态波形、字幕和圆形挂断视觉；内置昔涟头像只由稳定 `characterId=cyrene` 选择，其他角色在没有安全头像资源时使用中性首字占位，避免用可重复显示名错配角色资源；
 - 相同 application ID 和签名的 APK 可覆盖安装并保留配对。
 
@@ -49,10 +52,11 @@
 2. LiveKit API Secret 和媒体信封主密钥只存在于 Worker Secret。
 3. LiveKit token 只授权一次随机房间，不能替代长期设备授权。
 4. E2EE key 每通生成，通过 endpoint-scoped AES-GCM 短时信封交付，不写数据库明文、二维码、URL 或 SecureStore。
-5. LiveKit data packet 只作低延迟、无内容提示；通话权威状态始终来自 HTTPS 控制面。
-6. 当前锁定 SDK 使用 legacy `e2ee` 配置且 `dataChannelEncryption=false`，因此这里只声明“音频媒体帧 E2EE”，不宣称数据通道内容也已 E2EE。
+5. LiveKit data packet 只作低延迟控制与必要目录元数据；通话权威状态始终来自 HTTPS 控制面。
+6. 当前锁定 SDK 使用 legacy `e2ee` 配置且原生 `dataChannelEncryption=false`。应用层另以 HKDF-SHA-256 从本次通话 key 派生两把方向密钥，并用 XChaCha20-Poly1305 加密 data packet；媒体帧 E2EE 与应用层数据加密是两个独立门禁。
+7. 语音历史正文、ASR/模型文本和角色记忆不进入 Cloudflare，也不在手机形成权威副本；手机只取得每页最多 12 条的名称、摘要、轮数和时间。
 
-平台能力、设计依据和官方资料见[一手资料研究](./research/mobile-voice-call-from-zero-primary-sources-2026-07-27.md)；不可逆决策见 `docs/adr/0027` 至 `docs/adr/0039`。
+平台能力、设计依据和官方资料见[一手资料研究](./research/mobile-voice-call-from-zero-primary-sources-2026-07-27.md)；不可逆决策见 `docs/adr/0027` 至 `docs/adr/0041`。
 
 ## 3. 代码地图
 
@@ -90,11 +94,16 @@
 | `src/main/remote-access/desktop-availability-coordinator.ts` | 桌面在线心跳 |
 | `src/main/remote-access/desktop-remote-call-coordinator.ts` | 发现呼叫、确认、领取媒体授权、结束与收敛 |
 | `src/main/mobile-call/livekit-voice-bridge.ts` | rtc-node 入会、E2EE、手机 PCM 订阅、角色音频发布 |
-| `src/main/mobile-call/pcm-vad.ts` | 手机上行 PCM 的本地 VAD |
+| `src/main/mobile-call/call-data-cipher.ts` | LiveKit data packet 的 HKDF 方向密钥与 XChaCha20-Poly1305 信封 |
+| `src/main/mobile-call/audio-turn-gate.ts` | 自动模式的预录/VAD 门控与手动轮次开关 |
 | `src/main/mobile-call/pcm-wav.ts` | WAV 校验、单声道转换、SoX 高质量重采样至 48 kHz |
 | `src/main/mobile-call/media-ready-retry.ts` | E2EE/媒体就绪确认的有界重试 |
 | `src/main/call/voice-session.ts` | 平台无关的 ASR → Agent → TTS 单轮生命周期 |
+| `src/main/call/voice-conversation-store.ts` | 当前角色的命名语音历史与原子 JSON 持久化 |
+| `src/main/call/voice-conversation-runtime.ts` | 每通电话的选择状态和最近 24 轮模型上下文恢复 |
 | `src/main/call/call-manager.ts` | 桌面窗口和移动桥接入 `VoiceSession`，校验当前角色语音配置 |
+| `src/shared/mobile-call-control.ts` | 跨端控制命令、目录事件、分页与输入模式协议 |
+| `src/shared/voice-conversation.ts` | Voice Conversation 领域类型 |
 | `src/main/index.ts` | 启动装配、设置、IPC 与协调器生命周期 |
 | `src/preload/index.ts`、`src/renderer/settings/*` | 安全暴露配对能力及设置页 UI |
 
@@ -105,6 +114,9 @@
 | `mobile/App.tsx` | 配对、呼叫、静音、挂断、LiveKit 事件和 UI 状态编排 |
 | `mobile/src/call-presentation.ts` | 纯函数归约通话阶段、桌面同款文案、颜色和动效语义 |
 | `mobile/src/mobile-call-screen.tsx` | 通话页视觉、真实头像/安全 fallback、计时、波形、紧凑布局与减少动态效果适配 |
+| `mobile/src/voice-conversation-picker.tsx` | 新建、重命名、分页浏览和选择语音历史 |
+| `mobile/src/call-control-protocol.ts` | 手机端严格解析的对话与轮次协议 |
+| `mobile/src/call-data-cipher.ts` | 与桌面对等的应用层加密信封 |
 | `mobile/index.ts` | 在加载 App 前注册 LiveKit WebRTC globals |
 | `mobile/src/device-pairing.ts` | challenge claim/outcome 与长期设备授权落盘 |
 | `mobile/src/device-authorization-store.ts` | SecureStore 读写与迁移 |
@@ -163,7 +175,7 @@
 
 ```text
 Android 麦克风 → WebRTC/Opus → rtc-node AudioStream
-→ PCM16 单声道 → VAD 切分 → ASR → 模型
+→ PCM16 单声道 → Voice Turn Gate → ASR → 模型
 ```
 
 下行：
@@ -177,6 +189,25 @@ Android 麦克风 → WebRTC/Opus → rtc-node AudioStream
 ```
 
 不能把 16 kHz TTS 样本直接当 48 kHz 发布；这正是早期移动端“糊、沙声、音色失真”的主要来源。也不要把 Android 切到只播放用途的 `MediaAudioType`，本应用同时发布麦克风，需要保留通信模式的回声消除和音频路由。
+
+### 4.4 语音历史与嘈杂环境
+
+建立加密媒体后，手机先显示当前 Character ID 的 Voice Conversation Catalog，选择完成前桌面丢弃所有 PCM：
+
+```text
+手机选择/创建命名对话
+  → 加密 control packet
+桌面绑定该 Voice Conversation
+  → 从角色状态目录恢复最近 24 轮给模型
+  → 开放音频门控
+每次有效回答
+  → 桌面原子追加 user/assistant Turn
+  → 只把更新后的摘要元数据发给手机
+```
+
+Catalog 每页 12 条，完整正文不会经过 LiveKit data packet。手机退出或通话结束不删除桌面历史；下次呼叫重新选择同一名称即可续聊。切换角色后只看到新角色自己的目录。
+
+自动模式保留约 200 ms 预录音频，要求连续至少 200 ms 的有效启动信号才让声音进入 ASR，并按静默结束本轮。它能过滤碰撞、风声等短促噪声，但无法可靠判断背景人声是不是 Owner。旁人较多时切到手动模式：点击“开始说话”才开放门控，完成后点击“提交本轮”；这与静音按钮不同。
 
 ## 5. 软件依赖与前置条件
 
@@ -203,6 +234,7 @@ Android 麦克风 → WebRTC/Opus → rtc-node AudioStream
 - 移动 `Expo 56.0.16`、`React Native 0.85.3`；
 - `@livekit/react-native 2.11.1`、`react-native-webrtc 144.1.1`、`livekit-client 2.20.2`；
 - `expo-secure-store 56.0.4`、`expo-camera 56.0.8`；
+- 双端锁定 `@noble/ciphers 1.3.0`、`@noble/hashes 1.8.0`，用于 data packet 的 XChaCha20-Poly1305 与 HKDF；
 - 通话视觉使用 `expo-linear-gradient 56.0.4`、`@expo/vector-icons 15.1.1`，并显式锁定 SDK 56 的 `expo-font 56.0.7`，防止重复原生模块。
 
 不要单独升级其中一个 LiveKit/React Native 包；它们是需要一起构建和真人回归的兼容组。
@@ -461,6 +493,10 @@ git diff --check
 6. 验证静音、主动挂断；
 7. 短暂切换网络，验证重连或明确终止，不出现永久假连接；
 8. 试听无沙声、无明显失真，音色与桌面 TTS 一致。
+9. 新建一个自定义名称的语音对话并完成两轮，挂断并彻底退出手机应用；
+10. 重新呼叫，选择同一历史并询问上一轮内容，确认角色能继续上下文；
+11. 切换手动模式，未点击“开始说话”时用旁人语音测试不触发 ASR；点击后说话并提交，确认正常回答；
+12. 篡改/明文 data packet 只在自动测试中验证，真机链路不得提供明文降级入口。
 
 自动测试不能替代第 8 项听感证据。
 
@@ -474,6 +510,8 @@ git diff --check
 - `package.json` 同时保留桌面 LiveKit 与主仓新依赖；
 - `TtsEngine` 新增值时，角色 Voice Profile 白名单、全局设置和通话格式策略同步；
 - E2EE 必须 fail-closed，不能因事件乱序退回未加密媒体；
+- data packet 必须保持 HKDF 双向密钥、XChaCha20-Poly1305、15 KiB 上限和每页 12 条目录，不得回退明文或传输完整历史；
+- `voice-conversations` 必须位于当前 Character State Root，角色切换时不得共用目录；
 - 48 kHz、SoX `VERY_HIGH`、20 ms/960 samples 不被改回低质量路径；
 - `controlPlaneOrigin` 缺失时必须报 `CONTROL_PLANE_ORIGIN_REQUIRED`，不能静默回退到某个个人旧地址；
 - CloudBase 文件只能作为兼容实现，不能重新成为默认生产入口。
@@ -534,6 +572,18 @@ ASR、模型、记忆、角色和 TTS 都留在个人桌面。控制面不会代
 
 16 kHz PCM 曾被错误按 48 kHz 节奏发布，且低质量重采样/帧长不匹配会造成失真。当前统一高质量重采样到 48 kHz，并按 20 ms/960 samples 发布。
 
+### 对话历史存在哪里？手机退出后为什么还能续聊？
+
+权威历史按 Character ID 保存在桌面 Character State Root 的 `voice-conversations` 目录。手机不保存正文，只在每次加密通话中读取分页目录并选择一个 ID；桌面随后把该历史最近 24 轮恢复给模型。覆盖安装或手机更换不会删除桌面历史，但桌面角色状态目录损坏或被删除会丢失它。
+
+### 自动模式为什么仍可能识别旁人？
+
+自动门控能过滤短促噪声和部分环境底噪，却不能可靠分辨“谁在说话”。有人声干扰时使用手动模式，只有按钮打开期间的 PCM 才进入 ASR。声纹识别暂未接入，因为在当前单人项目中容易误拒绝小声、情绪化或距离变化后的 Owner 语音，投入产出比低。
+
+### LiveKit 数据通道本身是否 E2EE？
+
+锁定的桌面 SDK 不提供与 Android 对等的原生 data packet E2EE，因此不能直接这样宣称。当前是在应用层把每个控制/事件包用本次通话 key 派生出的方向密钥加密和认证；LiveKit 仍可看到包的大小、时间、topic 和路由，但看不到名称、摘要或命令正文。
+
 ### 为什么不切 Android MediaAudioType？
 
 它更适合只播放的媒体应用。Cyrene 同时发布麦克风，需要通信模式的回声消除、路由和双向行为。
@@ -568,6 +618,8 @@ token TTL 主要限制初始连接/重连授权，不是业务终止时钟。通
 - [ ] 最终桌面构建已启动且运行上下文明确；
 - [ ] 最终 APK 覆盖安装；
 - [ ] 真实 Android 五轮/60 秒通话通过；
+- [ ] 自定义名称历史退出后可选择并续聊；
+- [ ] 自动/手动模式切换及手动门控真机通过；
 - [ ] 音色与桌面一致、无沙声；
 - [ ] 分支推送、PR/合并完成；
 - [ ] 交付中说明当前能力、未验收对象和用户是否还需操作。

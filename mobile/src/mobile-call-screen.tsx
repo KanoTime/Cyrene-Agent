@@ -18,6 +18,7 @@ import {
   getMobileAvatarKind,
   type MobileCallPresentation,
 } from "./call-presentation";
+import type { MobileCallTurnMode } from "./call-control-protocol";
 
 const CYRENE_AVATAR = require("../assets/cyrene-avatar.png");
 const WAVE_BARS = Array.from({ length: 28 }, (_, index) => ({
@@ -238,7 +239,7 @@ function AvatarActivity({
           <Image
             accessibilityLabel={`${characterName}的头像`}
             source={CYRENE_AVATAR}
-            style={styles.callAvatarImage}
+            style={{ height: "100%", width: "100%" }}
           />
         ) : (
           <View
@@ -314,26 +315,37 @@ export function MobileCallScreen({
   characterId,
   presentation,
   transcript,
+  conversationTitle,
+  inputMode = "automatic",
+  manualTurnOpen = false,
   isMicrophoneEnabled,
   microphoneSignalActive = false,
   showMuteControl = true,
   onToggleMicrophone,
+  onChangeInputMode,
+  onManualTurnAction,
   onHangUp,
 }: {
   characterName: string;
   characterId?: string;
   presentation: MobileCallPresentation;
   transcript: string;
+  conversationTitle?: string;
+  inputMode?: MobileCallTurnMode;
+  manualTurnOpen?: boolean;
   isMicrophoneEnabled: boolean;
   microphoneSignalActive?: boolean;
   showMuteControl?: boolean;
   onToggleMicrophone: () => void;
+  onChangeInputMode?: (mode: MobileCallTurnMode) => void;
+  onManualTurnAction?: () => void;
   onHangUp: () => void;
 }): React.JSX.Element {
   const reduceMotion = useReduceMotion();
   const { height: windowHeight } = useWindowDimensions();
   const compact = windowHeight < 700;
   const duration = useCallDuration(presentation.timerActive);
+  const inputControlsEnabled = presentation.activity === "listening";
   const statusStyle =
     presentation.tone === "error"
       ? styles.callStatusError
@@ -360,6 +372,14 @@ export function MobileCallScreen({
             </Text>
             <View style={styles.presenceDot} />
           </View>
+          {conversationTitle ? (
+            <View style={styles.conversationBadge}>
+              <Ionicons color="#cbb6ea" name="chatbubble-ellipses-outline" size={14} />
+              <Text numberOfLines={1} style={styles.conversationBadgeText}>
+                {conversationTitle}
+              </Text>
+            </View>
+          ) : null}
           {presentation.timerActive ? (
             <Text style={styles.callDuration}>{duration}</Text>
           ) : null}
@@ -395,8 +415,77 @@ export function MobileCallScreen({
             }
             reduceMotion={reduceMotion}
           />
+          {onChangeInputMode ? (
+            <View
+              accessibilityLabel="语音输入模式"
+              accessibilityRole="tablist"
+              style={styles.modeSwitch}
+            >
+              <Pressable
+                accessibilityRole="tab"
+                accessibilityState={{ selected: inputMode === "automatic" }}
+                disabled={!inputControlsEnabled}
+                onPress={() => onChangeInputMode("automatic")}
+                style={({ pressed }) => [
+                  styles.modeOption,
+                  inputMode === "automatic" && styles.modeOptionSelected,
+                  !inputControlsEnabled && styles.inputControlDisabled,
+                  pressed && styles.pressedButton,
+                ]}
+              >
+                <Text style={[
+                  styles.modeOptionText,
+                  inputMode === "automatic" && styles.modeOptionTextSelected,
+                ]}>
+                  自动聆听
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="tab"
+                accessibilityState={{ selected: inputMode === "manual" }}
+                disabled={!inputControlsEnabled}
+                onPress={() => onChangeInputMode("manual")}
+                style={({ pressed }) => [
+                  styles.modeOption,
+                  inputMode === "manual" && styles.modeOptionSelected,
+                  !inputControlsEnabled && styles.inputControlDisabled,
+                  pressed && styles.pressedButton,
+                ]}
+              >
+                <Text style={[
+                  styles.modeOptionText,
+                  inputMode === "manual" && styles.modeOptionTextSelected,
+                ]}>
+                  手动轮次
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+          {inputMode === "manual" && onManualTurnAction ? (
+            <Pressable
+              accessibilityLabel={manualTurnOpen ? "提交本轮语音" : "开始本轮语音"}
+              accessibilityRole="button"
+              disabled={!inputControlsEnabled}
+              onPress={onManualTurnAction}
+              style={({ pressed }) => [
+                styles.manualTurnButton,
+                manualTurnOpen && styles.manualTurnButtonOpen,
+                !inputControlsEnabled && styles.inputControlDisabled,
+                pressed && styles.pressedButton,
+              ]}
+            >
+              <Ionicons
+                color="#ffffff"
+                name={manualTurnOpen ? "arrow-up-circle" : "mic"}
+                size={22}
+              />
+              <Text style={styles.manualTurnButtonText}>
+                {manualTurnOpen ? "提交本轮" : "开始说话"}
+              </Text>
+            </Pressable>
+          ) : null}
           <View style={styles.controls}>
-            {showMuteControl ? (
+            {showMuteControl && inputMode === "automatic" ? (
               <View style={styles.controlGroup}>
               <Pressable
                 accessibilityRole="button"
@@ -448,6 +537,7 @@ export function MobileCallScreen({
 const styles = StyleSheet.create({
   backdrop: { flex: 1 },
   safeArea: { flex: 1 },
+  inputControlDisabled: { opacity: 0.45 },
   ambientGlow: {
     position: "absolute",
     width: 330,
@@ -516,6 +606,23 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.5,
   },
+  conversationBadge: {
+    alignItems: "center",
+    backgroundColor: "rgba(183, 148, 244, 0.09)",
+    borderRadius: 999,
+    flexDirection: "row",
+    gap: 6,
+    marginTop: 7,
+    maxWidth: "82%",
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+  },
+  conversationBadgeText: {
+    color: "#cbbfe0",
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: "600",
+  },
   callStatus: {
     fontSize: 15,
     lineHeight: 22,
@@ -570,7 +677,6 @@ const styles = StyleSheet.create({
     shadowRadius: 22,
     elevation: 12,
   },
-  callAvatarImage: { width: "100%", height: "100%" },
   fallbackAvatar: {
     alignItems: "center",
     backgroundColor: "#2a2350",
@@ -637,6 +743,54 @@ const styles = StyleSheet.create({
     backgroundColor: "#f7bdd6",
     borderRadius: 5,
     width: 8,
+  },
+  modeSwitch: {
+    backgroundColor: "rgba(27, 22, 47, 0.88)",
+    borderColor: "rgba(126, 105, 157, 0.42)",
+    borderRadius: 22,
+    borderWidth: 1,
+    flexDirection: "row",
+    marginBottom: 14,
+    padding: 3,
+  },
+  modeOption: {
+    alignItems: "center",
+    borderRadius: 18,
+    justifyContent: "center",
+    minHeight: 36,
+    minWidth: 100,
+    paddingHorizontal: 13,
+  },
+  modeOptionSelected: {
+    backgroundColor: "#5d3b84",
+  },
+  modeOptionText: {
+    color: "#a99dbb",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  modeOptionTextSelected: {
+    color: "#fffaff",
+  },
+  manualTurnButton: {
+    alignItems: "center",
+    backgroundColor: "#9b4dca",
+    borderRadius: 24,
+    flexDirection: "row",
+    gap: 9,
+    justifyContent: "center",
+    marginBottom: 15,
+    minHeight: 48,
+    minWidth: 170,
+    paddingHorizontal: 20,
+  },
+  manualTurnButtonOpen: {
+    backgroundColor: "#3e9f78",
+  },
+  manualTurnButtonText: {
+    color: "#ffffff",
+    fontSize: 15,
+    fontWeight: "700",
   },
   controls: {
     alignItems: "flex-start",
