@@ -86,7 +86,7 @@ export function VoiceConversationPicker({
                 想从哪里继续？
               </Text>
               <Text maxFontSizeMultiplier={1.4} style={styles.subtitle}>
-                选择一段与{characterName}的历史，或创建新对话。选择完成前不会收音。
+                选择一段与{characterName}的历史，或创建新对话。选择完成前语音不会进入识别或保存。
               </Text>
             </View>
             <Pressable

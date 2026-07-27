@@ -79,6 +79,7 @@ import {
 } from "./src/call-control-protocol";
 import { VoiceConversationPicker } from "./src/voice-conversation-picker";
 import { CallDataCipher } from "./src/call-data-cipher";
+import { prepareConversationSelectionTransport } from "./src/conversation-selection-transport";
 
 type EncryptedCallCredentials = RemoteMediaJoinGrant & {
   characterId?: string;
@@ -306,8 +307,12 @@ function ActiveCall({
       } else {
         setCallPhase("CONNECTING");
         setCallDetail("请选择一段语音对话");
-        void localParticipant.setMicrophoneEnabled(false);
-        void sendControl({ type: "conversation.list" });
+        prepareConversationSelectionTransport({
+          setMicrophoneEnabled: (enabled) =>
+            localParticipant.setMicrophoneEnabled(enabled),
+          requestConversationCatalog: () =>
+            sendControl({ type: "conversation.list" }),
+        });
       }
     }
   }, [localParticipant, secureMediaReady, sendControl]);
