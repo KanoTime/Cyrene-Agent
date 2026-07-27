@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Cyrene Voice",
-    "slug": "cyrene-voice",
+    "slug": "cyrene-agent-mobile-test",
     "version": "1.0.13",
     "scheme": "cyrene",
     "orientation": "portrait",
@@ -54,8 +54,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "8300b7cc-eae3-4b2a-b4c9-c5f5470dc509"
+        "projectId": "045b5750-d607-4091-81b8-1e9c791116c6"
       }
-    }
+    },
+    "owner": "hanserofficials-team"
   }
 }
