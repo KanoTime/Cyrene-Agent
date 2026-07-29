@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Cyrene Voice",
+    "slug": "cyrene-agent-mobile-test",
+    "version": "1.0.15",
+    "scheme": "cyrene",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cyrene.agent.voice",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Cyrene 需要使用麦克风，才能与你进行语音通话。"
+      },
+      "bitcode": false
+    },
+    "android": {
+      "package": "com.cyrene.agent.voice",
+      "versionCode": 16,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.INTERNET",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Cyrene 需要使用相机，才能扫描桌面端的语音通话二维码。",
+          "barcodeScannerEnabled": true
+        }
+      ],
+      "@livekit/react-native-expo-plugin",
+      "@config-plugins/react-native-webrtc",
+      "expo-secure-store",
+      "expo-font"
+    ]
+  }
+}

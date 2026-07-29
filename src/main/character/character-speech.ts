@@ -61,7 +61,7 @@ const PROFILE_FIELDS = new Set([
   "promptLanguage", "textLanguage", "stylePrompt", "speed", "volume",
 ]);
 const SERVICES = new Set<CharacterVoiceService>([
-  "legacy-global", "minimax", "gptsovits", "custom-cloud", "mimo",
+  "legacy-global", "minimax", "gptsovits", "custom-cloud", "mimo", "mossland",
 ]);
 const LANGUAGES = new Set<SpeechLanguage>(["auto", "zh", "en", "ja"]);
 
@@ -125,7 +125,7 @@ export function readVoiceProfile(
       throw new Error("Voice Profile 参考音频必须是角色包内存在的文件");
     }
   }
-  if ((service === "minimax" || service === "custom-cloud") && !voiceId) {
+  if ((service === "minimax" || service === "custom-cloud" || service === "mossland") && !voiceId) {
     throw new Error(`Voice Profile ${service} 缺少 voiceId`);
   }
   if (service === "gptsovits" && (!referenceAudioPath || !promptText)) {
@@ -204,6 +204,7 @@ export function applyVoiceProfileToTtsSettings<T extends { ttsEngine: TtsEngine 
     if (profile.textLanguage) settings["ttsGptsovitsTextLang"] = profile.textLanguage;
   }
   if (profile.service === "custom-cloud") settings["ttsCustomCloudVoiceId"] = profile.voiceId;
+  if (profile.service === "mossland") settings["ttsMosslandVoiceId"] = profile.voiceId;
   if (profile.service === "mimo") {
     settings["ttsMimoVoiceAudioPath"] = profile.referenceAudioPath;
     settings["ttsMimoStylePrompt"] = profile.stylePrompt ?? "";

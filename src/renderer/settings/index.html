@@ -2076,6 +2076,129 @@
                 <input type="checkbox" id="asr-show-transcript" />
               </label>
             </div>
+
+            <div class="tts-section" id="mobile-call-section">
+              <h2 class="tts-section__title">📱 手机设备与实时通话</h2>
+              <div class="device-pairing-card" id="device-pairing-card">
+                <div class="device-pairing-card__header">
+                  <div>
+                    <strong>长期设备配对</strong>
+                    <p>生成 2 分钟有效的二维码或备用短码。手机扫码后仍需在本桌面核对六位校验码并明确批准。</p>
+                  </div>
+                  <span class="device-pairing-state" id="device-pairing-state">正在检查…</span>
+                </div>
+                <div class="mobile-call-actions">
+                  <button type="button" class="btn-primary" id="device-pairing-begin" disabled>配对新手机</button>
+                  <button type="button" class="ghost-btn" id="owner-recovery-open" hidden>确认恢复密钥</button>
+                  <button type="button" class="ghost-btn" id="owner-recover-start" hidden>恢复已有 Owner</button>
+                  <span class="save-status" id="device-pairing-status" role="status"></span>
+                </div>
+                <div class="owner-bootstrap-panel" id="owner-bootstrap-panel" hidden>
+                  <strong>初始化首台授权桌面</strong>
+                  <p>输入部署时生成的一次性引导码。成功后本机凭据直接进入 macOS 钥匙串，不会显示在页面中。</p>
+                  <div class="owner-bootstrap-grid">
+                    <label>
+                      <span>控制面 HTTPS 地址</span>
+                      <input type="url" id="owner-bootstrap-origin" placeholder="https://…" autocomplete="off" />
+                    </label>
+                    <label>
+                      <span>桌面名称</span>
+                      <input type="text" id="owner-bootstrap-label" value="家中 Mac" maxlength="64" autocomplete="off" />
+                    </label>
+                    <label class="owner-bootstrap-grid__wide">
+                      <span>一次性 Deployment Bootstrap Code</span>
+                      <input type="password" id="owner-bootstrap-code" placeholder="cy_db_…" autocomplete="new-password" />
+                    </label>
+                  </div>
+                  <button type="button" class="btn-primary" id="owner-bootstrap-submit">初始化并保存到钥匙串</button>
+                </div>
+                <div class="owner-recover-panel" id="owner-recover-panel" hidden>
+                  <strong>恢复已有 Owner</strong>
+                  <p>仅在所有已授权桌面都不可用时使用。成功后会立即撤销全部旧桌面、轮换恢复密钥，并要求重新审查已有手机。</p>
+                  <div class="owner-bootstrap-grid">
+                    <label>
+                      <span>控制面 HTTPS 地址</span>
+                      <input type="url" id="owner-recover-origin" placeholder="https://…" autocomplete="off" />
+                    </label>
+                    <label>
+                      <span>新桌面名称</span>
+                      <input type="text" id="owner-recover-label" value="恢复后的 Mac" maxlength="64" autocomplete="off" />
+                    </label>
+                    <label class="owner-bootstrap-grid__wide">
+                      <span>当前 Owner Recovery Key</span>
+                      <input type="password" id="owner-recover-key" placeholder="cy_rk_…" autocomplete="off" />
+                    </label>
+                  </div>
+                  <div class="mobile-call-actions">
+                    <button type="button" class="btn-primary" id="owner-recover-submit">撤销旧桌面并恢复</button>
+                    <button type="button" class="ghost-btn" id="owner-recover-cancel">取消</button>
+                  </div>
+                </div>
+                <div class="owner-recovery-panel" id="owner-recovery-panel" hidden>
+                  <span class="device-pairing-review__eyebrow">只展示一次</span>
+                  <strong>Owner Recovery Key</strong>
+                  <p id="owner-recovery-guidance">保存到 Cyrene 之外；不要只保存在这台 Mac。</p>
+                  <code id="owner-recovery-key" hidden></code>
+                  <label>
+                    <span id="owner-recovery-confirm-label">再次输入完整恢复密钥以确认已保存</span>
+                    <input type="password" id="owner-recovery-confirm-input" autocomplete="off" />
+                  </label>
+                  <div class="mobile-call-actions">
+                    <button type="button" class="btn-primary" id="owner-recovery-confirm">确认已保存</button>
+                    <button type="button" class="ghost-btn" id="owner-recovery-cancel">稍后处理</button>
+                  </div>
+                </div>
+                <div class="device-pairing-invitation" id="device-pairing-invitation" hidden>
+                  <img id="device-pairing-qr" alt="Cyrene 长期设备配对二维码" />
+                  <div class="device-pairing-invitation__content">
+                    <strong>使用 Cyrene Voice 扫描</strong>
+                    <span id="device-pairing-expiry"></span>
+                    <span>无法扫码时输入备用短码：</span>
+                    <code id="device-pairing-short-code"></code>
+                  </div>
+                </div>
+                <div class="device-pairing-review" id="device-pairing-review" hidden>
+                  <span class="device-pairing-review__eyebrow">等待你的桌面确认</span>
+                  <strong id="device-pairing-candidate"></strong>
+                  <span>请确认手机显示相同校验码</span>
+                  <code id="device-pairing-verification-code"></code>
+                  <div class="mobile-call-actions">
+                    <button type="button" class="btn-primary" id="device-pairing-allow">允许这台手机</button>
+                    <button type="button" class="ghost-btn" id="device-pairing-reject">拒绝</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="device-pairing-divider">
+                <strong>Beta 0 手动二维码通话</strong>
+                <span>保留用于本地媒体回归；不会建立长期设备身份。</span>
+              </div>
+              <p class="tts-hint">手机通过短时 LiveKit 房间接入；ASR、活动角色、记忆和 TTS 始终在这台桌面端运行。开始通话后请保持 Cyrene 和电脑在线，二维码 10 分钟后失效。桌面桥接发布 PCM16 WAV：MiniMax / MiMo 会自动使用 WAV，GPT-SoVITS 与自定义云端请选 wav 输出。</p>
+              <div class="tts-field">
+                <label for="mobile-call-livekit-url">LiveKit 地址</label>
+                <input type="url" id="mobile-call-livekit-url" placeholder="wss://your-project.livekit.cloud" autocomplete="off" />
+              </div>
+              <div class="tts-field">
+                <label for="mobile-call-livekit-key">API Key</label>
+                <input type="password" id="mobile-call-livekit-key" placeholder="仅保存在本机" autocomplete="off" />
+              </div>
+              <div class="tts-field">
+                <label for="mobile-call-livekit-secret">API Secret</label>
+                <input type="password" id="mobile-call-livekit-secret" placeholder="仅保存在本机，绝不发送到手机" autocomplete="off" />
+              </div>
+              <div class="mobile-call-actions">
+                <button type="button" class="btn-primary" id="mobile-call-start">生成手机配对二维码</button>
+                <button type="button" class="ghost-btn" id="mobile-call-stop" disabled>结束手机通话</button>
+                <span class="save-status" id="mobile-call-status" role="status"></span>
+              </div>
+              <div class="mobile-call-pairing" id="mobile-call-pairing" hidden>
+                <img id="mobile-call-qr" alt="Cyrene 手机通话配对二维码" />
+                <div class="mobile-call-pairing__content">
+                  <strong>使用 Cyrene Voice 扫码即可加入</strong>
+                  <span id="mobile-call-expiry"></span>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 

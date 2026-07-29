@@ -8,6 +8,7 @@ export const CHARACTER_STATE_SCHEMA_VERSION = 1 as const;
 export type CharacterStateLayout = Readonly<{
   root: string;
   chatsRoot: string;
+  voiceConversationsRoot: string;
   channelHistoryRoot: string;
   channelLogFile: string;
   memoryFile: string;
@@ -63,6 +64,7 @@ export function resolveCharacterStateLayout(
   return Object.freeze({
     root,
     chatsRoot: path.join(root, "chats"),
+    voiceConversationsRoot: path.join(root, "voice-conversations"),
     channelHistoryRoot: path.join(root, "chats", "channels", "history"),
     channelLogFile: path.join(root, "chats", "channels", "log.jsonl"),
     memoryFile: path.join(root, "memory", "memory.json"),
@@ -174,7 +176,7 @@ export async function migrateLegacyCyreneState(
     }
 
     for (const directory of [
-      "chats", "memory", "relationship", "worldbook", "proactive", path.join("tts", "cache"),
+      "chats", "voice-conversations", "memory", "relationship", "worldbook", "proactive", path.join("tts", "cache"),
     ]) {
       await fs.promises.mkdir(path.join(stagingRoot, directory), { recursive: true });
     }

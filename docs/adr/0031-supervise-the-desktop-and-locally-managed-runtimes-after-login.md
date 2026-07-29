@@ -1,0 +1,5 @@
+# 登录后有限监督桌面应用与本机运行时
+
+异地常驻版本只在 macOS 用户登录后运行：用户级启动机制自动启动 Cyrene Agent，意外崩溃时退避拉起但 10 分钟内最多 3 次，用户主动退出则不重启，且不引入登录前的高权限守护进程。Cyrene 的 Desktop Runtime Supervisor 只启动、检查和有限重启明确配置为“本机托管”的模型、ASR 与 TTS 进程；外部 API 或用户自行管理的进程只做健康检查，用户主动停止优先于自动恢复。本地 ASR 必须在登录启动后预热并通过健康检查，不能等第一通电话接通后才加载；只有模型、ASR 和当前角色 TTS 都就绪时，桌面才报告可呼叫。异地呼叫启用且 Mac 接通电源时，Cyrene 请求允许显示器熄灭但阻止系统自动睡眠；电池供电、用户主动睡眠、退出或应用终止时释放该请求。
+
+V1 不要求、也不得宣称普通合盖后仍可常驻接听；普通合盖、系统睡眠和用户主动睡眠都是预期的 Desktop Suspension。Electron 主进程可用 [`powerMonitor` 的 `suspend` / `resume` 事件](https://www.electronjs.org/docs/latest/api/power-monitor/) 触发幂等处理：`suspend` 时尽力撤回 Call Availability，但绝不阻止或延迟系统睡眠；若上报未送达，控制面的短期可用性有效期必须自行失效。`resume` 后桌面先保持不可用，显式关闭并丢弃旧实时订阅，重新取得应用授权与运输层登录、建立新订阅，并以权威 HTTPS 刷新当前工作项；本机 ASR、模型和当前角色 TTS 再次通过就绪检查后，才可重新报告 Call Availability。不得依赖 SDK 的自动 `watch()` 重建，也不得因唤醒自动补拨、复活或重建睡眠前的 Voice Call；已建立媒体仍按既定 30 秒媒体重连规则结束或恢复，唤醒本身不新建呼叫。运行时内容和凭据不进入公网控制面。具体地，尚未结束的同一 Media Session 只能在原 30 秒窗口内、沿用原内存媒体资料恢复；任何已终态通话都不能被唤醒事件复活，见 [桌面挂起与唤醒复核契约](../research/desktop-suspension-reconciliation-contract.md)。

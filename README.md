@@ -8,6 +8,18 @@
 
 </div>
 
+> [!IMPORTANT]
+>
+> 这是由 [Liyang0701](https://github.com/Liyang0701) 维护的社区 Fork，基于
+> [Playa-0v0/Cyrene-Agent](https://github.com/Playa-0v0/Cyrene-Agent) 持续同步和二次开发。
+> 上游桌面 Agent、角色系统与 DMAE 等成果归原作者及贡献者；本 Fork 主要维护 Android
+> 公网语音通话、Cloudflare/LiveKit 安全链路、可续聊语音历史及本地兼容适配。
+> 它不是上游官方发行版，完整署名和许可见 [LICENSE](./LICENSE)。
+
+面向其他使用者应分享公开仓库：
+[Liyang0701/Cyrene-Agent](https://github.com/Liyang0701/Cyrene-Agent)。
+私有开发仓仅用于个人配置、实机验证和上游合并，不作为发行入口。
+
 **Cyrene-Agent 是一个以《崩坏：星穹铁道》昔涟为核心角色的 Windows Live2D AI 桌面伴侣。**
 
 > 基于 Electron + TypeScript 开发的桌面端 Live2D 智能对话 Agent。  
@@ -24,6 +36,7 @@
 - 🛠️ **辅助工作（Work）** — 通过完整 Agent 工作流理解请求、调用工具，并根据真实执行结果回复
 - 🧠 **个性化记忆** — L0 / L1 / L2 分层记忆，结合自研 DMAE Worldbook 沉淀长期互动
 - 🔊 **语音交互** — 集成 TTS、ASR 与语音通话，让昔涟能够听见并回应用户
+- 📞 **Android 公网语音** — 长期设备配对、LiveKit 媒体 E2EE、自动/手动轮次、可命名续聊历史与蓝牙/扬声器切换
 - 🧰 **丰富工具生态** — 覆盖联网搜索、文件处理、文档生成、生活服务、音乐与 MCP 扩展
 - 🔌 **多模型厂商适配** — 针对不同厂商提供分级 Structured Output 与 Function Calling 兼容方案
 - 🎨 **个性化外观** — 支持多套界面风格、主题外观与聊天字体选择
@@ -111,11 +124,18 @@ npm run dev
 
 2. **🎙️ TTS 设置**（可选）：选择 Mossland、MiniMax、MiMo、GPT-SoVITS 或自定义云端语音合成服务。
 
-3. **🎧 ASR 设置**（可选）：如需使用语音通话，配置阿里云实时 ASR 的 AppKey 与 AccessKey。
+3. **🎧 ASR 设置**（可选）：如需使用语音通话，配置本地或云端 ASR。手机公网语音通话的架构、部署和 APK 构建见[移动端语音通话实现指南](docs/mobile-voice-call-implementation-guide.md)。
 
 4. **📱 外部渠道**（可选）：根据需要连接飞书或微信 iLink，在手机端与 Cyrene 对话。
 
 相关配置会保存在应用的 `<userData>/` 目录中，修改后通常无需重启应用。
+
+### Android 公网语音通话
+
+这部分不是安装桌面依赖后自动启用的功能，还需要自己的 Cloudflare、LiveKit 与
+Expo/EAS 项目。第一次部署建议严格按[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
+逐关验证；需要理解安全边界、代码结构和升级保护项时，再阅读
+[实现与从零构建指南](docs/mobile-voice-call-implementation-guide.md)。
 
 ---
 
@@ -127,7 +147,7 @@ npm run dev
 | 💬 日常聊天（Chat） | ✅ 可用 | 独立角色聊天流程，不暴露或执行工具，结合近期消息、社交上下文与用户风格生成回复 |
 | 🛠️ 辅助工作（Work） | ✅ 可用 | 完整 Agent 工作流：CITA → Action Gate → Native FC → Execution Policy → Tool Runtime → Soul |
 | 🧠 个性化记忆 | ✅ 可用 | L0 / L1 / L2 分层记忆、自研 DMAE Worldbook、关系画像与长期互动沉淀 |
-| 🔊 语音交互 | ✅ 可用 | 支持多 TTS 引擎、实时 ASR、语音通话与 VAD 静默检测，部分功能需要额外配置 |
+| 🔊 语音交互 | ✅ 可用 | 支持多 TTS 引擎、实时 ASR、桌面通话，以及长期配对、LiveKit 媒体 E2EE 的 Android 公网语音通话 |
 | 🧰 内置工具 | ✅ 可用 | 支持联网搜索、网页读取、文件操作、文档生成、生活服务、音乐等工具 |
 | 🔌 多模型厂商适配 | ✅ 可用 | 根据厂商能力使用 A / B / M / D 分级 Structured Output 与 Function Calling Profile |
 | ✨ Skill 系统 | ✅ 可用 | 支持内置 Skill、用户自定义 Skill、Slash 命令与参考资料读取 |
@@ -475,6 +495,10 @@ src/
 │   └── ui/           # 通用 UI 组件（modal / theme / chart 等）
 └── shared/           # 主进程与渲染进程共享代码
 
+mobile/               # Expo / React Native 手机语音客户端
+cloudflare/           # Worker + Durable Object 公网控制面
+docs/mobile-voice-call-implementation-guide.md  # 移动语音完整维护指南
+
 dist/renderer/        # Vite 构建产物（构建产物 gitignore，产品资源已跟踪）
 ├── assets/           # 打包后的 JS/CSS（构建产物，gitignore）
 ├── audio/            # 音频资源（已跟踪）
@@ -510,7 +534,9 @@ dist/renderer/        # Vite 构建产物（构建产物 gitignore，产品资�
 
 ## 📄 许可证
 
-本仓库的**源代码**遵循 [MIT License](./LICENSE)，Copyright (c) 2026 Playa。
+本仓库的**源代码**遵循 [MIT License](./LICENSE)。上游代码 Copyright (c) 2026
+Playa；本 Fork 的新增与修改部分 Copyright (c) 2026 Yang Li。许可文本中的署名
+随源码一并保留。
 MIT 仅约束本仓库的源代码，不适用于角色、Live2D 模型与美术资产。
 
 角色 IP（《崩坏：星穹铁道》"昔涟" 等）、Live2D 模型（`models/cyrene/`）、

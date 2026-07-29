@@ -4,6 +4,14 @@ import type { UiTheme } from "../shared/ui-theme";
 import type { UiFont } from "../shared/ui-font";
 import type { ReasoningPreference } from "../shared/reasoning";
 import type { DocumentIndexProgress } from "../main/rag/document-index-queue";
+import type { MobileCallStatus } from "../shared/mobile-call-status";
+import type {
+  DesktopDeviceAuthorizationStatus,
+  DesktopOwnerBootstrapDisplay,
+  DesktopOwnerRecoveryConfirmation,
+  DesktopPairingChallengeDisplay,
+  DesktopPairingReviewDisplay,
+} from "../shared/device-pairing";
 import { getLive2DIpcListenerCounts } from "./live2d-listener-diagnostics";
 import { exposeMusicApi } from "./music";
 
@@ -242,6 +250,48 @@ const settingsApi = {
   },
   getGeneral: () => ipcRenderer.invoke(IPC.SETTINGS_GET_GENERAL),
   saveGeneral: (config: unknown) => ipcRenderer.invoke(IPC.SETTINGS_SAVE_GENERAL, config),
+  startMobileCall: () => ipcRenderer.invoke(IPC.CALL_MOBILE_START),
+  stopMobileCall: () => ipcRenderer.invoke(IPC.CALL_MOBILE_STOP),
+  onMobileCallStatus: (callback: (status: MobileCallStatus) => void) => {
+    const listener = (_event: unknown, status: MobileCallStatus) => callback(status);
+    ipcRenderer.on(IPC.CALL_MOBILE_STATUS, listener);
+    return () => ipcRenderer.off(IPC.CALL_MOBILE_STATUS, listener);
+  },
+  getDeviceAuthorizationStatus: () =>
+    ipcRenderer.invoke(IPC.DEVICE_AUTHORIZATION_STATUS) as Promise<
+      DesktopDeviceAuthorizationStatus
+    >,
+  bootstrapOwner: (input: {
+    controlPlaneOrigin: string;
+    deploymentBootstrapCode: string;
+    label: string;
+  }) => ipcRenderer.invoke(IPC.OWNER_BOOTSTRAP, input) as Promise<
+    DesktopOwnerBootstrapDisplay
+  >,
+  confirmOwnerRecoveryKey: (ownerRecoveryKey: string) =>
+    ipcRenderer.invoke(IPC.OWNER_RECOVERY_CONFIRM, {
+      ownerRecoveryKey,
+    }) as Promise<DesktopOwnerRecoveryConfirmation>,
+  recoverOwner: (input: {
+    controlPlaneOrigin: string;
+    ownerRecoveryKey: string;
+    label: string;
+  }) => ipcRenderer.invoke(IPC.OWNER_RECOVER, input) as Promise<
+    DesktopOwnerBootstrapDisplay
+  >,
+  beginDevicePairing: () =>
+    ipcRenderer.invoke(IPC.DEVICE_PAIRING_BEGIN) as Promise<
+      DesktopPairingChallengeDisplay
+    >,
+  reviewDevicePairing: (challengeId: string) =>
+    ipcRenderer.invoke(IPC.DEVICE_PAIRING_REVIEW, { challengeId }) as Promise<
+      DesktopPairingReviewDisplay
+    >,
+  decideDevicePairing: (challengeId: string, allow: boolean) =>
+    ipcRenderer.invoke(IPC.DEVICE_PAIRING_DECIDE, {
+      challengeId,
+      allow,
+    }) as Promise<{ status: "APPROVED" | "REJECTED" }>,
   listCharacters: () => ipcRenderer.invoke(IPC.CHARACTER_LIST),
   pickCharacterImportFolder: () => ipcRenderer.invoke(IPC.CHARACTER_PICK_IMPORT_FOLDER) as Promise<string | null>,
   importCharacter: (sourcePath: string, confirmReplacement = false) => (

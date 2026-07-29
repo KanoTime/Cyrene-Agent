@@ -1,10 +1,19 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, dialog, protocol, net, powerMonitor } from "electron";
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, dialog, protocol, net, powerMonitor, safeStorage } from "electron";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import { createHash, randomUUID } from "crypto";
 import { pathToFileURL } from "url";
 import { IPC } from "../shared/ipc-channels";
+import type { MobileCallStatus } from "../shared/mobile-call-status";
+import { DesktopDeviceCredentialVault } from "./remote-access/desktop-device-credential-vault";
+import {
+  createDesktopAuthorizationRequest,
+  DesktopDeviceAuthorizationClient,
+} from "./remote-access/desktop-device-authorization-client";
+import { registerDevicePairingIpc } from "./remote-access/device-pairing-ipc";
+import { DesktopAvailabilityCoordinator } from "./remote-access/desktop-availability-coordinator";
+import { DesktopRemoteCallCoordinator } from "./remote-access/desktop-remote-call-coordinator";
 import { normalizeUiTheme, type UiTheme } from "../shared/ui-theme";
 import { DEFAULT_UI_FONT, isSupportedFontFileName, normalizeUiFont, type UiFont } from "../shared/ui-font";
 import { normalizeUiIcon, UI_ICON_PRESETS, type UiIcon } from "../shared/ui-icon";
@@ -139,7 +148,17 @@ import {
 import { setAsrConfig } from "./asr/volcano-asr-engine";
 import { disposeAsr } from "./asr/asr-service";
 import { localAsrWorker } from "./asr/local-asr-worker-manager";
-import { isCallActive, setCallWindow, registerCallIpc, setCallSettings, stopCall } from "./call/call-manager";
+import {
+  isCallActive,
+  setCallWindow,
+  registerCallIpc,
+  setCallSettings,
+  startMobileCall,
+  startRemoteMobileCall,
+  assertRemoteMobileCallReadiness,
+  stopCall,
+  stopMobileCall,
+} from "./call/call-manager";
 import { initSkills, skillRegistry, buildAutoInjectedSkillContext, buildAutoInjectedSoulContext, buildSkillCatalog, parseSlashCommand, setSkillEnabled, listSkillsForUi } from "./skills";
 import {
   isMusicCompanionAvailable,
@@ -259,6 +278,8 @@ let stickerManagerWindow: BrowserWindow | null = null;
 let callWindow: BrowserWindow | null = null;
 let schedulerEngine: SchedulerEngine | null = null;
 let proactiveChatService: ProactiveChatService | null = null;
+let desktopAvailabilityCoordinator: DesktopAvailabilityCoordinator | null = null;
+let desktopRemoteCallCoordinator: DesktopRemoteCallCoordinator | null = null;
 let normalConversationBusyCount = 0;
 let proactiveScreenLocked = false;
 const live2dWindowLifecycle = createWindowLifecycleTracker<BrowserWindow>("live2d-main", {
@@ -681,6 +702,12 @@ interface GeneralSettings {
   asrVadThreshold: number;
   /** 通话中显示文字转写 */
   asrShowTranscript: boolean;
+  /** 手机端语音通话：仅桌面端本地保存，绝不下发给手机。 */
+  mobileCallLiveKitUrl: string;
+  mobileCallLiveKitApiKey: string;
+  mobileCallLiveKitApiSecret: string;
+  /** Opener 主动开口档位 */
+  openerMode: "off" | "quiet" | "normal" | "lively";
   /** 截图全局热键（Electron Accelerator 格式，如 "Alt+Shift+S"） */
   screenshotHotkey: string;
 }
@@ -887,6 +914,10 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   asrVadSilenceMs: 1000,
   asrVadThreshold: 0.01,
   asrShowTranscript: false,
+  mobileCallLiveKitUrl: "",
+  mobileCallLiveKitApiKey: "",
+  mobileCallLiveKitApiSecret: "",
+  openerMode: "off",
   screenshotHotkey: "Alt+Shift+S",
 };
 
@@ -1354,6 +1385,18 @@ function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undef
       ? Math.max(0.001, Math.min(0.5, Number(input.asrVadThreshold)))
       : DEFAULT_GENERAL_SETTINGS.asrVadThreshold,
     asrShowTranscript: Boolean(input?.asrShowTranscript),
+    mobileCallLiveKitUrl: typeof input?.mobileCallLiveKitUrl === "string"
+      ? input.mobileCallLiveKitUrl.trim()
+      : "",
+    mobileCallLiveKitApiKey: typeof input?.mobileCallLiveKitApiKey === "string"
+      ? input.mobileCallLiveKitApiKey.trim()
+      : "",
+    mobileCallLiveKitApiSecret: typeof input?.mobileCallLiveKitApiSecret === "string"
+      ? input.mobileCallLiveKitApiSecret.trim()
+      : "",
+    openerMode: ["off", "quiet", "normal", "lively"].includes(String(input?.openerMode))
+      ? (input!.openerMode as "off" | "quiet" | "normal" | "lively")
+      : "off",
     screenshotHotkey: typeof input?.screenshotHotkey === "string" && input.screenshotHotkey.trim()
       ? input.screenshotHotkey.trim() : DEFAULT_GENERAL_SETTINGS.screenshotHotkey,
     ttsGptsovitsBaseUrl: typeof input?.ttsGptsovitsBaseUrl === "string" ? input.ttsGptsovitsBaseUrl : DEFAULT_GENERAL_SETTINGS.ttsGptsovitsBaseUrl,
@@ -4084,7 +4127,10 @@ app.whenReady().then(async () => {
         };
       },
       flushState: () => flushTokenUsage(),
-      stopCall: () => stopCall(),
+      stopCall: () => {
+        stopCall();
+        void stopMobileCall();
+      },
       disposeAsr: () => localAsrWorker.shutdown(),
       stopScheduler: () => schedulerEngine?.stop(),
       stopOpener: () => stopProactiveTrigger(),
@@ -5380,6 +5426,119 @@ app.whenReady().then(async () => {
   registerPermissionIpc();
   registerChoiceIpc();
   registerCallIpc();
+  const desktopDeviceCredentialVault = new DesktopDeviceCredentialVault({
+    rootDir: path.join(app.getPath("userData"), "remote-access"),
+    safeStorage,
+  });
+  const desktopDeviceAuthorizationClient = new DesktopDeviceAuthorizationClient({
+    vault: desktopDeviceCredentialVault,
+    request: createDesktopAuthorizationRequest(
+      (url, request) => net.fetch(url, request),
+    ),
+  });
+  desktopAvailabilityCoordinator = new DesktopAvailabilityCoordinator({
+    client: desktopDeviceAuthorizationClient,
+    onFailure: () => {
+      // 可用性是短租约；瞬时失败留给下一轮续租修复，不记录运输层原始错误。
+    },
+  });
+  void desktopAvailabilityCoordinator.start();
+  desktopRemoteCallCoordinator = new DesktopRemoteCallCoordinator({
+    client: desktopDeviceAuthorizationClient,
+    getActiveCharacter: () => {
+      const character = getActiveCharacter();
+      return { id: character.id, displayName: character.displayName };
+    },
+    assertReady: assertRemoteMobileCallReadiness,
+    startRemoteCall: async (grant, onStatus) => {
+      const settings = loadGeneralSettings();
+      await startRemoteMobileCall(
+        grant,
+        {
+          silenceMs: settings.asrVadSilenceMs,
+          threshold: settings.asrVadThreshold,
+        },
+        onStatus,
+      );
+    },
+    stopRemoteCall: stopMobileCall,
+  });
+  desktopRemoteCallCoordinator.start();
+  powerMonitor.on("suspend", () => {
+    void desktopAvailabilityCoordinator?.suspend();
+    void desktopRemoteCallCoordinator?.suspend();
+  });
+  powerMonitor.on("resume", () => {
+    void desktopAvailabilityCoordinator?.resume();
+    desktopRemoteCallCoordinator?.resume();
+  });
+  const pairingQrCode = require("qrcode") as {
+    toDataURL(
+      text: string,
+      options?: {
+        width?: number;
+        margin?: number;
+        errorCorrectionLevel?: string;
+      },
+    ): Promise<string>;
+  };
+  registerDevicePairingIpc({
+    ipcMain,
+    client: desktopDeviceAuthorizationClient,
+    toDataUrl: pairingQrCode.toDataURL,
+  });
+  // 手机端通话的私钥仅在桌面主进程读取。renderer 只拿到二维码图片与
+  // 过期时间；不会拿到可复制的配对链接、原始手机 JWT 或桌面 Agent Token。
+  const broadcastMobileCallStatus = (status: MobileCallStatus): void => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      try { win.webContents.send(IPC.CALL_MOBILE_STATUS, status); } catch { /* ignore closing windows */ }
+    }
+  };
+  ipcMain.handle(IPC.CALL_MOBILE_START, async () => {
+    const settings = loadGeneralSettings();
+    const pairing = await startMobileCall(
+      {
+        serverUrl: settings.mobileCallLiveKitUrl,
+        apiKey: settings.mobileCallLiveKitApiKey,
+        apiSecret: settings.mobileCallLiveKitApiSecret,
+      },
+      undefined,
+      {
+        silenceMs: settings.asrVadSilenceMs,
+        threshold: settings.asrVadThreshold,
+      },
+      broadcastMobileCallStatus,
+    );
+    try {
+      // qrcode 没有官方声明文件；主进程以窄接口调用，避免把生成器放进
+      // 渲染进程，也确保链接不会被写入任何持久化状态。
+      const qrCode = require("qrcode") as {
+        toDataURL(text: string, options?: { width?: number; margin?: number; errorCorrectionLevel?: string }): Promise<string>;
+      };
+      const qrDataUrl = await qrCode.toDataURL(pairing.mobileLink, {
+        width: 260,
+        margin: 1,
+        errorCorrectionLevel: "M",
+      });
+      return {
+        callId: pairing.callId,
+        roomName: pairing.roomName,
+        expiresAt: pairing.expiresAt,
+        qrDataUrl,
+      };
+    } catch (error) {
+      // If QR rendering fails after the bridge joined, do not leave an
+      // unreachable room alive in the background.
+      await stopMobileCall();
+      throw error;
+    }
+  });
+  ipcMain.handle(IPC.CALL_MOBILE_STOP, async () => {
+    await stopMobileCall();
+    broadcastMobileCallStatus({ state: "ended" });
+    return { ok: true };
+  });
   console.log("[Cyrene] 当前 agent 权限档位:", getCurrentLevel());
   try {
     const modelSettings = loadModelSettings();
@@ -5407,7 +5566,10 @@ app.on("window-all-closed", () => {});
 
 // 应用退出前把 token 用量缓存落盘（防抖未触发的最后一次写）
 app.on("before-quit", () => {
+  void desktopAvailabilityCoordinator?.stop();
+  void desktopRemoteCallCoordinator?.stop();
   stopCall();
+  void stopMobileCall();
   disposeAsr();
   petWindowMoveController.dispose();
   schedulerEngine?.stop();
