@@ -24,6 +24,67 @@ Share the public repository with other users:
 The private development repository is for personal configuration, device
 verification, and upstream integration, not distribution.
 
+## 📞 What Does This Fork Add?
+
+**In one sentence: this fork turns Cyrene's desktop voice capability into a
+personal voice companion that an Android phone can securely call over the
+public Internet, with resumable and manageable conversation history.**
+
+The phone does not run a separate cloud bot. The character, memory, model, ASR,
+GPT-SoVITS/TTS, and tools remain on your Cyrene desktop. Android provides
+remote calling, microphone/speaker access, and conversation management:
+
+```text
+Android Cyrene Voice
+  ├─ HTTPS pairing/call/state → Cloudflare Worker + Durable Object
+  └─ WebRTC + media E2EE ────→ LiveKit Room
+                                      ↕
+                              Your Cyrene desktop
+                       ASR → character/memory/model → TTS
+```
+
+### Major additions over the upstream baseline
+
+| Capability | Upstream when this fork was created | This fork |
+| --- | --- | --- |
+| Android voice client | No complete remote-call client | Standalone `mobile/` project producing an upgradable APK |
+| Remote one-tap calling | Not available | Call an online desktop over 5G, Wi-Fi, or VPN |
+| Long-lived device pairing | Not available | Expiring challenge, six-digit verification, desktop approval, SecureStore/safeStorage |
+| Real-time media security | No mobile media path | LiveKit audio media E2EE plus authenticated application-layer control encryption |
+| Conversation history | No mobile management | Create, resume, rename, and delete histories stored per character on the desktop |
+| Noisy-environment input | Not available | Automatic listening and manually gated turns |
+| Mobile audio quality/routing | Not available | 48 kHz downlink with Bluetooth, speaker, headset, and earpiece switching |
+| Call reliability | No complete cross-device state machine | Idempotent calls, E2EE readiness gates, reconnect, stale-call replacement, terminal convergence |
+| Reproducible deployment | No documentation for this path | Architecture, security, EAS APK, setup runbook, acceptance matrix, and FAQ |
+
+### Why is it useful?
+
+- **Talk to the same Cyrene away from the desk.** Reuse the character, memories,
+  model, and voice already configured on your desktop instead of rebuilding a
+  second cloud agent.
+- **Keep local capabilities and privacy boundaries.** Cloudflare coordinates
+  authorization and call state; LiveKit carries encrypted media. Model keys,
+  conversation bodies, and GPT-SoVITS stay out of the control plane.
+- **Support real personal use.** Pair once, install compatible upgrades without
+  losing the device identity, resume named conversations, manage history, and
+  choose automatic or manual turns for different environments.
+- **Let other maintainers reproduce it.** The public branch excludes the
+  maintainer's Worker, EAS Project, signing identity, and production credentials.
+
+> [!NOTE]
+>
+> The current scope is one owner, an online desktop, one foreground Android call
+> at a time. It is not a system phone integration, background push calling,
+> multi-user SaaS, or a cloud replacement for an offline desktop agent.
+
+Start with the
+[step-by-step deployment and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md).
+For the architecture, dependencies, security boundaries, and upstream-merge
+checklist, read the
+[mobile voice-call implementation guide](docs/mobile-voice-call-implementation-guide.md).
+
+---
+
 **Cyrene-Agent is a Windows Live2D AI desktop companion centered around Cyrene from _Honkai: Star Rail_.**
 
 > A desktop Live2D conversational Agent built with Electron and TypeScript.  
