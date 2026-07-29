@@ -1,5 +1,9 @@
 # Cyrene 移动端语音通话：从零部署与排障手册
 
+> 已经克隆了上游 `Playa-0v0/Cyrene-Agent`？请先阅读
+> [已有主仓代码：接入移动端语音功能](./mobile-voice-call-add-to-upstream-clone.md)，
+> 再按本文完成个人服务配置。
+>
 > 适用版本：Cyrene Voice `1.0.15` / Android `versionCode 16`
 >
 > 目标：让第一次接触本项目的维护者，按顺序完成自己的控制面、媒体服务、
