@@ -2,7 +2,7 @@
 
 > 研究日期：2026-07-26  
 > 主仓：`Playa-0v0/Cyrene-Agent`  
-> 私仓：`Liyang0701/Cyrene-Agent`  
+> 私仓：`KanoTime/Cyrene-Agent`
 > 固定比较点：私仓 `origin/master@27b1807e567b1fab4ecfa14007c1ebee33e34832`，主仓 `upstream/master@87f74b106d7fdaab9ab20889735ac47f5b6b2eee`
 
 ## 1. 结论先行
@@ -31,7 +31,7 @@
 |---|---|
 | 共同基线 | `fc58408a314c42e40ed8827751847944edcde159` |
 | `git rev-list --left-right --count origin/master...upstream/master` | 私仓独有 44，主仓独有 93 |
-| 私仓当前提交 | [`27b1807`](https://github.com/Liyang0701/Cyrene-Agent/commit/27b1807e567b1fab4ecfa14007c1ebee33e34832) |
+| 私仓当前提交 | [`27b1807`](https://github.com/KanoTime/Cyrene-Agent/commit/27b1807e567b1fab4ecfa14007c1ebee33e34832) |
 | 主仓当前提交 | [`87f74b1`](https://github.com/Playa-0v0/Cyrene-Agent/commit/87f74b106d7fdaab9ab20889735ac47f5b6b2eee) |
 
 注意：`git diff origin/master..upstream/master` 会把“只存在于私仓”的文件显示为删除，但这不等于三方合并一定会删除这些文件。真正的风险分为两类：
@@ -255,8 +255,8 @@ CITA 的演进提交：
 
 提交：
 
-- 本地 MLX ASR、模型兼容、中文 PDF 和本地 Reranker：[`83d7d31`](https://github.com/Liyang0701/Cyrene-Agent/commit/83d7d310526235758b6169fbce3e52b93b0a9fbf)
-- 通话 VAD 改用 RMS：[`ccc57dc`](https://github.com/Liyang0701/Cyrene-Agent/commit/ccc57dc27d8413d56858d87b885973aa694719e7)
+- 本地 MLX ASR、模型兼容、中文 PDF 和本地 Reranker：[`83d7d31`](https://github.com/KanoTime/Cyrene-Agent/commit/83d7d310526235758b6169fbce3e52b93b0a9fbf)
+- 通话 VAD 改用 RMS：[`ccc57dc`](https://github.com/KanoTime/Cyrene-Agent/commit/ccc57dc27d8413d56858d87b885973aa694719e7)
 
 核心路径：
 
@@ -275,7 +275,7 @@ CITA 的演进提交：
 
 ### 4.2 本地 Qwen 和微信性能回退
 
-提交：[`2b2de5f`](https://github.com/Liyang0701/Cyrene-Agent/commit/2b2de5fcae2f5f0e18ea6e38defa19f47326016a)
+提交：[`2b2de5f`](https://github.com/KanoTime/Cyrene-Agent/commit/2b2de5fcae2f5f0e18ea6e38defa19f47326016a)
 
 核心路径：
 
@@ -296,12 +296,12 @@ CITA 的演进提交：
 
 主要提交：
 
-- CharacterRuntime 基线与安全导入：[`a158563`](https://github.com/Liyang0701/Cyrene-Agent/commit/a158563f1b88cbdba52a5f9048eb2e1a9e9536d5)、[`b8de530`](https://github.com/Liyang0701/Cyrene-Agent/commit/b8de53020fd3521fbc00062e1a3e57d37738937c)
-- 角色状态根：[`8b1ec0d`](https://github.com/Liyang0701/Cyrene-Agent/commit/8b1ec0df97a61846da2e55cae2ef7440e124bd25)
-- 文本/UI、视觉/语义动作、语音/ASR hints：[`7e1c0a7`](https://github.com/Liyang0701/Cyrene-Agent/commit/7e1c0a76acfd044501d5e6e3b3111f76132de039)、[`28b0ba8`](https://github.com/Liyang0701/Cyrene-Agent/commit/28b0ba84555a723260df68e3a8375144171bf227)、[`51d062c`](https://github.com/Liyang0701/Cyrene-Agent/commit/51d062c78cb2903a21a663d21a3326ca734fcefe)
-- 会话私有状态与全局用户数据分离：[`f7ea559`](https://github.com/Liyang0701/Cyrene-Agent/commit/f7ea559a16f4bcfb2448e7d44eba0814aa6334e3)、[`3009706`](https://github.com/Liyang0701/Cyrene-Agent/commit/300970635321450adcc6442a4c82f4962dca777e)
-- 受控切换、重启、生命周期和启动恢复：[`7813caf`](https://github.com/Liyang0701/Cyrene-Agent/commit/7813caff026c4399aa11b64b8e10fc6d34aaa86b)、[`2aac056`](https://github.com/Liyang0701/Cyrene-Agent/commit/2aac056b15c6b42e5f2296d32251f74e76056240)、[`326b0cd`](https://github.com/Liyang0701/Cyrene-Agent/commit/326b0cd113627c6bfacce238957f3bf58d63ee7a)、[`bfcaeb3`](https://github.com/Liyang0701/Cyrene-Agent/commit/bfcaeb3d72a86a1e128191d7ac7b4126ae6b4bc8)
-- 架构护栏和能力不继承：[`ac66513`](https://github.com/Liyang0701/Cyrene-Agent/commit/ac66513b30c0fb836092148f6a97ec07f1da23ce)、[`a8f23e8`](https://github.com/Liyang0701/Cyrene-Agent/commit/a8f23e8f72c6fbba80601d7c78abbd3b23fd7257)
+- CharacterRuntime 基线与安全导入：[`a158563`](https://github.com/KanoTime/Cyrene-Agent/commit/a158563f1b88cbdba52a5f9048eb2e1a9e9536d5)、[`b8de530`](https://github.com/KanoTime/Cyrene-Agent/commit/b8de53020fd3521fbc00062e1a3e57d37738937c)
+- 角色状态根：[`8b1ec0d`](https://github.com/KanoTime/Cyrene-Agent/commit/8b1ec0df97a61846da2e55cae2ef7440e124bd25)
+- 文本/UI、视觉/语义动作、语音/ASR hints：[`7e1c0a7`](https://github.com/KanoTime/Cyrene-Agent/commit/7e1c0a76acfd044501d5e6e3b3111f76132de039)、[`28b0ba8`](https://github.com/KanoTime/Cyrene-Agent/commit/28b0ba84555a723260df68e3a8375144171bf227)、[`51d062c`](https://github.com/KanoTime/Cyrene-Agent/commit/51d062c78cb2903a21a663d21a3326ca734fcefe)
+- 会话私有状态与全局用户数据分离：[`f7ea559`](https://github.com/KanoTime/Cyrene-Agent/commit/f7ea559a16f4bcfb2448e7d44eba0814aa6334e3)、[`3009706`](https://github.com/KanoTime/Cyrene-Agent/commit/300970635321450adcc6442a4c82f4962dca777e)
+- 受控切换、重启、生命周期和启动恢复：[`7813caf`](https://github.com/KanoTime/Cyrene-Agent/commit/7813caff026c4399aa11b64b8e10fc6d34aaa86b)、[`2aac056`](https://github.com/KanoTime/Cyrene-Agent/commit/2aac056b15c6b42e5f2296d32251f74e76056240)、[`326b0cd`](https://github.com/KanoTime/Cyrene-Agent/commit/326b0cd113627c6bfacce238957f3bf58d63ee7a)、[`bfcaeb3`](https://github.com/KanoTime/Cyrene-Agent/commit/bfcaeb3d72a86a1e128191d7ac7b4126ae6b4bc8)
+- 架构护栏和能力不继承：[`ac66513`](https://github.com/KanoTime/Cyrene-Agent/commit/ac66513b30c0fb836092148f6a97ec07f1da23ce)、[`a8f23e8`](https://github.com/KanoTime/Cyrene-Agent/commit/a8f23e8f72c6fbba80601d7c78abbd3b23fd7257)
 
 核心路径：
 
@@ -324,7 +324,7 @@ CITA 的演进提交：
 
 ### 4.4 GPT-SoVITS 多语言与角色 Voice Profile
 
-提交：[`d3f1b21`](https://github.com/Liyang0701/Cyrene-Agent/commit/d3f1b219051682acd5af41d0cb0a45d92c7ec0db)
+提交：[`d3f1b21`](https://github.com/KanoTime/Cyrene-Agent/commit/d3f1b219051682acd5af41d0cb0a45d92c7ec0db)
 
 核心路径：
 
@@ -339,8 +339,8 @@ CITA 的演进提交：
 
 提交：
 
-- TTS 回复转紧凑音频文件：[`3bd6c51`](https://github.com/Liyang0701/Cyrene-Agent/commit/3bd6c517944925de0427fe01e87ab12935e26e3b)
-- 多账号连接：[`9f79f77`](https://github.com/Liyang0701/Cyrene-Agent/commit/9f79f77169962202d1b21045bfd96c11c72ec7aa)
+- TTS 回复转紧凑音频文件：[`3bd6c51`](https://github.com/KanoTime/Cyrene-Agent/commit/3bd6c517944925de0427fe01e87ab12935e26e3b)
+- 多账号连接：[`9f79f77`](https://github.com/KanoTime/Cyrene-Agent/commit/9f79f77169962202d1b21045bfd96c11c72ec7aa)
 
 核心路径：
 
@@ -362,7 +362,7 @@ CITA 的演进提交：
 
 ### 4.6 角色语料闸门
 
-提交：[`b4295a7`](https://github.com/Liyang0701/Cyrene-Agent/commit/b4295a7eff5897804f87005448e47e4c13783b9a)
+提交：[`b4295a7`](https://github.com/KanoTime/Cyrene-Agent/commit/b4295a7eff5897804f87005448e47e4c13783b9a)
 
 核心路径：
 
@@ -556,12 +556,12 @@ CITA 的演进提交：
 
 私仓固定点：
 
-- [CharacterRuntime@27b1807](https://github.com/Liyang0701/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/character/character-runtime.ts)
-- [角色语音边界@27b1807](https://github.com/Liyang0701/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/character/character-speech.ts)
-- [本地 ASR Worker@27b1807](https://github.com/Liyang0701/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/asr/local-asr-worker-manager.ts)
-- [微信账号连接池@27b1807](https://github.com/Liyang0701/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/channels/adapters/wechat/wechat-account-connection-pool.ts)
-- [微信结构化身份@27b1807](https://github.com/Liyang0701/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/channels/adapters/wechat/wechat-conversation-identity.ts)
-- [本地模型回退@27b1807](https://github.com/Liyang0701/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/channels/channel-model-fallback.ts)
+- [CharacterRuntime@27b1807](https://github.com/KanoTime/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/character/character-runtime.ts)
+- [角色语音边界@27b1807](https://github.com/KanoTime/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/character/character-speech.ts)
+- [本地 ASR Worker@27b1807](https://github.com/KanoTime/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/asr/local-asr-worker-manager.ts)
+- [微信账号连接池@27b1807](https://github.com/KanoTime/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/channels/adapters/wechat/wechat-account-connection-pool.ts)
+- [微信结构化身份@27b1807](https://github.com/KanoTime/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/channels/adapters/wechat/wechat-conversation-identity.ts)
+- [本地模型回退@27b1807](https://github.com/KanoTime/Cyrene-Agent/blob/27b1807e567b1fab4ecfa14007c1ebee33e34832/src/main/channels/channel-model-fallback.ts)
 
 ## 12. 实际同步结果
 

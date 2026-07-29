@@ -10,14 +10,14 @@
 
 > [!IMPORTANT]
 >
-> 这是由 [Liyang0701](https://github.com/Liyang0701) 维护的社区 Fork，基于
+> 这是由 [KanoTime](https://github.com/KanoTime) 维护的社区 Fork，基于
 > [Playa-0v0/Cyrene-Agent](https://github.com/Playa-0v0/Cyrene-Agent) 持续同步和二次开发。
 > 上游桌面 Agent、角色系统与 DMAE 等成果归原作者及贡献者；本 Fork 主要维护 Android
 > 公网语音通话、Cloudflare/LiveKit 安全链路、可续聊语音历史及本地兼容适配。
 > 它不是上游官方发行版，完整署名和许可见 [LICENSE](./LICENSE)。
 
 面向其他使用者应分享公开仓库：
-[Liyang0701/Cyrene-Agent](https://github.com/Liyang0701/Cyrene-Agent)。
+[KanoTime/Cyrene-Agent](https://github.com/KanoTime/Cyrene-Agent)。
 私有开发仓仅用于个人配置、实机验证和上游合并，不作为发行入口。
 
 ## 📞 这个 Fork 做了什么？
@@ -120,7 +120,7 @@ Android Cyrene Voice
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/Liyang0701/Cyrene-Agent.git
+git clone https://github.com/KanoTime/Cyrene-Agent.git
 cd Cyrene-Agent
 ```
 

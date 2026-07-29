@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues and PRDs are tracked in GitHub Issues under `Liyang0701/Cyrene-Agent`. See `docs/agents/issue-tracker.md`.
+Issues and PRDs are tracked in GitHub Issues under `KanoTime/Cyrene-Agent`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
