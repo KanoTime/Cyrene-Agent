@@ -58,7 +58,7 @@
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/Playa-0v0/Cyrene-Agent.git
+git clone https://github.com/Liyang0701/Cyrene-Agent.git
 cd Cyrene-Agent
 ```
 
