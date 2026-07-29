@@ -48,7 +48,7 @@ Cloudflare 只保存设备授权和通话状态；LiveKit 只承载加密实时�
 ## 1. 获取代码并建立干净基线
 
 ```bash
-git clone https://github.com/Liyang0701/Cyrene-Agent.git
+git clone https://github.com/KanoTime/Cyrene-Agent.git
 cd Cyrene-Agent
 npm ci
 npm run build

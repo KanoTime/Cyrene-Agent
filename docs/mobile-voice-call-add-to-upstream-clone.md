@@ -1,7 +1,7 @@
 # 已有 Cyrene 主仓代码：接入移动端语音功能
 
 > 适用情况：你已经克隆了 `Playa-0v0/Cyrene-Agent`，现在想使用
-> `Liyang0701/Cyrene-Agent` 提供的 Android 公网语音功能。
+> `KanoTime/Cyrene-Agent` 提供的 Android 公网语音功能。
 
 ## 1. 开始前检查
 
@@ -25,28 +25,28 @@ git remote -v
 ### 2.1 添加移动语音 Fork
 
 ```bash
-git remote add liyang https://github.com/Liyang0701/Cyrene-Agent.git
-git fetch liyang
+git remote add kano https://github.com/KanoTime/Cyrene-Agent.git
+git fetch kano
 ```
 
-如果提示 `remote liyang already exists`，改用：
+如果提示 `remote kano already exists`，改用：
 
 ```bash
-git remote set-url liyang https://github.com/Liyang0701/Cyrene-Agent.git
-git fetch liyang
+git remote set-url kano https://github.com/KanoTime/Cyrene-Agent.git
+git fetch kano
 ```
 
 ### 2.2 建立移动语音分支
 
 ```bash
-git switch -c mobile-voice --track liyang/master
+git switch -c mobile-voice --track kano/master
 ```
 
 如果提示 `mobile-voice` 已存在：
 
 ```bash
 git switch mobile-voice
-git pull --ff-only liyang master
+git pull --ff-only kano master
 ```
 
 确认当前分支：
@@ -88,17 +88,17 @@ abc1234 my local changes
 ### 3.2 从移动语音 Fork 建立新分支
 
 ```bash
-git remote add liyang https://github.com/Liyang0701/Cyrene-Agent.git
-git fetch liyang
-git switch -c mobile-voice-integration --track liyang/master
+git remote add kano https://github.com/KanoTime/Cyrene-Agent.git
+git fetch kano
+git switch -c mobile-voice-integration --track kano/master
 ```
 
-如果 `liyang` remote 已存在：
+如果 `kano` remote 已存在：
 
 ```bash
-git remote set-url liyang https://github.com/Liyang0701/Cyrene-Agent.git
-git fetch liyang
-git switch -c mobile-voice-integration --track liyang/master
+git remote set-url kano https://github.com/KanoTime/Cyrene-Agent.git
+git fetch kano
+git switch -c mobile-voice-integration --track kano/master
 ```
 
 ### 3.3 移入自己的提交
@@ -249,9 +249,9 @@ https://<你的-worker-origin>/healthz
 没有额外本地提交的 `mobile-voice` 分支：
 
 ```bash
-git fetch liyang
+git fetch kano
 git switch mobile-voice
-git merge --ff-only liyang/master
+git merge --ff-only kano/master
 npm ci
 npm --prefix mobile ci
 ```
@@ -259,9 +259,9 @@ npm --prefix mobile ci
 带有自己提交的集成分支：
 
 ```bash
-git fetch liyang
+git fetch kano
 git switch mobile-voice-integration
-git merge liyang/master
+git merge kano/master
 ```
 
 合并后重新执行第 4 节的全部构建和测试。

@@ -11,7 +11,7 @@
 > [!IMPORTANT]
 >
 > This is a community fork maintained by
-> [Liyang0701](https://github.com/Liyang0701), based on and periodically
+> [KanoTime](https://github.com/KanoTime), based on and periodically
 > synchronized with [Playa-0v0/Cyrene-Agent](https://github.com/Playa-0v0/Cyrene-Agent).
 > The upstream desktop agent, character system, DMAE, and related work remain
 > credited to their original authors and contributors. This fork primarily
@@ -20,7 +20,7 @@
 > an official upstream release; see [LICENSE](./LICENSE) for attribution and terms.
 
 Share the public repository with other users:
-[Liyang0701/Cyrene-Agent](https://github.com/Liyang0701/Cyrene-Agent).
+[KanoTime/Cyrene-Agent](https://github.com/KanoTime/Cyrene-Agent).
 The private development repository is for personal configuration, device
 verification, and upstream integration, not distribution.
 
@@ -132,7 +132,7 @@ the matching guide before testing.
 ### 1. Clone the Project
 
 ```bash
-git clone https://github.com/Liyang0701/Cyrene-Agent.git
+git clone https://github.com/KanoTime/Cyrene-Agent.git
 cd Cyrene-Agent
 ```
 

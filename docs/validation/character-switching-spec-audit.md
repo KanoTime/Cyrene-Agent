@@ -3,11 +3,11 @@
 ## 审计信息
 
 - 审计日期：2026-07-16
-- 主规格：[GitHub Issue #1：应用级完整角色包切换](https://github.com/Liyang0701/Cyrene-Agent/issues/1)
+- 主规格：[GitHub Issue #1：应用级完整角色包切换](https://github.com/KanoTime/Cyrene-Agent/issues/1)
 - 代码基线：`117cf34`
 - 验收平台：Apple Silicon macOS
 - 实施任务：#2～#15 均已关闭
-- 剩余问题：[GitHub Issue #31：优化星野音色并完善角色 TTS preset 恢复](https://github.com/Liyang0701/Cyrene-Agent/issues/31)
+- 剩余问题：[GitHub Issue #31：优化星野音色并完善角色 TTS preset 恢复](https://github.com/KanoTime/Cyrene-Agent/issues/31)
 
 ## 结论
 

@@ -13,10 +13,10 @@
 
 ## Ticket 映射
 
-- 规格总览：[GitHub #33](https://github.com/Liyang0701/Cyrene-Agent/issues/33)
-- 账号存储与旧版迁移：[GitHub #34](https://github.com/Liyang0701/Cyrene-Agent/issues/34)
-- 多账号连接池与绑定者过滤：[GitHub #35](https://github.com/Liyang0701/Cyrene-Agent/issues/35)
-- 对话身份隔离与公平调度：[GitHub #36](https://github.com/Liyang0701/Cyrene-Agent/issues/36)
-- 多账号设置页与登录生命周期：[GitHub #37](https://github.com/Liyang0701/Cyrene-Agent/issues/37)
-- 显式出站路由、账号权限与渠道任务：[GitHub #38](https://github.com/Liyang0701/Cyrene-Agent/issues/38)
-- 角色切换协调与端到端验收：[GitHub #39](https://github.com/Liyang0701/Cyrene-Agent/issues/39)
+- 规格总览：[GitHub #33](https://github.com/KanoTime/Cyrene-Agent/issues/33)
+- 账号存储与旧版迁移：[GitHub #34](https://github.com/KanoTime/Cyrene-Agent/issues/34)
+- 多账号连接池与绑定者过滤：[GitHub #35](https://github.com/KanoTime/Cyrene-Agent/issues/35)
+- 对话身份隔离与公平调度：[GitHub #36](https://github.com/KanoTime/Cyrene-Agent/issues/36)
+- 多账号设置页与登录生命周期：[GitHub #37](https://github.com/KanoTime/Cyrene-Agent/issues/37)
+- 显式出站路由、账号权限与渠道任务：[GitHub #38](https://github.com/KanoTime/Cyrene-Agent/issues/38)
+- 角色切换协调与端到端验收：[GitHub #39](https://github.com/KanoTime/Cyrene-Agent/issues/39)

@@ -246,7 +246,7 @@ Catalog 每页 12 条，完整正文不会经过 LiveKit data packet。手机退
 ### 6.1 安装与基础检查
 
 ```bash
-git clone https://github.com/Liyang0701/Cyrene-Agent.git
+git clone https://github.com/KanoTime/Cyrene-Agent.git
 cd Cyrene-Agent
 npm ci
 npm run build
