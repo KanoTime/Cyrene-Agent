@@ -48,7 +48,7 @@ Android Cyrene Voice
 | Capability | Upstream when this fork was created | This fork |
 | --- | --- | --- |
 | Android voice client | No complete remote-call client | Standalone `mobile/` project producing an upgradable APK |
-| Remote one-tap calling | Not available | Call an online desktop over 5G, Wi-Fi, or VPN |
+| Remote one-tap calling | Not available | Connect over 5G or Wi-Fi, enable a VPN, then call the online desktop |
 | Long-lived device pairing | Not available | Expiring challenge, six-digit verification, desktop approval, SecureStore/safeStorage |
 | Real-time media security | No mobile media path | LiveKit audio media E2EE plus authenticated application-layer control encryption |
 | Conversation history | No mobile management | Create, resume, rename, and delete histories stored per character on the desktop |
@@ -76,6 +76,9 @@ Android Cyrene Voice
 > The current scope is one owner, an online desktop, one foreground Android call
 > at a time. It is not a system phone integration, background push calling,
 > multi-user SaaS, or a cloud replacement for an offline desktop agent.
+> **The currently verified deployment requires the Android phone to keep a VPN
+> enabled. Direct access without the VPN is not a supported path on either 5G
+> or Wi-Fi.**
 
 Start with the
 [step-by-step deployment and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md).
@@ -198,7 +201,8 @@ Configuration is stored in the application's `<userData>/` directory. Most chang
 ### Android Remote Voice Calls
 
 This feature requires your own Cloudflare, LiveKit, and Expo/EAS projects; it
-is not enabled by installing desktop dependencies alone. Follow the Chinese
+is not enabled by installing desktop dependencies alone. The Android phone must
+keep a working VPN enabled on both 5G and Wi-Fi. Follow the Chinese
 [step-by-step setup and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md)
 for deployment checkpoints, and use the
 [implementation guide](docs/mobile-voice-call-implementation-guide.md) for the

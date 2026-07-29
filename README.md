@@ -42,7 +42,7 @@ Android Cyrene Voice
 | 能力 | 上游主线（本 Fork 建立时） | 本 Fork |
 | --- | --- | --- |
 | Android 语音客户端 | 无完整公网通话客户端 | 独立 `mobile/` 工程，可构建覆盖安装 APK |
-| 异地一键呼叫 | 无 | 手机在 5G、Wi-Fi 或 VPN 下呼叫在线桌面 |
+| 异地一键呼叫 | 无 | 手机通过 5G 或 Wi-Fi 联网并开启 VPN 后呼叫在线桌面 |
 | 长期设备配对 | 无 | 短时挑战、六位码核对、桌面明确批准、SecureStore/safeStorage |
 | 实时媒体安全 | 无移动端链路 | LiveKit 音频媒体 E2EE，控制消息再做应用层认证加密 |
 | 对话历史 | 无移动端管理 | 新建、继续、重命名、删除；历史按角色保存在桌面 |
@@ -66,6 +66,8 @@ Android Cyrene Voice
 >
 > 当前定位是“单 Owner、桌面在线、一次一通、前台 Android 语音”的个人方案。
 > 它不是系统电话、后台推送来电、多用户 SaaS，也不会在桌面离线时由云端代替角色回答。
+> **当前已验证部署要求 Android 手机开启 VPN；无论底层网络是 5G 还是 Wi-Fi，
+> 关闭 VPN 都不属于当前支持的可用链路。**
 
 第一次部署请从[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
 开始；理解实现、依赖、安全边界和主仓合并保护项请阅读
@@ -186,7 +188,8 @@ npm run dev
 ### Android 公网语音通话
 
 这部分不是安装桌面依赖后自动启用的功能，还需要自己的 Cloudflare、LiveKit 与
-Expo/EAS 项目。第一次部署建议严格按[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
+Expo/EAS 项目。当前手机端在 5G 和 Wi-Fi 下都必须开启可用 VPN。第一次部署建议
+严格按[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
 逐关验证；需要理解安全边界、代码结构和升级保护项时，再阅读
 [实现与从零构建指南](docs/mobile-voice-call-implementation-guide.md)。
 

@@ -2,6 +2,11 @@
 
 Cyrene Voice 是 Cyrene Agent 的 Android/iOS 一对一前台语音客户端。手机负责配对、麦克风和扬声器；角色、记忆、ASR、模型与 TTS 留在桌面端。当前生产控制面是 Cloudflare Worker + Durable Object，媒体由 LiveKit 承载并强制启用音频媒体帧 E2EE。
 
+> [!IMPORTANT]
+>
+> 当前已验证部署要求 Android 手机全程开启可用 VPN。无论使用 5G 还是 Wi-Fi，
+> 关闭 VPN 后都不能保证访问 Cloudflare 控制面与 LiveKit，不属于当前支持链路。
+
 完整架构、代码地图、依赖、从零部署、APK 构建、验证矩阵和 FAQ：
 
 - [移动端语音通话从零部署与排障手册](../docs/mobile-voice-call-setup-runbook.md)
@@ -35,5 +40,6 @@ npx eas-cli@latest build --platform android --profile preview
 支持长期设备配对、桌面批准、手机公网呼叫、前台一对一语音、静音/挂断、
 自动聆听/手动轮次、命名历史的新建/继续/重命名/删除、蓝牙/扬声器切换、
 短时重连、权威状态收敛和本地角色语音。桌面必须在线且双方必须能访问控制面与 LiveKit。
+Android 手机还必须保持 VPN 在线。
 
 暂不支持系统级来电、后台保活、视频、群组、多 Owner 或桌面离线云端 Agent。
