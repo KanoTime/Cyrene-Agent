@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { useMemo, useState } from "react";
 import {
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -23,6 +24,7 @@ export function VoiceConversationPicker({
   onCreate,
   onSelect,
   onRename,
+  onDelete,
   hasMore,
   onLoadMore,
   onHangUp,
@@ -35,6 +37,7 @@ export function VoiceConversationPicker({
   onCreate: (title: string) => void;
   onSelect: (conversationId: string) => void;
   onRename: (conversationId: string, title: string) => void;
+  onDelete: (conversationId: string) => void;
   hasMore: boolean;
   onLoadMore: () => void;
   onHangUp: () => void;
@@ -43,8 +46,7 @@ export function VoiceConversationPicker({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const normalizedNewTitle = newTitle.replace(/\s+/g, " ").trim();
-  const canCreate = normalizedNewTitle.length > 0
-    && Array.from(normalizedNewTitle).length <= 80
+  const canCreate = Array.from(normalizedNewTitle).length <= 80
     && !busy;
   const listEmpty = useMemo(() => (
     catalogReady ? (
@@ -52,7 +54,7 @@ export function VoiceConversationPicker({
         <Ionicons color="#bda9d8" name="chatbubbles-outline" size={30} />
         <Text style={styles.emptyTitle}>还没有语音对话</Text>
         <Text style={styles.emptyBody}>
-          给第一段对话起个名字。以后重新呼叫时，可以从这里继续。
+          你可以直接开始新对话，名称也可以稍后再修改。
         </Text>
       </View>
     ) : (
@@ -83,10 +85,10 @@ export function VoiceConversationPicker({
             <View style={styles.headerCopy}>
               <Text style={styles.eyebrow}>语音对话</Text>
               <Text maxFontSizeMultiplier={1.4} style={styles.title}>
-                想从哪里继续？
+                继续以前的对话
               </Text>
               <Text maxFontSizeMultiplier={1.4} style={styles.subtitle}>
-                选择一段与{characterName}的历史，或创建新对话。选择完成前语音不会进入识别或保存。
+                选择一段与{characterName}的历史，或直接开始新对话。
               </Text>
             </View>
             <Pressable
@@ -119,7 +121,7 @@ export function VoiceConversationPicker({
                 onCreate(normalizedNewTitle);
                 setNewTitle("");
               }}
-              placeholder="例如：每天睡前聊聊"
+              placeholder="可选：给新对话起个名字"
               placeholderTextColor="#8f82a7"
               returnKeyType="done"
               style={styles.titleInput}
@@ -139,7 +141,7 @@ export function VoiceConversationPicker({
               ]}
             >
               <Ionicons color="#ffffff" name="add" size={20} />
-              <Text style={styles.createButtonText}>创建对话</Text>
+              <Text style={styles.createButtonText}>新建并开始</Text>
             </Pressable>
           </View>
 
@@ -238,20 +240,48 @@ export function VoiceConversationPicker({
                         </View>
                         <Ionicons color="#d6c3f4" name="chevron-forward" size={21} />
                       </Pressable>
-                      <Pressable
-                        accessibilityLabel={`重命名${item.title}`}
-                        disabled={busy}
-                        onPress={() => {
-                          setEditingId(item.id);
-                          setEditingTitle(item.title);
-                        }}
-                        style={({ pressed }) => [
-                          styles.renameButton,
-                          pressed && styles.pressed,
-                        ]}
-                      >
-                        <Ionicons color="#bda9d8" name="pencil-outline" size={18} />
-                      </Pressable>
+                      <View style={styles.conversationActions}>
+                        <Pressable
+                          accessibilityLabel={`重命名${item.title}`}
+                          disabled={busy}
+                          onPress={() => {
+                            setEditingId(item.id);
+                            setEditingTitle(item.title);
+                          }}
+                          style={({ pressed }) => [
+                            styles.rowAction,
+                            styles.rowActionTop,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Ionicons color="#bda9d8" name="pencil-outline" size={18} />
+                        </Pressable>
+                        <Pressable
+                          accessibilityLabel={`删除${item.title}`}
+                          accessibilityHint="会先要求确认"
+                          disabled={busy}
+                          onPress={() => {
+                            Alert.alert(
+                              "删除这段对话？",
+                              `“${item.title}”的完整语音历史会从桌面端永久删除。`,
+                              [
+                                { text: "取消", style: "cancel" },
+                                {
+                                  text: "删除对话",
+                                  style: "destructive",
+                                  onPress: () => onDelete(item.id),
+                                },
+                              ],
+                            );
+                          }}
+                          style={({ pressed }) => [
+                            styles.rowAction,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Ionicons color="#ff9eaf" name="trash-outline" size={18} />
+                        </Pressable>
+                      </View>
                     </>
                   )}
                 </View>
@@ -434,13 +464,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 8,
   },
-  renameButton: {
+  conversationActions: {
     alignItems: "center",
     borderColor: "#423955",
     borderLeftWidth: 1,
-    justifyContent: "center",
     width: 48,
   },
+  rowAction: {
+    alignItems: "center",
+    flex: 1,
+    justifyContent: "center",
+    width: "100%",
+  },
+  rowActionTop: { borderBottomColor: "#423955", borderBottomWidth: 1 },
   renameRow: {
     alignItems: "center",
     flex: 1,

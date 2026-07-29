@@ -16,6 +16,7 @@ export type MobileCallControl =
   | { type: "conversation.create"; title: string }
   | { type: "conversation.select"; conversationId: string }
   | { type: "conversation.rename"; conversationId: string; title: string }
+  | { type: "conversation.delete"; conversationId: string }
   | { type: "turn.mode"; mode: MobileCallTurnMode }
   | { type: "turn.begin" }
   | { type: "turn.commit" };
@@ -79,6 +80,7 @@ export function parseMobileCallControl(payload: Uint8Array): MobileCallControl |
           ? { type: value.type, title: value.title.replace(/\s+/g, " ").trim() }
           : null;
       case "conversation.select":
+      case "conversation.delete":
         return typeof value.conversationId === "string" && UUID_PATTERN.test(value.conversationId)
           ? { type: value.type, conversationId: value.conversationId }
           : null;

@@ -31,6 +31,13 @@ describe("parseMobileCallControl", () => {
       conversationId: "00000000-0000-4000-8000-000000000001",
     });
     expect(parseMobileCallControl(payload({
+      type: "conversation.delete",
+      conversationId: "00000000-0000-4000-8000-000000000001",
+    }))).toEqual({
+      type: "conversation.delete",
+      conversationId: "00000000-0000-4000-8000-000000000001",
+    });
+    expect(parseMobileCallControl(payload({
       type: "turn.mode",
       mode: "manual",
     }))).toEqual({ type: "turn.mode", mode: "manual" });
@@ -44,6 +51,10 @@ describe("parseMobileCallControl", () => {
     expect(parseMobileCallControl(payload({ type: "unknown" }))).toBeNull();
     expect(parseMobileCallControl(payload({
       type: "conversation.select",
+      conversationId: "../../outside",
+    }))).toBeNull();
+    expect(parseMobileCallControl(payload({
+      type: "conversation.delete",
       conversationId: "../../outside",
     }))).toBeNull();
     expect(parseMobileCallControl(payload({

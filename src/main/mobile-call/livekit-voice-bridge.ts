@@ -49,6 +49,7 @@ export interface LiveKitVoiceConversationAdapter {
   create(title: string): VoiceConversation | null;
   select(id: string): VoiceConversation | null;
   rename(id: string, title: string): VoiceConversation | null;
+  delete(id: string): "DELETED" | "ACTIVE" | "NOT_FOUND";
   current(): VoiceConversation | null;
 }
 
@@ -69,12 +70,13 @@ export type LiveKitVoiceBridgeStopCause =
   | "E2EE_PEER_NOT_ENCRYPTED"
   | "START_FAILED";
 
-export interface LiveKitVoiceBridgeDiagnostic {
-  event: "BRIDGE_STOPPED";
-  cause: LiveKitVoiceBridgeStopCause;
-  /** Numeric LiveKit enum only; never includes participant or room identity. */
-  disconnectReason?: number;
-}
+export type LiveKitVoiceBridgeDiagnostic =
+  | {
+      event: "BRIDGE_STOPPED";
+      cause: LiveKitVoiceBridgeStopCause;
+      /** Numeric LiveKit enum only; never includes participant or room identity. */
+      disconnectReason?: number;
+    };
 
 export type LiveKitVoiceBridgeState =
   | "idle"
@@ -93,6 +95,7 @@ const LIVEKIT_RATCHET_SALT = new TextEncoder().encode("LKFrameEncryptionKey");
 const LIVEKIT_AUDIO_QUEUE_MS = 200;
 const LIVEKIT_MEDIA_OPERATION_TIMEOUT_MS = 5_000;
 const LIVEKIT_AUDIO_STREAM_REOPEN_LIMIT = 3;
+export const LIVEKIT_E2EE_MEDIA_VERIFICATION_GRACE_MS = 1_500;
 export const LIVEKIT_MOBILE_RECONNECT_GRACE_MS = 20_000;
 
 async function within<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -132,6 +135,10 @@ export class LiveKitVoiceBridge {
   private mobileAudioGeneration = 0;
   private mobileReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private dataCipher: CallDataCipher | null = null;
+  private mobileAudioPublicationEncrypted: boolean | undefined;
+  private decodedMobileAudioFrames = 0;
+  private e2eeVerificationTimer: ReturnType<typeof setTimeout> | null = null;
+  private e2eeVerificationFrameBaseline = 0;
   private readonly turnGate: AudioTurnGate;
 
   constructor(
@@ -210,9 +217,14 @@ export class LiveKitVoiceBridge {
           this.peerPresent = true;
           void this.publishConnectedIfSecure();
         })
-        .on(RoomEvent.TrackSubscribed, (remoteTrack, _publication, participant) => {
+        .on(RoomEvent.TrackSubscribed, (remoteTrack, publication, participant) => {
           if (participant.identity !== this.config.mobileIdentity || remoteTrack.kind !== TrackKind.KIND_AUDIO) return;
           this.peerPresent = true;
+          this.mobileAudioPublicationEncrypted = publication.encryptionType === EncryptionType.GCM;
+          if (this.config.e2eeKey && !this.mobileAudioPublicationEncrypted) {
+            this.rejectUnverifiedPeerEncryption();
+            return;
+          }
           void this.publishConnectedIfSecure();
           const generation = ++this.mobileAudioGeneration;
           void this.consumeMobileAudio(remoteTrack as RemoteAudioTrack, generation);
@@ -233,7 +245,9 @@ export class LiveKitVoiceBridge {
             }
           }
           const control = parseMobileCallControl(plaintext);
-          if (control) void this.handleControl(control);
+          if (control) {
+            void this.handleControl(control);
+          }
         })
         .on(RoomEvent.ParticipantDisconnected, (participant) => {
           if (participant.identity === this.config.mobileIdentity) {
@@ -268,11 +282,14 @@ export class LiveKitVoiceBridge {
           .on(RoomEvent.ParticipantEncryptionStatusChanged, (isEncrypted, participant) => {
             if (participant.identity !== this.config.mobileIdentity) return;
             if (!isEncrypted) {
-              const message = "E2EE_REQUIRED";
-              this.dependencies.onError?.(message);
-              void this.stop(true, "error", message, "E2EE_PEER_NOT_ENCRYPTED");
+              if (this.mobileAudioPublicationEncrypted) {
+                this.beginE2eeMediaVerification();
+              } else {
+                this.rejectUnverifiedPeerEncryption();
+              }
               return;
             }
+            this.clearE2eeVerificationTimer();
             this.peerPresent = true;
             this.peerEncrypted = true;
             void this.publishConnectedIfSecure();
@@ -342,9 +359,12 @@ export class LiveKitVoiceBridge {
     }
     this.active = false;
     this.clearMobileReconnectTimer();
+    this.clearE2eeVerificationTimer();
     this.mobileAudioGeneration += 1;
     this.peerPresent = false;
     this.peerEncrypted = false;
+    this.mobileAudioPublicationEncrypted = undefined;
+    this.decodedMobileAudioFrames = 0;
     this.releaseStartupWaiters();
     this.setState(finalState, message);
     this.turnGate.reset();
@@ -378,6 +398,8 @@ export class LiveKitVoiceBridge {
         const audio = new AudioStream(track, { sampleRate: 16_000, numChannels: 1, frameSizeMs: 20 });
         for await (const frame of audio) {
           if (!this.active || !this.voiceSession || generation !== this.mobileAudioGeneration) return;
+          this.decodedMobileAudioFrames += 1;
+          this.confirmE2eeWithDecodedAudio();
           if (this.voiceSession.state !== "LISTENING") {
             this.turnGate.cancelCurrentTurn();
             continue;
@@ -501,10 +523,45 @@ export class LiveKitVoiceBridge {
     void this.publishClientEvent({ type: "error", message });
   }
 
+  private beginE2eeMediaVerification(): void {
+    if (this.e2eeVerificationTimer || !this.active) return;
+    this.e2eeVerificationFrameBaseline = this.decodedMobileAudioFrames;
+    this.e2eeVerificationTimer = setTimeout(() => {
+      this.e2eeVerificationTimer = null;
+      if (!this.active) return;
+      this.rejectUnverifiedPeerEncryption();
+    }, LIVEKIT_E2EE_MEDIA_VERIFICATION_GRACE_MS);
+  }
+
+  private confirmE2eeWithDecodedAudio(): void {
+    if (
+      !this.e2eeVerificationTimer
+      || this.decodedMobileAudioFrames <= this.e2eeVerificationFrameBaseline
+    ) {
+      return;
+    }
+    this.clearE2eeVerificationTimer();
+    this.peerEncrypted = true;
+    void this.publishConnectedIfSecure();
+  }
+
+  private rejectUnverifiedPeerEncryption(): void {
+    const message = "E2EE_REQUIRED";
+    this.dependencies.onError?.(message);
+    void this.stop(true, "error", message, "E2EE_PEER_NOT_ENCRYPTED");
+  }
+
+  private clearE2eeVerificationTimer(): void {
+    if (!this.e2eeVerificationTimer) return;
+    clearTimeout(this.e2eeVerificationTimer);
+    this.e2eeVerificationTimer = null;
+  }
+
   private beginMobileReconnectGrace(disconnectReason?: number): void {
     if (!this.active || this.mobileReconnectTimer) return;
     this.peerPresent = false;
     this.peerEncrypted = false;
+    this.clearE2eeVerificationTimer();
     this.mobileAudioGeneration += 1;
     this.turnGate.cancelCurrentTurn();
     this.setState("reconnecting");
@@ -563,6 +620,7 @@ export class LiveKitVoiceBridge {
       control.type === "conversation.create"
       || control.type === "conversation.select"
       || control.type === "conversation.rename"
+      || control.type === "conversation.delete"
     ) {
       if (!conversations) {
         this.reportControlError("当前通话不支持持久化语音对话");
@@ -581,6 +639,20 @@ export class LiveKitVoiceBridge {
         }
         if (conversations.current()?.id === renamed.id) {
           await this.publishSelectedConversation(renamed);
+        }
+        await this.publishConversationCatalog();
+        return;
+      }
+
+      if (control.type === "conversation.delete") {
+        const outcome = conversations.delete(control.conversationId);
+        if (outcome === "ACTIVE") {
+          this.reportControlError("当前正在使用这段对话，请先结束通话再删除");
+          return;
+        }
+        if (outcome === "NOT_FOUND") {
+          this.reportControlError("找不到指定的语音对话");
+          return;
         }
         await this.publishConversationCatalog();
         return;

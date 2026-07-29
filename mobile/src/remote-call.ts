@@ -39,7 +39,10 @@ export async function requestRemoteVoiceCall(
   const payload = await authenticatedPost(
     authorization,
     "/v1/calls/request",
-    { idempotencyKey: `mobile-${Crypto.randomUUID()}` },
+    {
+      idempotencyKey: `mobile-${Crypto.randomUUID()}`,
+      replaceOwnedCall: true,
+    },
   );
   if (payload.status === "REJECTED" && typeof payload.reason === "string") {
     return { status: "REJECTED", reason: payload.reason };

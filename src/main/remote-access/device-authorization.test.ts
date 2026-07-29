@@ -100,6 +100,57 @@ describe("Device Authorization Module", () => {
     expect(authorization.exportPersistentState().voiceCalls).toHaveLength(1);
   });
 
+  it("lets the same mobile replace its abandoned call without displacing another mobile", () => {
+    const authorization = new InMemoryDeviceAuthorizationModule();
+    const desktop = authorization.bootstrapOwner({ label: "家中 Mac" });
+    const firstMobile = pairMobile(
+      authorization,
+      desktop.deviceCredential,
+      "mobile-a",
+    );
+    const secondMobile = pairMobile(
+      authorization,
+      desktop.deviceCredential,
+      "mobile-b",
+    );
+    authorization.reportDesktopAvailability({
+      authorizingCredential: desktop.deviceCredential,
+      available: true,
+    });
+    const first = authorization.requestVoiceCall({
+      authorizingCredential: firstMobile.deviceCredential,
+      idempotencyKey: "call-attempt-abandoned",
+    });
+    if (first.status !== "CALL_CREATED") throw new Error("expected first call");
+
+    const competing = authorization.requestVoiceCall({
+      authorizingCredential: secondMobile.deviceCredential,
+      idempotencyKey: "call-attempt-competing",
+      replaceOwnedCall: true,
+    });
+    const replacement = authorization.requestVoiceCall({
+      authorizingCredential: firstMobile.deviceCredential,
+      idempotencyKey: "call-attempt-replacement",
+      replaceOwnedCall: true,
+    });
+
+    expect(competing).toEqual({ status: "REJECTED", reason: "OWNER_BUSY" });
+    expect(replacement).toMatchObject({
+      status: "CALL_CREATED",
+      call: { phase: "AWAITING_DESKTOP" },
+    });
+    expect(replacement.status === "CALL_CREATED"
+      ? replacement.call.callId
+      : undefined).not.toBe(first.call.callId);
+    expect(authorization.readVoiceCall({
+      authorizingCredential: firstMobile.deviceCredential,
+      callId: first.call.callId,
+    })).toMatchObject({
+      phase: "ENDED",
+      terminationReason: "REPLACED_BY_SAME_DEVICE",
+    });
+  });
+
   it("lets only the selected desktop confirm and enforces the desktop and media deadlines", () => {
     let now = Date.parse("2026-07-23T11:00:00.000Z");
     const authorization = new InMemoryDeviceAuthorizationModule({ now: () => now });

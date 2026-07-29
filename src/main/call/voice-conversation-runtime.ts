@@ -43,6 +43,11 @@ export class VoiceConversationRuntime {
     return this.store.rename(id, title);
   }
 
+  delete(id: string): "DELETED" | "ACTIVE" | "NOT_FOUND" {
+    if (id === this.selectedId) return "ACTIVE";
+    return this.store.delete(id) ? "DELETED" : "NOT_FOUND";
+  }
+
   appendTurn(userText: string, assistantText: string): VoiceConversation | null {
     if (!this.selectedId) return null;
     return this.store.appendTurn(this.selectedId, { userText, assistantText });

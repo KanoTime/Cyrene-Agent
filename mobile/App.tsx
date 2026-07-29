@@ -14,6 +14,7 @@ import {
 } from "react-native";
 import {
   AudioSession,
+  AndroidAudioTypePresets,
   LiveKitRoom,
   RNE2EEManager,
   RNKeyProvider,
@@ -79,11 +80,21 @@ import {
 } from "./src/call-control-protocol";
 import { VoiceConversationPicker } from "./src/voice-conversation-picker";
 import { CallDataCipher } from "./src/call-data-cipher";
-import { prepareConversationSelectionTransport } from "./src/conversation-selection-transport";
+import {
+  prepareConversationEntryTransport,
+  resolveNewConversationTitle,
+  type ConversationEntryMode,
+} from "./src/conversation-selection-transport";
+import {
+  inferPreferredAudioOutput,
+  nextAudioOutput,
+  type MobileAudioOutput,
+} from "./src/audio-output-routing";
 
 type EncryptedCallCredentials = RemoteMediaJoinGrant & {
   characterId?: string;
   characterName?: string;
+  conversationEntryMode: ConversationEntryMode;
 };
 
 function ActiveCall({
@@ -91,6 +102,7 @@ function ActiveCall({
   onRemoteEndHint,
   characterId,
   characterName = "Cyrene",
+  conversationEntryMode,
   secureMediaReady = true,
   dataCipher,
 }: {
@@ -98,6 +110,7 @@ function ActiveCall({
   onRemoteEndHint?: () => void;
   characterId?: string;
   characterName?: string;
+  conversationEntryMode: ConversationEntryMode;
   secureMediaReady?: boolean;
   dataCipher: CallDataCipher;
 }): React.JSX.Element {
@@ -116,7 +129,11 @@ function ActiveCall({
     useState<MobileVoiceConversationMeta | null>(null);
   const [inputMode, setInputMode] = useState<MobileCallTurnMode>("automatic");
   const [manualTurnOpen, setManualTurnOpen] = useState(false);
+  const [availableAudioOutputs, setAvailableAudioOutputs] =
+    useState<MobileAudioOutput[]>([]);
+  const [audioOutput, setAudioOutput] = useState<MobileAudioOutput | null>(null);
   const secureMediaReadyRef = useRef(secureMediaReady);
+  const conversationEntryStartedRef = useRef(false);
   secureMediaReadyRef.current = secureMediaReady;
   const selectedConversationRef = useRef<MobileVoiceConversationMeta | null>(null);
   selectedConversationRef.current = selectedConversation;
@@ -188,7 +205,11 @@ function ActiveCall({
             && !selectedConversationRef.current
           ) {
             setCallPhase("CONNECTING");
-            setCallDetail("请选择一段语音对话");
+            setCallDetail(
+              conversationEntryMode === "new"
+                ? "正在创建新对话…"
+                : "请选择一段语音对话",
+            );
             return;
           }
           setCallPhase(event.state);
@@ -212,7 +233,11 @@ function ActiveCall({
             setCallDetail(undefined);
           } else {
             setCallPhase("CONNECTING");
-            setCallDetail("请选择一段语音对话");
+            setCallDetail(
+              conversationEntryMode === "new"
+                ? "正在创建新对话…"
+                : "请选择一段语音对话",
+            );
           }
         }
         if (event.state === "reconnecting") {
@@ -291,6 +316,7 @@ function ActiveCall({
       room.off(RoomEvent.DataReceived, onData);
     };
   }, [
+    conversationEntryMode,
     localParticipant,
     dataCipher,
     onRemoteEndHint,
@@ -300,28 +326,62 @@ function ActiveCall({
   ]);
 
   useEffect(() => {
-    if (secureMediaReady) {
-      if (selectedConversationRef.current) {
-        setCallPhase("LISTENING");
-        setCallDetail(undefined);
-      } else {
-        setCallPhase("CONNECTING");
-        setCallDetail("请选择一段语音对话");
-        prepareConversationSelectionTransport({
-          setMicrophoneEnabled: (enabled) =>
-            localParticipant.setMicrophoneEnabled(enabled),
-          requestConversationCatalog: () =>
-            sendControl({ type: "conversation.list" }),
-        });
-      }
+    if (!secureMediaReady || conversationEntryStartedRef.current) return;
+    if (selectedConversationRef.current) {
+      setCallPhase("LISTENING");
+      setCallDetail(undefined);
+      return;
     }
-  }, [localParticipant, secureMediaReady, sendControl]);
+    conversationEntryStartedRef.current = true;
+    setCallPhase("CONNECTING");
+    setCallDetail(
+      conversationEntryMode === "new"
+        ? "正在创建新对话…"
+        : "请选择一段语音对话",
+    );
+    prepareConversationEntryTransport({
+      mode: conversationEntryMode,
+      setMicrophoneEnabled: (enabled) =>
+        localParticipant.setMicrophoneEnabled(enabled),
+      requestConversationCatalog: () =>
+        sendControl({ type: "conversation.list" }),
+      createConversation: (title) =>
+        sendControl({ type: "conversation.create", title }),
+    });
+  }, [
+    conversationEntryMode,
+    localParticipant,
+    secureMediaReady,
+    sendControl,
+  ]);
 
   useEffect(() => {
     if (lastMicrophoneError) {
       Alert.alert("无法打开麦克风", lastMicrophoneError.message);
     }
   }, [lastMicrophoneError]);
+
+  useEffect(() => {
+    if (!secureMediaReady) return;
+    let cancelled = false;
+    void AudioSession.getAudioOutputs()
+      .then((outputs) => {
+        if (cancelled) return;
+        const supported = outputs.filter(
+          (output): output is MobileAudioOutput =>
+            output === "bluetooth"
+            || output === "headset"
+            || output === "speaker"
+            || output === "earpiece",
+        );
+        setAvailableAudioOutputs(supported);
+        setAudioOutput(inferPreferredAudioOutput(supported));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [secureMediaReady]);
 
   const toggleMicrophone = useCallback(async () => {
     try {
@@ -330,6 +390,31 @@ function ActiveCall({
       Alert.alert("麦克风切换失败", error instanceof Error ? error.message : String(error));
     }
   }, [isMicrophoneEnabled, localParticipant]);
+
+  const toggleAudioOutput = useCallback(async () => {
+    try {
+      const outputs = await AudioSession.getAudioOutputs();
+      const target = nextAudioOutput(audioOutput, outputs);
+      if (!target) {
+        Alert.alert("没有其他音频输出", "请先连接耳机或使用手机扬声器。");
+        return;
+      }
+      await AudioSession.selectAudioOutput(target);
+      setAudioOutput(target);
+      setAvailableAudioOutputs(outputs.filter(
+        (output): output is MobileAudioOutput =>
+          output === "bluetooth"
+          || output === "headset"
+          || output === "speaker"
+          || output === "earpiece",
+      ));
+    } catch (outputError) {
+      Alert.alert(
+        "无法切换音频输出",
+        outputError instanceof Error ? outputError.message : String(outputError),
+      );
+    }
+  }, [audioOutput]);
 
   const sendConversationControl = useCallback((control: MobileCallControl) => {
     setConversationBusy(true);
@@ -344,7 +429,11 @@ function ActiveCall({
     });
   }, [sendControl]);
 
-  if (secureMediaReady && !selectedConversation) {
+  if (
+    secureMediaReady
+    && !selectedConversation
+    && conversationEntryMode === "history"
+  ) {
     return (
       <VoiceConversationPicker
         busy={conversationBusy}
@@ -354,7 +443,7 @@ function ActiveCall({
         conversations={conversations}
         onCreate={(title) => sendConversationControl({
           type: "conversation.create",
-          title,
+          title: resolveNewConversationTitle(title),
         })}
         onHangUp={onHangUp}
         hasMore={Boolean(nextConversationCursor)}
@@ -369,6 +458,10 @@ function ActiveCall({
           type: "conversation.rename",
           conversationId,
           title,
+        })}
+        onDelete={(conversationId) => sendConversationControl({
+          type: "conversation.delete",
+          conversationId,
         })}
         onSelect={(conversationId) => sendConversationControl({
           type: "conversation.select",
@@ -387,9 +480,12 @@ function ActiveCall({
       conversationTitle={selectedConversation?.title}
       inputMode={inputMode}
       manualTurnOpen={manualTurnOpen}
+      audioOutput={audioOutput ?? undefined}
+      showAudioOutputControl={availableAudioOutputs.length > 1}
       isMicrophoneEnabled={isMicrophoneEnabled}
       microphoneSignalActive={isLocalSpeaking}
       onToggleMicrophone={() => void toggleMicrophone()}
+      onToggleAudioOutput={() => void toggleAudioOutput()}
       onChangeInputMode={(mode) => {
         void sendControl({ type: "turn.mode", mode });
       }}
@@ -665,6 +761,7 @@ function EncryptedCallRoom({
         onRemoteEndHint={onRemoteEndHint}
         characterId={credentials.characterId}
         characterName={credentials.characterName}
+        conversationEntryMode={credentials.conversationEntryMode}
         secureMediaReady={secureMediaReady}
         dataCipher={dataCipher}
       />
@@ -765,7 +862,9 @@ export default function App(): React.JSX.Element {
     });
   }, [endCall, pairedDevice]);
 
-  const beginRemoteCall = useCallback(async () => {
+  const beginRemoteCall = useCallback(async (
+    conversationEntryMode: ConversationEntryMode,
+  ) => {
     if (!pairedDevice || starting || callActiveRef.current) return;
     setStarting(true);
     setError(null);
@@ -790,12 +889,19 @@ export default function App(): React.JSX.Element {
           const grant = await takeMediaGrantWhenReady(
             () => takeRemoteMediaGrant(pairedDevice, call.callId),
           );
+          await AudioSession.configureAudio({
+            android: {
+              preferredOutputList: ["bluetooth", "headset", "speaker", "earpiece"],
+              audioTypeOptions: AndroidAudioTypePresets.communication,
+            },
+          });
           await AudioSession.startAudioSession();
           callActiveRef.current = true;
           setCredentials({
             ...grant,
             characterId: call.characterId,
             characterName: call.characterName,
+            conversationEntryMode,
           });
           return;
         }
@@ -1033,29 +1139,42 @@ export default function App(): React.JSX.Element {
 
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={pairedDevice ? "呼叫 Cyrene" : "扫描桌面端二维码"}
+          accessibilityLabel={pairedDevice ? "开始新的语音对话" : "扫描桌面端二维码"}
           disabled={starting}
-          onPress={() => void (pairedDevice ? beginRemoteCall() : openScanner())}
+          onPress={() => void (
+            pairedDevice ? beginRemoteCall("new") : openScanner()
+          )}
           style={[styles.scanButton, starting && styles.disabledButton]}
         >
           {starting ? <ActivityIndicator color="#f2ecff" /> : <Text style={styles.scanButtonText}>
-            {pairedDevice ? "呼叫 Cyrene" : "扫描配对二维码"}
+            {pairedDevice ? "开始新对话" : "扫描配对二维码"}
           </Text>}
         </Pressable>
+        {pairedDevice ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="选择历史语音对话并继续"
+            disabled={starting}
+            onPress={() => void beginRemoteCall("history")}
+            style={[styles.secondaryButton, styles.historyButton]}
+          >
+            <Text style={styles.secondaryButtonText}>继续历史对话</Text>
+          </Pressable>
+        ) : null}
         {pairedDevice ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="扫描备用通话二维码"
             disabled={starting}
             onPress={() => void openScanner()}
-            style={styles.secondaryButton}
+            style={[styles.secondaryButton, styles.scannerButton]}
           >
             <Text style={styles.secondaryButtonText}>扫码备用</Text>
           </Pressable>
         ) : null}
         <Text style={styles.smallHint}>
           {pairedDevice
-            ? "一键呼叫只在应用前台建立强制 E2EE；桌面不可用时立即拒绝，不排队或自动改呼。"
+            ? "重新打开应用会安全替换这台手机遗留的旧通话；其他设备的通话不会被打断。"
             : "配对邀请 2 分钟有效；二维码只建立候选，不会自动授权。"}
         </Text>
       </View>
@@ -1114,6 +1233,8 @@ const styles = StyleSheet.create({
   disabledButton: { opacity: 0.5 },
   controls: { flexDirection: "row", gap: 18, marginTop: 44 },
   secondaryButton: { minWidth: 100, paddingVertical: 14, borderRadius: 24, borderWidth: 1, borderColor: "#afa0dd", alignItems: "center" },
+  historyButton: { minWidth: 210, marginTop: 12 },
+  scannerButton: { marginTop: 10 },
   secondaryButtonActive: { backgroundColor: "#4d3c78" },
   secondaryButtonText: { color: "#fff", fontSize: 16, fontWeight: "600" },
   hangUpButton: { minWidth: 100, paddingVertical: 14, borderRadius: 24, backgroundColor: "#dc4c62", alignItems: "center" },

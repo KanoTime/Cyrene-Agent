@@ -19,6 +19,7 @@ export type MobileCallControl =
   | { type: "conversation.create"; title: string }
   | { type: "conversation.select"; conversationId: string }
   | { type: "conversation.rename"; conversationId: string; title: string }
+  | { type: "conversation.delete"; conversationId: string }
   | { type: "turn.mode"; mode: MobileCallTurnMode }
   | { type: "turn.begin" }
   | { type: "turn.commit" };

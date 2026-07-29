@@ -14,6 +14,13 @@ describe("mobile call control protocol", () => {
       title: "晚间闲聊",
     });
     expect(JSON.parse(new TextDecoder().decode(encodeMobileCallControl({
+      type: "conversation.delete",
+      conversationId: "00000000-0000-4000-8000-000000000001",
+    })))).toEqual({
+      type: "conversation.delete",
+      conversationId: "00000000-0000-4000-8000-000000000001",
+    });
+    expect(JSON.parse(new TextDecoder().decode(encodeMobileCallControl({
       type: "turn.begin",
     })))).toEqual({ type: "turn.begin" });
   });

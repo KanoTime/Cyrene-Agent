@@ -197,6 +197,36 @@ describe("Device Authorization HTTP adapter", () => {
       body: { callId },
     });
     expect(status.body).toEqual(mobileReady.body);
+
+    const replacement = await handle({
+      method: "POST",
+      pathname: "/v1/calls/request",
+      authorization: `DeviceCredential ${mobileCredential}`,
+      body: {
+        idempotencyKey: "mobile-http-call-attempt-replacement",
+        replaceOwnedCall: true,
+      },
+    });
+    expect(replacement).toMatchObject({
+      status: 200,
+      body: {
+        status: "CALL_CREATED",
+        call: { phase: "AWAITING_DESKTOP" },
+      },
+    });
+    expect((replacement.body.call as Record<string, unknown>).callId)
+      .not.toBe(callId);
+    expect((await handle({
+      method: "POST",
+      pathname: "/v1/calls/status",
+      authorization: `DeviceCredential ${mobileCredential}`,
+      body: { callId },
+    })).body).toMatchObject({
+      call: {
+        phase: "ENDED",
+        terminationReason: "REPLACED_BY_SAME_DEVICE",
+      },
+    });
   });
 
   it("does not reject media envelopes when issuance starts after the media deadline was established", async () => {

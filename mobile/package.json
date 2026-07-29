@@ -1,6 +1,6 @@
 {
   "name": "@cyrene/mobile",
-  "version": "1.0.13",
+  "version": "1.0.15",
   "main": "index.ts",
   "dependencies": {
     "@config-plugins/react-native-webrtc": "^15.0.1",

@@ -103,6 +103,7 @@ export type CallRejectionReason =
 export type CallTerminationReason =
   | "CALLER_CANCELLED"
   | "PARTICIPANT_HUNG_UP"
+  | "REPLACED_BY_SAME_DEVICE"
   | "DESKTOP_CONFIRM_TIMEOUT"
   | "DESKTOP_UNAVAILABLE"
   | "MEDIA_CONNECT_TIMEOUT"
@@ -319,6 +320,7 @@ export class InMemoryDeviceAuthorizationModule {
   requestVoiceCall(input: {
     authorizingCredential: string;
     idempotencyKey: string;
+    replaceOwnedCall?: boolean;
   }): VoiceCallRequestResult {
     this.sweepVoiceCallDeadlines();
     const mobile = this.requireActiveMobile(input.authorizingCredential);
@@ -350,10 +352,17 @@ export class InMemoryDeviceAuthorizationModule {
     if (mobile.requiresReviewAfterRecovery) {
       return rememberRejection("DEVICE_NOT_AUTHORIZED");
     }
-    const ownerBusy = [...this.voiceCalls.values()].some(
+    const activeCalls = [...this.voiceCalls.values()].filter(
       (call) => call.phase !== "ENDED",
     );
-    if (ownerBusy) return rememberRejection("OWNER_BUSY");
+    if (activeCalls.length > 0) {
+      const canReplaceOwnedCalls = input.replaceOwnedCall === true
+        && activeCalls.every((call) => call.mobileDeviceId === mobile.deviceId);
+      if (!canReplaceOwnedCalls) return rememberRejection("OWNER_BUSY");
+      for (const call of activeCalls) {
+        this.endVoiceCall(call, "REPLACED_BY_SAME_DEVICE");
+      }
+    }
 
     const desktop = [...this.devices.values()].find(
       (device) =>

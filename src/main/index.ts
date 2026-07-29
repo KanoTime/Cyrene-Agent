@@ -5461,20 +5461,6 @@ app.whenReady().then(async () => {
     },
   });
   void desktopAvailabilityCoordinator.start();
-  const appendRemoteCallDiagnostic = (entry: Record<string, unknown>): void => {
-    try {
-      fs.appendFileSync(
-        path.join(os.tmpdir(), "cyrene-remote-call-diagnostic.jsonl"),
-        `${JSON.stringify({
-          at: new Date().toISOString(),
-          ...entry,
-        })}\n`,
-        "utf8",
-      );
-    } catch {
-      // Diagnostics must never affect call behavior.
-    }
-  };
   desktopRemoteCallCoordinator = new DesktopRemoteCallCoordinator({
     client: desktopDeviceAuthorizationClient,
     getActiveCharacter: () => {
@@ -5491,33 +5477,10 @@ app.whenReady().then(async () => {
           threshold: settings.asrVadThreshold,
         },
         onStatus,
-        (event) => appendRemoteCallDiagnostic({ ...event }),
       );
     },
     stopRemoteCall: stopMobileCall,
-    // [DEBUG-remote-call-stage] Temporary content-free trace for the current
-    // desktop-join investigation. It records no call/device IDs, URLs,
-    // credentials, messages, or transport details.
-    onFailure: (failure) => {
-      appendRemoteCallDiagnostic({
-        event: "CALL_SETUP_FAILED",
-        stage: failure.stage,
-        code: failure.code,
-      });
-    },
   });
-  try {
-    fs.writeFileSync(
-      path.join(os.tmpdir(), "cyrene-remote-call-diagnostic.jsonl"),
-      `${JSON.stringify({
-        at: new Date().toISOString(),
-        event: "COORDINATOR_STARTED",
-      })}\n`,
-      "utf8",
-    );
-  } catch {
-    // Diagnostics must never affect application startup.
-  }
   desktopRemoteCallCoordinator.start();
   powerMonitor.on("suspend", () => {
     void desktopAvailabilityCoordinator?.suspend();

@@ -12,6 +12,7 @@ const liveKit = vi.hoisted(() => {
   let nextConnectError: Error | null = null;
   let nextPublishTrackGate: Promise<void> | null = null;
   let nextAudioStreamEnds = false;
+  let nextAudioStreamPauses = false;
   let onCaptureFrame: (() => Promise<void>) | null = null;
 
   class FakeRoom {
@@ -87,6 +88,14 @@ const liveKit = vi.hoisted(() => {
     endNextAudioStream() {
       nextAudioStreamEnds = true;
     },
+    pauseNextAudioStream() {
+      nextAudioStreamPauses = true;
+    },
+    shouldPauseAudioStream() {
+      const shouldPause = nextAudioStreamPauses;
+      nextAudioStreamPauses = false;
+      return shouldPause;
+    },
     shouldEndAudioStream() {
       const shouldEnd = nextAudioStreamEnds;
       nextAudioStreamEnds = false;
@@ -155,6 +164,9 @@ vi.mock("@livekit/rtc-node", () => ({
   },
   AudioStream: class {
     async *[Symbol.asyncIterator](): AsyncGenerator<{ data: Int16Array }> {
+      if (liveKit.shouldPauseAudioStream()) {
+        await new Promise<void>(() => undefined);
+      }
       for (let index = 0; index < 10; index += 1) {
         yield { data: new Int16Array(320).fill(index % 2 === 0 ? 4_000 : -4_000) };
       }
@@ -188,6 +200,7 @@ vi.mock("@livekit/rtc-node", () => ({
 
 import {
   LiveKitVoiceBridge,
+  LIVEKIT_E2EE_MEDIA_VERIFICATION_GRACE_MS,
   LIVEKIT_MOBILE_RECONNECT_GRACE_MS,
   type LiveKitVoiceBridgeDiagnostic,
   type LiveKitVoiceBridgeState,
@@ -223,6 +236,7 @@ function createBridge(states: Array<{ state: LiveKitVoiceBridgeState; message?: 
 }
 
 function createEncryptedBridge(states: Array<{ state: LiveKitVoiceBridgeState; message?: string }>) {
+  const diagnostics: LiveKitVoiceBridgeDiagnostic[] = [];
   const voiceSession = {
     state: "LISTENING",
     start: vi.fn(async () => undefined),
@@ -240,15 +254,17 @@ function createEncryptedBridge(states: Array<{ state: LiveKitVoiceBridgeState; m
     e2eeKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   }, {
     createVoiceSession: () => voiceSession as never,
+    onDiagnostic: (event) => diagnostics.push(event),
     onStateChange: (state, message) => states.push({ state, ...(message ? { message } : {}) }),
   });
-  return { bridge, voiceSession };
+  return { bridge, voiceSession, diagnostics };
 }
 
 function createConversationBridge(
   states: Array<{ state: LiveKitVoiceBridgeState; message?: string }>,
   conversationCount = 1,
 ) {
+  const diagnostics: LiveKitVoiceBridgeDiagnostic[] = [];
   const voiceSession = {
     state: "LISTENING",
     start: vi.fn(async () => undefined),
@@ -265,7 +281,7 @@ function createConversationBridge(
     schemaVersion: 1 as const,
     turns: [],
   };
-  const conversationMetas = Array.from({ length: conversationCount }, (_, index) => ({
+  let conversationMetas = Array.from({ length: conversationCount }, (_, index) => ({
     id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
     title: index === 0 ? conversation.title : `历史 ${index + 1}`,
     createdAt: index + 1,
@@ -274,6 +290,12 @@ function createConversationBridge(
     preview: "",
   }));
   let selected = false;
+  const deleteConversation = vi.fn((id: string) => {
+    if (selected && id === conversation.id) return "ACTIVE" as const;
+    if (!conversationMetas.some((item) => item.id === id)) return "NOT_FOUND" as const;
+    conversationMetas = conversationMetas.filter((item) => item.id !== id);
+    return "DELETED" as const;
+  });
   const bridge = new LiveKitVoiceBridge({
     serverUrl: "wss://test.livekit.cloud",
     agentToken: "agent-token",
@@ -292,14 +314,18 @@ function createConversationBridge(
         return selected ? conversation : null;
       }),
       rename: vi.fn(() => conversation),
+      delete: deleteConversation,
       current: () => selected ? conversation : null,
     },
+    onDiagnostic: (event) => diagnostics.push(event),
     onStateChange: (state, message) => states.push({ state, ...(message ? { message } : {}) }),
   });
   return {
     bridge,
     voiceSession,
     conversation,
+    deleteConversation,
+    diagnostics,
     mobileCipher: new CallDataCipher(TEST_E2EE_KEY, "mobile"),
   };
 }
@@ -408,6 +434,91 @@ describe("LiveKitVoiceBridge lifecycle", () => {
     });
   });
 
+  it("keeps a GCM call alive when a new audio frame decrypts after a transient false status", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T15:00:00.000Z"));
+    const states: Array<{ state: LiveKitVoiceBridgeState; message?: string }> = [];
+    const {
+      bridge,
+      diagnostics,
+      mobileCipher,
+    } = createConversationBridge(states);
+
+    await bridge.start();
+    const room = liveKit.instances[0];
+    const mobile = { identity: "cyrene-mobile-test" };
+    room.remoteParticipants.set(mobile.identity, mobile);
+    room.emit("participantEncryptionStatusChanged", true, mobile);
+    room.emit(
+      "trackSubscribed",
+      { kind: "audio" },
+      { encryptionType: "gcm" },
+      mobile,
+    );
+    room.emit("participantEncryptionStatusChanged", false, mobile);
+    sendMobileControl(room, mobile, { type: "conversation.list" }, mobileCipher);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(bridge.isActive).toBe(true);
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: "BRIDGE_STOPPED",
+    }));
+    vi.useRealTimers();
+  });
+
+  it("ends a GCM-labelled call when no new audio frame can verify the transient status", async () => {
+    vi.useFakeTimers();
+    const { bridge, diagnostics } = createEncryptedBridge([]);
+    await bridge.start();
+    const room = liveKit.instances[0];
+    const mobile = { identity: "cyrene-mobile-test" };
+    room.remoteParticipants.set(mobile.identity, mobile);
+    room.emit("participantEncryptionStatusChanged", true, mobile);
+    liveKit.pauseNextAudioStream();
+    room.emit(
+      "trackSubscribed",
+      { kind: "audio" },
+      { encryptionType: "gcm" },
+      mobile,
+    );
+    room.emit("participantEncryptionStatusChanged", false, mobile);
+
+    await vi.advanceTimersByTimeAsync(
+      LIVEKIT_E2EE_MEDIA_VERIFICATION_GRACE_MS - 1,
+    );
+    expect(bridge.isActive).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(bridge.isActive).toBe(false);
+    expect(diagnostics).toContainEqual({
+      event: "BRIDGE_STOPPED",
+      cause: "E2EE_PEER_NOT_ENCRYPTED",
+    });
+    vi.useRealTimers();
+  });
+
+  it("rejects a subscribed mobile audio publication that is not GCM", async () => {
+    const { bridge, diagnostics } = createEncryptedBridge([]);
+    await bridge.start();
+    const room = liveKit.instances[0];
+    const mobile = { identity: "cyrene-mobile-test" };
+    room.remoteParticipants.set(mobile.identity, mobile);
+    room.emit("participantEncryptionStatusChanged", true, mobile);
+    room.emit(
+      "trackSubscribed",
+      { kind: "audio" },
+      { encryptionType: "none" },
+      mobile,
+    );
+
+    await vi.waitFor(() => expect(bridge.isActive).toBe(false));
+    expect(diagnostics).toContainEqual({
+      event: "BRIDGE_STOPPED",
+      cause: "E2EE_PEER_NOT_ENCRYPTED",
+    });
+    vi.useRealTimers();
+  });
+
   it("does not drop a microphone track subscribed while desktop startup is still publishing", async () => {
     const states: Array<{ state: LiveKitVoiceBridgeState; message?: string }> = [];
     const { bridge, voiceSession } = createEncryptedBridge(states);
@@ -421,7 +532,7 @@ describe("LiveKitVoiceBridge lifecycle", () => {
     const room = liveKit.instances[0];
     const mobile = { identity: "cyrene-mobile-test" };
     room.remoteParticipants.set(mobile.identity, mobile);
-    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    room.emit("trackSubscribed", { kind: "audio" }, { encryptionType: "gcm" }, mobile);
 
     releasePublishTrack();
     await start;
@@ -440,7 +551,7 @@ describe("LiveKitVoiceBridge lifecycle", () => {
     const mobile = { identity: "cyrene-mobile-test" };
 
     room.remoteParticipants.set(mobile.identity, mobile);
-    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    room.emit("trackSubscribed", { kind: "audio" }, { encryptionType: "gcm" }, mobile);
 
     await vi.waitFor(() => {
       expect(voiceSession.pushAudio.mock.calls.length).toBeGreaterThanOrEqual(20);
@@ -460,7 +571,7 @@ describe("LiveKitVoiceBridge lifecycle", () => {
     const mobile = { identity: "cyrene-mobile-test" };
     room.remoteParticipants.set(mobile.identity, mobile);
     room.emit("participantConnected", mobile);
-    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    room.emit("trackSubscribed", { kind: "audio" }, { encryptionType: "gcm" }, mobile);
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(voiceSession.pushAudio).not.toHaveBeenCalled();
@@ -469,7 +580,7 @@ describe("LiveKitVoiceBridge lifecycle", () => {
       type: "conversation.select",
       conversationId: conversation.id,
     }, mobileCipher);
-    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    room.emit("trackSubscribed", { kind: "audio" }, { encryptionType: "gcm" }, mobile);
 
     await vi.waitFor(() => {
       expect(voiceSession.pushAudio).toHaveBeenCalled();
@@ -505,12 +616,12 @@ describe("LiveKitVoiceBridge lifecycle", () => {
       { type: "turn.mode", mode: "manual" },
       mobileCipher,
     );
-    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    room.emit("trackSubscribed", { kind: "audio" }, { encryptionType: "gcm" }, mobile);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(voiceSession.pushAudio).not.toHaveBeenCalled();
 
     sendMobileControl(room, mobile, { type: "turn.begin" }, mobileCipher);
-    room.emit("trackSubscribed", { kind: "audio" }, {}, mobile);
+    room.emit("trackSubscribed", { kind: "audio" }, { encryptionType: "gcm" }, mobile);
     await vi.waitFor(() => {
       expect(voiceSession.pushAudio).toHaveBeenCalled();
     });
@@ -579,6 +690,33 @@ describe("LiveKitVoiceBridge lifecycle", () => {
     });
     expect(secondPage.conversations).toHaveLength(1);
     expect(secondPage.nextCursor).toBeUndefined();
+  });
+
+  it("deletes an inactive conversation and republishes the catalog", async () => {
+    const {
+      bridge,
+      deleteConversation,
+      mobileCipher,
+    } = createConversationBridge([]);
+    await bridge.start();
+    const room = liveKit.instances[0];
+    const mobile = { identity: "cyrene-mobile-test" };
+    const conversationId = "00000000-0000-4000-8000-000000000001";
+
+    sendMobileControl(room, mobile, {
+      type: "conversation.delete",
+      conversationId,
+    }, mobileCipher);
+
+    await vi.waitFor(() => {
+      expect(deleteConversation).toHaveBeenCalledExactlyOnceWith(conversationId);
+    });
+    const catalog = room.localParticipant.publishData.mock.calls
+      .map(([payload]) => JSON.parse(new TextDecoder().decode(
+        mobileCipher.decrypt(payload as Uint8Array),
+      )) as { type: string; conversations?: unknown[] })
+      .findLast((event) => event.type === "conversation.catalog");
+    expect(catalog?.conversations).toEqual([]);
   });
 
   it("does not leave the call permanently speaking when rtc-node frame capture stalls", async () => {

@@ -39,4 +39,18 @@ describe("VoiceConversationRuntime", () => {
       turnCount: 0,
     }));
   });
+
+  it("deletes inactive conversations but protects the conversation in use", () => {
+    const store = new VoiceConversationStore(
+      fs.mkdtempSync(path.join(os.tmpdir(), "cyrene-voice-runtime-")),
+    );
+    const inactive = store.create("旧对话");
+    const runtime = new VoiceConversationRuntime(store);
+    const active = runtime.create("当前对话");
+
+    expect(runtime.delete(active.id)).toBe("ACTIVE");
+    expect(runtime.delete(inactive.id)).toBe("DELETED");
+    expect(runtime.delete(inactive.id)).toBe("NOT_FOUND");
+    expect(runtime.current()?.id).toBe(active.id);
+  });
 });

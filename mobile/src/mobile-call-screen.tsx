@@ -19,6 +19,7 @@ import {
   type MobileCallPresentation,
 } from "./call-presentation";
 import type { MobileCallTurnMode } from "./call-control-protocol";
+import type { MobileAudioOutput } from "./audio-output-routing";
 
 const CYRENE_AVATAR = require("../assets/cyrene-avatar.png");
 const WAVE_BARS = Array.from({ length: 28 }, (_, index) => ({
@@ -310,6 +311,13 @@ function useCallDuration(active: boolean): string {
   return formatCallDuration(durationMs);
 }
 
+function audioOutputLabel(output?: MobileAudioOutput): string {
+  if (output === "bluetooth") return "蓝牙";
+  if (output === "headset") return "耳机";
+  if (output === "earpiece") return "听筒";
+  return "扬声器";
+}
+
 export function MobileCallScreen({
   characterName,
   characterId,
@@ -318,10 +326,13 @@ export function MobileCallScreen({
   conversationTitle,
   inputMode = "automatic",
   manualTurnOpen = false,
+  audioOutput,
+  showAudioOutputControl = false,
   isMicrophoneEnabled,
   microphoneSignalActive = false,
   showMuteControl = true,
   onToggleMicrophone,
+  onToggleAudioOutput,
   onChangeInputMode,
   onManualTurnAction,
   onHangUp,
@@ -333,10 +344,13 @@ export function MobileCallScreen({
   conversationTitle?: string;
   inputMode?: MobileCallTurnMode;
   manualTurnOpen?: boolean;
+  audioOutput?: MobileAudioOutput;
+  showAudioOutputControl?: boolean;
   isMicrophoneEnabled: boolean;
   microphoneSignalActive?: boolean;
   showMuteControl?: boolean;
   onToggleMicrophone: () => void;
+  onToggleAudioOutput?: () => void;
   onChangeInputMode?: (mode: MobileCallTurnMode) => void;
   onManualTurnAction?: () => void;
   onHangUp: () => void;
@@ -506,6 +520,26 @@ export function MobileCallScreen({
               <Text style={styles.controlLabel}>
                 {isMicrophoneEnabled ? "静音" : "开麦"}
               </Text>
+              </View>
+            ) : null}
+            {showAudioOutputControl && onToggleAudioOutput ? (
+              <View style={styles.controlGroup}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`切换音频输出，当前${audioOutputLabel(audioOutput)}`}
+                  onPress={onToggleAudioOutput}
+                  style={({ pressed }) => [
+                    styles.muteButton,
+                    pressed && styles.pressedButton,
+                  ]}
+                >
+                  <Ionicons
+                    color="#fef7ff"
+                    name={audioOutput === "bluetooth" ? "bluetooth" : "volume-high"}
+                    size={25}
+                  />
+                </Pressable>
+                <Text style={styles.controlLabel}>{audioOutputLabel(audioOutput)}</Text>
               </View>
             ) : null}
             <View style={styles.controlGroup}>

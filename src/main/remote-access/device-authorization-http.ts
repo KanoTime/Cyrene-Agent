@@ -264,6 +264,12 @@ export function createDeviceAuthorizationHttpHandler(options: {
               request.body.idempotencyKey,
               "CALL_IDEMPOTENCY_KEY_INVALID",
             ),
+            replaceOwnedCall: request.body.replaceOwnedCall === undefined
+              ? false
+              : requireBoolean(
+                  request.body.replaceOwnedCall,
+                  "CALL_REPLACE_OWNED_INVALID",
+                ),
           });
           return { status: 200, body: result };
         }

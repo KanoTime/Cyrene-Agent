@@ -80,4 +80,20 @@ describe("VoiceConversationStore", () => {
     expect(store.get("../../outside")).toBeNull();
     expect(store.rename("../../outside", "无效")).toBeNull();
   });
+
+  it("deletes the requested conversation from both the index and durable storage", () => {
+    const root = tempRoot();
+    const store = new VoiceConversationStore(root);
+    const keep = store.create("保留");
+    const remove = store.create("删除");
+
+    expect(store.delete(remove.id)).toBe(true);
+    expect(store.get(remove.id)).toBeNull();
+    expect(store.list()).toEqual([
+      expect.objectContaining({ id: keep.id, title: "保留" }),
+    ]);
+    expect(new VoiceConversationStore(root).get(remove.id)).toBeNull();
+    expect(store.delete(remove.id)).toBe(false);
+    expect(store.delete("../../outside")).toBe(false);
+  });
 });

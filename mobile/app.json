@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cyrene Voice",
     "slug": "cyrene-agent-mobile-test",
-    "version": "1.0.13",
+    "version": "1.0.15",
     "scheme": "cyrene",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.cyrene.agent.voice",
-      "versionCode": 14,
+      "versionCode": 16,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",

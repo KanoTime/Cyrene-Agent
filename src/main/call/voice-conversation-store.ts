@@ -145,6 +145,28 @@ export class VoiceConversationStore {
     return cloneConversation(conversation);
   }
 
+  delete(id: string): boolean {
+    if (!UUID_PATTERN.test(id)) return false;
+    const filePath = this.sessionPath(id);
+    if (!fs.existsSync(filePath)) return false;
+    const stagedPath = `${filePath}.deleting`;
+    const previousIndex = this.index;
+    const nextIndex = this.index.filter((meta) => meta.id !== id);
+    if (nextIndex.length === previousIndex.length) return false;
+
+    fs.renameSync(filePath, stagedPath);
+    try {
+      this.atomicWrite(this.indexPath, nextIndex);
+      this.index = nextIndex;
+      fs.unlinkSync(stagedPath);
+      return true;
+    } catch (error) {
+      if (fs.existsSync(stagedPath)) fs.renameSync(stagedPath, filePath);
+      this.index = previousIndex;
+      throw error;
+    }
+  }
+
   appendTurn(
     id: string,
     input: Pick<VoiceConversationTurn, "userText" | "assistantText">,
