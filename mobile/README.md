@@ -4,6 +4,7 @@ Cyrene Voice 是 Cyrene Agent 的 Android/iOS 一对一前台语音客户端。�
 
 完整架构、代码地图、依赖、从零部署、APK 构建、验证矩阵和 FAQ：
 
+- [移动端语音通话从零部署与排障手册](../docs/mobile-voice-call-setup-runbook.md)
 - [移动端语音通话实现与从零构建指南](../docs/mobile-voice-call-implementation-guide.md)
 - [平台一手资料研究](../docs/research/mobile-voice-call-from-zero-primary-sources-2026-07-27.md)
 
@@ -31,6 +32,8 @@ npx eas-cli@latest build --platform android --profile preview
 
 ## 当前范围
 
-支持长期设备配对、桌面批准、手机公网呼叫、前台一对一语音、静音/挂断、短时重连、权威状态收敛和本地角色语音。桌面必须在线且双方必须能访问控制面与 LiveKit。
+支持长期设备配对、桌面批准、手机公网呼叫、前台一对一语音、静音/挂断、
+自动聆听/手动轮次、命名历史的新建/继续/重命名/删除、蓝牙/扬声器切换、
+短时重连、权威状态收敛和本地角色语音。桌面必须在线且双方必须能访问控制面与 LiveKit。
 
 暂不支持系统级来电、后台保活、视频、群组、多 Owner 或桌面离线云端 Agent。

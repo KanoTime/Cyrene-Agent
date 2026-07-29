@@ -8,6 +8,22 @@
 
 </div>
 
+> [!IMPORTANT]
+>
+> This is a community fork maintained by
+> [Liyang0701](https://github.com/Liyang0701), based on and periodically
+> synchronized with [Playa-0v0/Cyrene-Agent](https://github.com/Playa-0v0/Cyrene-Agent).
+> The upstream desktop agent, character system, DMAE, and related work remain
+> credited to their original authors and contributors. This fork primarily
+> maintains Android remote voice calls, the Cloudflare/LiveKit secure transport,
+> resumable voice conversations, and local compatibility adaptations. It is not
+> an official upstream release; see [LICENSE](./LICENSE) for attribution and terms.
+
+Share the public repository with other users:
+[Liyang0701/Cyrene-Agent](https://github.com/Liyang0701/Cyrene-Agent).
+The private development repository is for personal configuration, device
+verification, and upstream integration, not distribution.
+
 **Cyrene-Agent is a Windows Live2D AI desktop companion centered around Cyrene from _Honkai: Star Rail_.**
 
 > A desktop Live2D conversational Agent built with Electron and TypeScript.  
@@ -24,6 +40,7 @@
 - 🛠️ **Assisted Work (Work)** — Understands requests, invokes tools through a complete Agent workflow, and replies from verified execution results
 - 🧠 **Personalized Memory** — L0 / L1 / L2 layered memory combined with the self-developed DMAE Worldbook for long-term interaction continuity
 - 🔊 **Voice Interaction** — Integrated TTS, ASR, and voice calls so Cyrene can listen and respond
+- 📞 **Android Remote Voice** — Long-lived device pairing, LiveKit media E2EE, automatic/manual turns, resumable named histories, and Bluetooth/speaker routing
 - 🧰 **Rich Tool Ecosystem** — Web search, file processing, document generation, everyday services, music, and MCP extensions
 - 🔌 **Multi-Provider Model Support** — Tiered Structured Output and Function Calling compatibility profiles for different model providers
 - 🎨 **Customizable Appearance** — Multiple interface styles, themes, and chat font options
@@ -111,11 +128,20 @@ After starting the application, **click the system tray icon → Open Settings**
 
 2. **🎙️ TTS Settings** (optional): Select Mossland, MiniMax, MiMo, GPT-SoVITS, or a custom cloud-based speech synthesis service.
 
-3. **🎧 ASR Settings** (optional): To use voice calls, configure the AppKey and AccessKey for Alibaba Cloud real-time ASR.
+3. **🎧 ASR Settings** (optional): Configure a supported local or cloud ASR service for voice calls.
 
 4. **📱 External Channels** (optional): Connect Feishu or WeChat iLink to chat with Cyrene from a mobile device.
 
 Configuration is stored in the application's `<userData>/` directory. Most changes do not require a restart.
+
+### Android Remote Voice Calls
+
+This feature requires your own Cloudflare, LiveKit, and Expo/EAS projects; it
+is not enabled by installing desktop dependencies alone. Follow the Chinese
+[step-by-step setup and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md)
+for deployment checkpoints, and use the
+[implementation guide](docs/mobile-voice-call-implementation-guide.md) for the
+architecture, security boundaries, and upgrade checklist.
 
 ---
 
@@ -508,7 +534,10 @@ _Honkai: Star Rail_, Cyrene, and all related artwork, lore, trademarks, and inte
 
 ## 📄 License
 
-The **source code** in this repository is licensed under the [MIT License](./LICENSE), Copyright (c) 2026 Playa.
+The **source code** is licensed under the [MIT License](./LICENSE). Upstream
+code is Copyright (c) 2026 Playa; additions and modifications in this fork are
+Copyright (c) 2026 Yang Li. The attribution in the license text is preserved
+with the source.
 
 The MIT License applies only to the source code in this repository. It does not apply to the character, Live2D model, or artwork assets.
 

@@ -8,7 +8,17 @@
 
 </div>
 
-> **私有开发仓说明**：`Liyang0701/Cyrene-agent-private` 用于保存个人本地开发与适配版本；后续从官方 `Playa-0v0/Cyrene-Agent` 拉取更新，并在本仓完成兼容、验证和合入。
+> [!IMPORTANT]
+>
+> 这是由 [Liyang0701](https://github.com/Liyang0701) 维护的社区 Fork，基于
+> [Playa-0v0/Cyrene-Agent](https://github.com/Playa-0v0/Cyrene-Agent) 持续同步和二次开发。
+> 上游桌面 Agent、角色系统与 DMAE 等成果归原作者及贡献者；本 Fork 主要维护 Android
+> 公网语音通话、Cloudflare/LiveKit 安全链路、可续聊语音历史及本地兼容适配。
+> 它不是上游官方发行版，完整署名和许可见 [LICENSE](./LICENSE)。
+
+面向其他使用者应分享公开仓库：
+[Liyang0701/Cyrene-Agent](https://github.com/Liyang0701/Cyrene-Agent)。
+私有开发仓仅用于个人配置、实机验证和上游合并，不作为发行入口。
 
 **Cyrene-Agent 是一个以《崩坏：星穹铁道》昔涟为核心角色的 Windows Live2D AI 桌面伴侣。**
 
@@ -26,6 +36,7 @@
 - 🛠️ **辅助工作（Work）** — 通过完整 Agent 工作流理解请求、调用工具，并根据真实执行结果回复
 - 🧠 **个性化记忆** — L0 / L1 / L2 分层记忆，结合自研 DMAE Worldbook 沉淀长期互动
 - 🔊 **语音交互** — 集成 TTS、ASR 与语音通话，让昔涟能够听见并回应用户
+- 📞 **Android 公网语音** — 长期设备配对、LiveKit 媒体 E2EE、自动/手动轮次、可命名续聊历史与蓝牙/扬声器切换
 - 🧰 **丰富工具生态** — 覆盖联网搜索、文件处理、文档生成、生活服务、音乐与 MCP 扩展
 - 🔌 **多模型厂商适配** — 针对不同厂商提供分级 Structured Output 与 Function Calling 兼容方案
 - 🎨 **个性化外观** — 支持多套界面风格、主题外观与聊天字体选择
@@ -118,6 +129,13 @@ npm run dev
 4. **📱 外部渠道**（可选）：根据需要连接飞书或微信 iLink，在手机端与 Cyrene 对话。
 
 相关配置会保存在应用的 `<userData>/` 目录中，修改后通常无需重启应用。
+
+### Android 公网语音通话
+
+这部分不是安装桌面依赖后自动启用的功能，还需要自己的 Cloudflare、LiveKit 与
+Expo/EAS 项目。第一次部署建议严格按[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
+逐关验证；需要理解安全边界、代码结构和升级保护项时，再阅读
+[实现与从零构建指南](docs/mobile-voice-call-implementation-guide.md)。
 
 ---
 
@@ -516,7 +534,9 @@ dist/renderer/        # Vite 构建产物（构建产物 gitignore，产品资�
 
 ## 📄 许可证
 
-本仓库的**源代码**遵循 [MIT License](./LICENSE)，Copyright (c) 2026 Playa。
+本仓库的**源代码**遵循 [MIT License](./LICENSE)。上游代码 Copyright (c) 2026
+Playa；本 Fork 的新增与修改部分 Copyright (c) 2026 Yang Li。许可文本中的署名
+随源码一并保留。
 MIT 仅约束本仓库的源代码，不适用于角色、Live2D 模型与美术资产。
 
 角色 IP（《崩坏：星穹铁道》"昔涟" 等）、Live2D 模型（`models/cyrene/`）、
