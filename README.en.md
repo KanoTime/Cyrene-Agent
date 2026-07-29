@@ -80,11 +80,17 @@ Android Cyrene Voice
 > enabled. Direct access without the VPN is not a supported path on either 5G
 > or Wi-Fi.**
 
-Start with the
-[step-by-step deployment and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md).
-For the architecture, dependencies, security boundaries, and upstream-merge
-checklist, read the
-[mobile voice-call implementation guide](docs/mobile-voice-call-implementation-guide.md).
+### Read the matching guide before using mobile voice
+
+| Your situation | Start here |
+| --- | --- |
+| You already cloned `Playa-0v0/Cyrene-Agent` | **[Add mobile voice to an existing upstream clone](docs/mobile-voice-call-add-to-upstream-clone.md)** |
+| You are deploying everything from scratch | **[Step-by-step deployment and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md)** |
+| You maintain code, upgrade dependencies, or merge upstream | [Mobile voice-call implementation guide](docs/mobile-voice-call-implementation-guide.md) |
+
+Mobile voice is not a standalone screen that works by copying `mobile/`.
+Complete the desktop, Cloudflare, LiveKit, EAS APK, pairing, and VPN steps in
+the matching guide before testing.
 
 ---
 
@@ -202,9 +208,12 @@ Configuration is stored in the application's `<userData>/` directory. Most chang
 
 This feature requires your own Cloudflare, LiveKit, and Expo/EAS projects; it
 is not enabled by installing desktop dependencies alone. The Android phone must
-keep a working VPN enabled on both 5G and Wi-Fi. Follow the Chinese
-[step-by-step setup and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md)
-for deployment checkpoints, and use the
+keep a working VPN enabled on both 5G and Wi-Fi. If you already cloned
+`Playa-0v0/Cyrene-Agent`, first follow
+[Add mobile voice to an existing upstream clone](docs/mobile-voice-call-add-to-upstream-clone.md).
+For a new deployment, follow the Chinese
+[step-by-step setup and troubleshooting runbook](docs/mobile-voice-call-setup-runbook.md).
+Use the
 [implementation guide](docs/mobile-voice-call-implementation-guide.md) for the
 architecture, security boundaries, and upgrade checklist.
 

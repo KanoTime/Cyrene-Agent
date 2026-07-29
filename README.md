@@ -69,9 +69,16 @@ Android Cyrene Voice
 > **当前已验证部署要求 Android 手机开启 VPN；无论底层网络是 5G 还是 Wi-Fi，
 > 关闭 VPN 都不属于当前支持的可用链路。**
 
-第一次部署请从[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
-开始；理解实现、依赖、安全边界和主仓合并保护项请阅读
-[移动端语音通话实现指南](docs/mobile-voice-call-implementation-guide.md)。
+### 使用移动语音前，请先选择对应指南
+
+| 你的情况 | 必须先阅读 |
+| --- | --- |
+| 已经克隆了上游 `Playa-0v0/Cyrene-Agent` | **[已有主仓代码：接入移动端语音功能](docs/mobile-voice-call-add-to-upstream-clone.md)** |
+| 第一次从零部署整个项目 | **[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)** |
+| 需要维护代码、升级依赖或合并上游 | [移动端语音通话实现指南](docs/mobile-voice-call-implementation-guide.md) |
+
+> 移动语音不是只复制 `mobile/` 就能运行的附加页面。请完成对应指南中的桌面端、
+> Cloudflare、LiveKit、EAS APK、配对和 VPN 步骤后再测试。
 
 ---
 
@@ -188,9 +195,12 @@ npm run dev
 ### Android 公网语音通话
 
 这部分不是安装桌面依赖后自动启用的功能，还需要自己的 Cloudflare、LiveKit 与
-Expo/EAS 项目。当前手机端在 5G 和 Wi-Fi 下都必须开启可用 VPN。第一次部署建议
-严格按[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
-逐关验证；需要理解安全边界、代码结构和升级保护项时，再阅读
+Expo/EAS 项目。当前手机端在 5G 和 Wi-Fi 下都必须开启可用 VPN。已经克隆上游
+`Playa-0v0/Cyrene-Agent` 的用户，必须先按
+[已有主仓代码：接入移动端语音功能](docs/mobile-voice-call-add-to-upstream-clone.md)
+操作；第一次从零部署则按
+[移动端语音通话从零部署与排障手册](docs/mobile-voice-call-setup-runbook.md)
+逐关验证。需要理解安全边界、代码结构和升级保护项时，再阅读
 [实现与从零构建指南](docs/mobile-voice-call-implementation-guide.md)。
 
 ---

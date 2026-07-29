@@ -9,6 +9,7 @@ Cyrene Voice 是 Cyrene Agent 的 Android/iOS 一对一前台语音客户端。�
 
 完整架构、代码地图、依赖、从零部署、APK 构建、验证矩阵和 FAQ：
 
+- [已有主仓代码：接入移动端语音功能](../docs/mobile-voice-call-add-to-upstream-clone.md)
 - [移动端语音通话从零部署与排障手册](../docs/mobile-voice-call-setup-runbook.md)
 - [移动端语音通话实现与从零构建指南](../docs/mobile-voice-call-implementation-guide.md)
 - [平台一手资料研究](../docs/research/mobile-voice-call-from-zero-primary-sources-2026-07-27.md)
