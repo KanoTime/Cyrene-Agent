@@ -47,6 +47,22 @@ control-plane Worker. `NODE_USE_ENV_PROXY=1` lets Node fetch use the standard
 `HTTP_PROXY`/`HTTPS_PROXY` settings; the WebSocket client uses the same HTTPS
 proxy when the target is `wss:`.
 
+For an independent raw-byte audit without TLS interception, place the blind
+forwarder between the endpoint and an explicit HTTP proxy:
+
+```sh
+ISSUE69_CAPTURE_DIRECTORY=/path/to/isolated-temporary-directory \
+node prototype/issue69-relay/capture-forwarder.mjs
+```
+
+The forwarder listens on `127.0.0.1:7891`, forwards to `127.0.0.1:7890`, and
+records at most 8 MiB in each direction for every TCP connection. It never
+terminates TLS or logs decoded HTTP/WebSocket content. Use synthetic sentinel
+data only, search the raw files for the exact sentinel, run token and protocol
+markers, then permanently delete the capture directory. The listen/upstream
+addresses, ports and byte limit can be changed with the corresponding
+`ISSUE69_CAPTURE_*` environment variables.
+
 Primary sources:
 
 - [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)

@@ -3,7 +3,7 @@
 > 日期：2026-07-30
 > 对应议题：[#69](https://github.com/KanoTime/Cyrene-Agent/issues/69)
 > 分支：`codex/issue69-relay-prototype`（throwaway，不得合入正式实现）
-> 状态：真实 Android 核心链路、攻击用例、Doze/App Standby、50 次目标代理路径重连与 Worker tail 已通过；手机原生 VPN/多网络、可见通知和账号 Analytics 仍待补证
+> 状态：真实 Android 核心链路、攻击用例、Doze/App Standby、50 次目标代理路径重连、Worker tail 与盲 TLS 字节流审计已通过；手机原生 VPN/多网络、可见通知和账号 Analytics 仍待补证
 > 数据边界：只使用固定假设备、throwaway key 和唯一 sentinel；没有接入生产 Device Credential、角色内容、对话、文档或配置
 
 ## 阶段结论
@@ -139,9 +139,9 @@ serialized attachment 在连接健康时跨 hibernation 存活，单 attachment 
 - audit storage 只有 `metrics` 与 `revoked`；唯一 sentinel 和 ciphertext
   均未出现，attachment 也只含 ticket 路由元数据和最后 epoch/sequence。
 
-这只证明本原型代码、实时 Worker tail、DO storage 和端点日志的边界。
-账号 Analytics 与独立网络抓包仍未补齐；在这些证据齐全前不能宣称
-“零明文控制面”全部完成。
+这只证明本原型代码、实时 Worker tail、DO storage、端点日志和当前
+ADB→显式代理路径的盲 TLS 字节流边界。账号 Analytics 与手机原生网络路径
+仍未补齐；在这些证据齐全前不能宣称“零明文控制面”全部完成。
 
 ### 5. 真实 Android 跨端与攻击用例
 
@@ -211,6 +211,36 @@ Shark Cloud `127.0.0.1:7890`，再访问隔离 Worker。测试结束后已删除
 
 端点 UI 与桌面假端点按设计可见解密后的测试明文；“零明文”只约束 relay、
 控制面持久化和非端点日志，不能误写成端点也看不到正文。
+
+### 9. 独立盲 TLS 字节流审计
+
+由于 macOS BPF 设备要求管理员权限，本轮没有改权限或索要密码，而是在
+Android/桌面与 Shark Cloud 显式 HTTP proxy 之间加入独立 Node TCP
+forwarder。它只双向复制原始字节到 mode 0600 文件，每方向最多 8 MiB，不
+终止 TLS、不导入 HPKE key，也不知道 sentinel 或 run token。
+
+同一记录路径完成一轮 Android→桌面解密与桌面→Android E2EE ACK。记录结果：
+
+- 362 个方向文件，其中 233 个非空；总计 276,255 bytes，最大单文件
+  9,827 bytes，没有触发 8 MiB 截断；
+- 8 个文件可找到实际
+  `cyrene-issue69-e2ee-relay-prototype.cyrene-agent.workers.dev:443` CONNECT
+  host，证明记录器确实位于测试线路中；
+- 精确搜索 Android sentinel、operation ID、ACK 固定文本、Keychain run
+  token、`x-prototype-run-token` 与 `ticket=`，六类均为 0 命中；
+- capture set 聚合 SHA-256 为
+  `0c98fc6eb0e675eab82482c2d52dc047f126a96a08c32287121a15fd1a29084c`；
+- 末次 Worker audit 为 3 次 ticket/连接、3 个入站 frame、2 个转发、
+  `activeSockets=0`，storage 只有 metrics。
+
+捕获目录 mode 0700；审计后已永久删除全部 362 个原始方向文件和临时截图，
+没有把抓包、token 或测试明文提交到 Git。该证据证明当前 ADB→Shark Cloud
+线路上的外部观察者只能看到 CONNECT host 与 TLS ciphertext；它不是手机原生
+VPN/5G 接口的 kernel PCAP，不能替代剩余网络门槛。
+
+显式代理曾在空闲期提前关闭一个桌面 WSS，手机得到 `TARGET_OFFLINE`；桌面
+取得新 ticket 后立即重连，下一条消息和 ACK 成功。这再次证明 socket
+存活只能作为优化，正式事务必须依赖新 ticket/new epoch 与状态收敛。
 
 ## 成本投影
 
@@ -286,14 +316,14 @@ prekey/group epoch、恢复和多成员状态，改变“桌面权威、控制�
    错误显示“已应用”。本 throwaway relay 没有 FCM/通知能力，未越界实现。
 2. **手机原生网络：** 手机自身 VPN、目标 Wi-Fi、5G 和外部 Wi-Fi 的连接与
    恢复；前台成功率 ≥98%，连接 p95 ≤5 秒，30 秒恢复 p95 ≤10 秒。本轮
-   50/50 仅覆盖 ADB 代理到 Shark Cloud 的路径，不能代替这些网络。
-3. **完整零明文审计：** 账号 Analytics 和独立抓包仍需搜索/核对；实时
-   Worker tail、DO storage、Android logcat 与 Metro 已通过。
-4. **账号成本：** Cloudflare Dashboard 当前停在登录页，未尝试读取或提交
-   登录凭据；仍需读取该 Worker 的真实 request、duration/GB-s，用账号已有
-   Worker 合并投影；每月 >¥20 则失败。
-5. **生命周期：** 全部门槛结束后删除 Worker、DO namespace/version 和本机
+   50/50 和盲 TLS capture 仅覆盖 ADB 代理到 Shark Cloud 的路径，不能代替
+   这些网络；至少一条手机原生路径仍须重复外部字节审计。
+3. **账号日志与成本：** Cloudflare Dashboard 当前停在登录页，未尝试读取
+   或提交登录凭据；仍需读取该 Worker 的真实 request、duration/GB-s，用
+   账号已有 Worker 合并投影，并搜索账号 Analytics/异常字段；每月 >¥20
+   则失败。
+4. **生命周期：** 全部门槛结束后删除 Worker、DO namespace/version 和本机
    Keychain prototype token；在证据确认前暂不删除。
 
-以上五项全部通过后，才能在 #69 发布 Resolution 并关闭；本 throwaway
+以上四项全部通过后，才能在 #69 发布 Resolution 并关闭；本 throwaway
 分支不得直接合入正式功能代码。
