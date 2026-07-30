@@ -215,6 +215,13 @@ DNS 将隔离 Worker 主机解析到与 Cloudflare 无关的 `199.59.148.102`，
 不是 Android/HPKE/Worker 失败，而是当前国内裸 5G 路径的 DNS 门槛失败；必须
 用手机原生 VPN 重新验证，不能拿 ADB→Mac 代理结果替代。
 
+只读查询确认手机已安装 Shark Cloud `com.shark.gura`，并声明原生
+`android.net.VpnService`；当前没有 active VPN、always-on VPN 或 lockdown。
+直接启动以及临时借助 ADB→Mac 显式代理完成初始化两种方式都停在启动画面，
+没有出现连接控制，也没有建立 `TRANSPORT_VPN`。本轮没有清应用数据、重装、
+读取账号信息或直接调用内部 VPN service；引导代理随后已删除。继续手机原生
+VPN 门槛前，需要 Owner 先让该客户端正常进入主页并可连接。
+
 ### 9. 实时日志与 sentinel 审计
 
 在 Cloudflare `wrangler tail` 0.999 sampling 下另跑一轮固定 tail sentinel
@@ -334,7 +341,8 @@ prekey/group epoch、恢复和多成员状态，改变“桌面权威、控制�
    恢复；前台成功率 ≥98%，连接 p95 ≤5 秒，30 秒恢复 p95 ≤10 秒。本轮
    50/50 和盲 TLS capture 仅覆盖 ADB 代理到 Shark Cloud 的路径，不能代替
    这些网络；裸 5G 已因 DNS 污染明确失败，至少一条手机原生 VPN 路径仍须
-   重跑 50 次计时与外部字节审计。
+   重跑 50 次计时与外部字节审计。现有手机 Shark Cloud 客户端停在启动页，
+   需 Owner 先恢复其正常主页/连接能力。
 3. **账号日志与成本：** Cloudflare Dashboard 当前停在登录页，未尝试读取
    或提交登录凭据；仍需读取该 Worker 的真实 request、duration/GB-s，用
    账号已有 Worker 合并投影，并搜索账号 Analytics/异常字段；每月 >¥20
