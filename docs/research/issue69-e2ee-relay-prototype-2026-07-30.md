@@ -3,7 +3,7 @@
 > 日期：2026-07-30
 > 对应议题：[#69](https://github.com/KanoTime/Cyrene-Agent/issues/69)
 > 分支：`codex/issue69-relay-prototype`（throwaway，不得合入正式实现）
-> 状态：真实 Android 核心链路、攻击用例、Doze/App Standby、50 次目标代理路径重连、Worker tail 与盲 TLS 字节流审计已通过；手机原生 VPN/多网络、可见通知和账号 Analytics 仍待补证
+> 状态：真实 Android 核心链路、攻击用例、Doze/App Standby、50 次目标代理路径计时、Worker tail 与盲 TLS 字节流审计已通过；裸 5G 因 DNS 污染失败，手机原生 VPN/多网络、可见通知和账号 Analytics 仍待补证
 > 数据边界：只使用固定假设备、throwaway key 和唯一 sentinel；没有接入生产 Device Credential、角色内容、对话、文档或配置
 
 ## 阶段结论
@@ -187,19 +187,35 @@ Shark Cloud `127.0.0.1:7890`，再访问隔离 Worker。测试结束后已删除
 与全部 ADB reverse，Shark Cloud 已回到“连接”状态，macOS HTTP/HTTPS/SOCKS
 系统代理均为禁用。
 
-- 预热后的基线为 `ticketsIssued=13`、`ticketsConsumed=13`、
-  `socketsAccepted=13`；
-- 5 组、每组 10 次 Android UI 连接/断开后，三项计数同步到 63；即 50/50
-  ticket 被签发、单次消费并接受为 WebSocket，没有半消费或失败连接；
+- 第一轮手工门槛的预热基线为 `ticketsIssued=13`、`ticketsConsumed=13`、
+  `socketsAccepted=13`；5 组、每组 10 次 Android UI 连接/断开后，三项
+  计数同步到 63，即 50/50 ticket 被签发、单次消费并接受为 WebSocket；
 - 快速关闭造成服务端活动表延迟收敛：峰值 37，20 秒后为 21，随后继续自然
   清理；撤销前只剩本轮新连接，撤销后 `activeSockets=0`；
+- 为避免用服务端计数倒推延迟，第二轮在 Android 原型内加入单调时钟门槛，
+  每次从 ticket POST 前开始计时，到 WebSocket `open` 为止，再主动关闭后
+  进入下一次；50/50 成功，`p50=407ms`、`p95=707ms`、`max=1140ms`，
+  失败 0；
+- 对应 Worker 独立计数为 `ticketsIssued=50`、`ticketsConsumed=50`、
+  `socketsAccepted=50`、`activeSockets=0`，与 Android 结果完全一致；
 - 这证明“真机 Android + ADB 代理 + 当前 Shark Cloud 节点”路径的重连稳定性，
   **不等于**手机自身 VPN、Wi-Fi↔5G handoff 或外部 Wi-Fi 门槛。
 
-本次未逐连接采集客户端开始时间，不能给出可信 p95；不得用 Worker ticket
-计数倒推连接延迟。
+Android 计时包含 ticket 与 WebSocket 建连，但不包含桌面重新上线和业务状态
+收敛；后两者仍须分别验证 30 秒恢复 p95。
 
-### 8. 实时日志与 sentinel 审计
+### 8. 裸 5G 失败证据
+
+手机 Wi-Fi 暂时关闭后，系统报告 active default network 为已验证、非漫游、
+非 VPN 的 NR cellular transport。单连接探针没有向 Worker 签发 ticket；手机
+DNS 将隔离 Worker 主机解析到与 Cloudflare 无关的 `199.59.148.102`，因此没有
+启动会连续超时的 50 次循环。
+
+测试后已重新启用 Wi-Fi，未更改默认 SIM、漫游、VPN 或其他网络配置。该结果
+不是 Android/HPKE/Worker 失败，而是当前国内裸 5G 路径的 DNS 门槛失败；必须
+用手机原生 VPN 重新验证，不能拿 ADB→Mac 代理结果替代。
+
+### 9. 实时日志与 sentinel 审计
 
 在 Cloudflare `wrangler tail` 0.999 sampling 下另跑一轮固定 tail sentinel
 的双端解密。处理器只统计原始流，不输出 URL 或一次性 ticket：
@@ -212,7 +228,7 @@ Shark Cloud `127.0.0.1:7890`，再访问隔离 Worker。测试结束后已删除
 端点 UI 与桌面假端点按设计可见解密后的测试明文；“零明文”只约束 relay、
 控制面持久化和非端点日志，不能误写成端点也看不到正文。
 
-### 9. 独立盲 TLS 字节流审计
+### 10. 独立盲 TLS 字节流审计
 
 由于 macOS BPF 设备要求管理员权限，本轮没有改权限或索要密码，而是在
 Android/桌面与 Shark Cloud 显式 HTTP proxy 之间加入独立 Node TCP
@@ -317,7 +333,8 @@ prekey/group epoch、恢复和多成员状态，改变“桌面权威、控制�
 2. **手机原生网络：** 手机自身 VPN、目标 Wi-Fi、5G 和外部 Wi-Fi 的连接与
    恢复；前台成功率 ≥98%，连接 p95 ≤5 秒，30 秒恢复 p95 ≤10 秒。本轮
    50/50 和盲 TLS capture 仅覆盖 ADB 代理到 Shark Cloud 的路径，不能代替
-   这些网络；至少一条手机原生路径仍须重复外部字节审计。
+   这些网络；裸 5G 已因 DNS 污染明确失败，至少一条手机原生 VPN 路径仍须
+   重跑 50 次计时与外部字节审计。
 3. **账号日志与成本：** Cloudflare Dashboard 当前停在登录页，未尝试读取
    或提交登录凭据；仍需读取该 Worker 的真实 request、duration/GB-s，用
    账号已有 Worker 合并投影，并搜索账号 Analytics/异常字段；每月 >¥20

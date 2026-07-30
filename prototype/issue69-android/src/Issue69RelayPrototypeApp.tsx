@@ -33,6 +33,8 @@ export default function Issue69RelayPrototypeApp(): React.JSX.Element {
   const [runToken, setRunToken] = useState("");
   const [connection, setConnection] = useState("未连接");
   const [fingerprint, setFingerprint] = useState("尚未生成");
+  const [cycleSummary, setCycleSummary] = useState("尚未运行");
+  const [cycleRunning, setCycleRunning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [sentinel] = useState(() => `CYRENE_ISSUE69_ANDROID_${Crypto.randomUUID()}`);
   const socketRef = useRef<WebSocket | null>(null);
@@ -211,6 +213,106 @@ export default function Issue69RelayPrototypeApp(): React.JSX.Element {
     socketRef.current = null;
   }, []);
 
+  const runConnectionCycles = useCallback(async () => {
+    if (cycleRunning) return;
+    setCycleRunning(true);
+    setCycleSummary("运行中：0/50");
+    const durations: number[] = [];
+    const failures: string[] = [];
+    let attempted = 0;
+    let consecutiveFailures = 0;
+
+    for (let index = 0; index < 50; index += 1) {
+      attempted = index + 1;
+      const startedAt = performance.now();
+      let cycleSocket: WebSocket | null = null;
+      try {
+        const abortController = new AbortController();
+        const fetchTimeout = setTimeout(() => abortController.abort(), 10_000);
+        const response = await fetch(
+          `${normalizedOrigin}/prototype/data/connect-ticket`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-prototype-run-token": runToken.trim(),
+            },
+            body: JSON.stringify({
+              ownerId: OWNER_ID,
+              deviceId: MOBILE_ID,
+              peerDeviceId: DESKTOP_ID,
+              deviceType: "MOBILE",
+            }),
+            signal: abortController.signal,
+          },
+        ).finally(() => clearTimeout(fetchTimeout));
+        const body = await response.json() as { ticket?: string; code?: string };
+        if (!response.ok || !body.ticket) {
+          throw new Error(body.code ?? `HTTP_${response.status}`);
+        }
+
+        const wsOrigin = normalizedOrigin.replace(/^http/u, "ws");
+        cycleSocket = new WebSocket(
+          `${wsOrigin}/prototype/data/ws?ticket=${encodeURIComponent(body.ticket)}`,
+        );
+        await new Promise<void>((resolve, reject) => {
+          const connectTimeout = setTimeout(() => {
+            reject(new Error("CONNECT_TIMEOUT"));
+          }, 10_000);
+          cycleSocket!.onopen = () => {
+            clearTimeout(connectTimeout);
+            resolve();
+          };
+          cycleSocket!.onerror = () => {
+            clearTimeout(connectTimeout);
+            reject(new Error("WEBSOCKET_ERROR"));
+          };
+          cycleSocket!.onclose = (event) => {
+            clearTimeout(connectTimeout);
+            reject(new Error(`CLOSED_${event.code}`));
+          };
+        });
+        durations.push(performance.now() - startedAt);
+        consecutiveFailures = 0;
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
+        consecutiveFailures += 1;
+      } finally {
+        if (cycleSocket) {
+          const socketToClose = cycleSocket;
+          const closed = new Promise<void>((resolve) => {
+            const closeTimeout = setTimeout(resolve, 500);
+            socketToClose.onclose = () => {
+              clearTimeout(closeTimeout);
+              resolve();
+            };
+          });
+          socketToClose.close(1000, "ANDROID_CYCLE_COMPLETE");
+          await closed;
+        }
+      }
+      setCycleSummary(`运行中：${index + 1}/50；成功 ${durations.length}`);
+      if (consecutiveFailures >= 3) break;
+    }
+
+    const sorted = [...durations].sort((left, right) => left - right);
+    const percentile = (ratio: number) => sorted[Math.max(
+      0,
+      Math.ceil(sorted.length * ratio) - 1,
+    )] ?? 0;
+    const result = [
+      `完成：${durations.length}/${attempted}`,
+      `p50=${Math.round(percentile(0.5))}ms`,
+      `p95=${Math.round(percentile(0.95))}ms`,
+      `max=${Math.round(sorted.at(-1) ?? 0)}ms`,
+      failures.length > 0 ? `失败=${failures.length}（${failures[0]}）` : "失败=0",
+      attempted < 50 ? "连续失败，已提前停止" : "目标=50",
+    ].join("；");
+    setCycleSummary(result);
+    append(`连接循环：${result}`);
+    setCycleRunning(false);
+  }, [append, cycleRunning, normalizedOrigin, runToken]);
+
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" />
@@ -237,6 +339,7 @@ export default function Issue69RelayPrototypeApp(): React.JSX.Element {
         <View style={styles.state}>
           <Text style={styles.stateText}>状态：{connection}</Text>
           <Text style={styles.stateText}>Mobile 指纹：{fingerprint}</Text>
+          <Text selectable style={styles.stateText}>50 次连接：{cycleSummary}</Text>
           <Text selectable style={styles.sentinel}>Sentinel：{sentinel}</Text>
         </View>
         <View style={styles.buttons}>
@@ -248,6 +351,11 @@ export default function Issue69RelayPrototypeApp(): React.JSX.Element {
           <Button title="6. 篡改密文" onPress={() => { void send("tamper"); }} />
           <Button title="7. 旧 Epoch" onPress={() => { void send("old-epoch"); }} />
           <Button title="8. 重放" onPress={replay} />
+          <Button
+            title={cycleRunning ? "9. 连接计时运行中" : "9. 50 次连接计时"}
+            disabled={cycleRunning}
+            onPress={() => { void runConnectionCycles(); }}
+          />
           <Button title="断开" color="#b44" onPress={disconnect} />
         </View>
         <Text style={styles.logTitle}>端点可见状态</Text>
