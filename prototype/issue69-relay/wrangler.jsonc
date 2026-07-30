@@ -1,0 +1,25 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cyrene-issue69-e2ee-relay-prototype",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-29",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ISSUE69_RELAY",
+        "class_name": "Issue69RelayDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Issue69RelayDurableObject"]
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

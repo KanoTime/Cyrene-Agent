@@ -1,0 +1,26 @@
+{
+  "name": "@cyrene/issue69-android-prototype",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "android:check": "node ../../mobile/scripts/run-android.mjs --check",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "expo": "~56.0.16",
+    "expo-build-properties": "~56.0.24",
+    "expo-crypto": "~56.0.4",
+    "expo-status-bar": "~56.0.4",
+    "hpke-js": "1.8.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-nitro-modules": "0.36.3",
+    "react-native-quick-base64": "3.0.1",
+    "react-native-quick-crypto": "1.1.6"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  }
+}

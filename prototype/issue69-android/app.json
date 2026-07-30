@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Cyrene Relay Proto",
+    "slug": "cyrene-issue69-relay-prototype",
+    "version": "0.0.1",
+    "scheme": "cyrene-issue69",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "android": {
+      "package": "com.cyrene.prototype.issue69",
+      "versionCode": 1,
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "react-native-quick-crypto",
+      "expo-build-properties"
+    ]
+  }
+}
