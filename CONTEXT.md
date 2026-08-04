@@ -85,7 +85,7 @@ The evidence-preserving process for building a Character Corpus from official ma
 _Avoid_: Unverified data extraction, repost archive, committed full-story capture
 
 **Corpus Completion Threshold（语料完成门槛）**:
-The coverage and review standard that opens the Character Corpus Gate. Hoshino requires all accessible key personality nodes from Abydos chapters 1–3, all normal-form personal/relationship stories and available home, login, bond, birthday, combat, and seasonal voices; at least 150 manually verified Japanese utterances, 60 official Chinese pairs, five source categories, and minimum samples across relaxed, intimate, caring, peer, burden, help-acceptance, protective, trauma, emotional-recovery, and practical-task contexts. Natural source scarcity is documented rather than filled with weak or unverified material.
+The coverage and review standard that opens the Character Corpus Gate. Hoshino’s first candidate gate requires the accessible key personality nodes from Abydos chapters 1–3, at least 150 manually verified Japanese utterances, 60 official Chinese pairs, five source categories, and minimum samples across relaxed, intimate, caring, peer, burden, help-acceptance, protective, trauma, emotional-recovery, and practical-task contexts. Normal-form personal/relationship stories and additional home, login, bond, birthday, combat, and seasonal voices remain high-value evidence enhancements after the gate passes; missing material is documented rather than filled with weak or unverified material, and does not block the first evidence-backed candidate.
 _Avoid_: Raw line count, single-source corpus, unreviewed OCR quota
 
 **Soul Core（灵魂核心）**:
