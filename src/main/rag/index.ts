@@ -120,6 +120,17 @@ export async function initRAG(
   );
 }
 
+/** 受控退出（before-quit 链路）时调用：把防抖中的记忆数据刷盘。 */
+export async function flushRAGStore(): Promise<void> {
+  await Promise.all([store?.flush(), documentStore?.flush()]);
+}
+
+/** 会话紧急结束（Windows session-end）时调用：同步落盘，不等待异步 I/O。 */
+export function flushRAGStoreSync(): void {
+  store?.flushSync();
+  documentStore?.flushSync();
+}
+
 // ── Switch embedding model (hot-swap) ──
 export async function switchEmbeddingModel(modelKey: string): Promise<{ ok: boolean; clearedEntries: number; error?: string }> {
   try {
@@ -168,7 +179,7 @@ export async function switchEmbeddingModel(modelKey: string): Promise<{ ok: bool
       const metaPath = path.join(dataDir, "memory-store-meta.json");
       if (fs.existsSync(storePath)) {
         clearedEntries += entries.length;
-        fs.writeFileSync(storePath, "[]", "utf8");
+        current.clearForRebuild();
       }
       if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
       return new JsonVectorStore(dataDir);
@@ -338,6 +349,22 @@ export function getPermanentWorldbookEntries(): string[] {
   return worldbook.getPermanentEntries();
 }
 
+// ── Worldbook 关键词直查：后台轻量调用（Moments 反应/发帖等）用，不经 DMAE 状态机 ──
+// 文本命中任一触发词即注入该条目，调用方自行决定合并常驻条目。
+export function getKeywordMatchedWorldbookEntries(text: string): string[] {
+  if (!worldbook) return [];
+  const t = text ?? "";
+  if (!t.trim()) return [];
+  return worldbook.getEntries()
+    .filter((e) => e.enabled && !e.permanent && e.keywords.length > 0)
+    .filter((e) => e.keywords.some((kw) => t.includes(kw)))
+    .sort((a, b) => b.priority - a.priority)
+    .map((e) => {
+      const title = e.id.replace(/^wb_[^_]+_/, "").replace(/_/g, " ");
+      return `【${title}】\n${e.content}`;
+    });
+}
+
 // ── Import document ──
 export type ImportedDocumentResult = {
   importId: string;
@@ -364,12 +391,14 @@ export async function appendPreparedDocumentBatch(
   prepared: PreparedDocumentEmbedding[],
 ): Promise<void> {
   if (!documentStore) throw new Error("Global Document Library not initialized");
-  documentStore.addPreparedBatch(prepared.map((entry) => ({
+  const added = documentStore.addPreparedBatch(prepared.map((entry) => ({
     text: entry.text,
     embedding: entry.embedding,
     source: "imported_doc",
     metadata: { fileName, chunkIndex: entry.chunkIndex, importId },
   })));
+  // 后台预热新条目的 BM25 分词，避免首次检索才付出冷启动成本；不阻塞导入返回
+  void documentRetriever?.warmupBm25Tokens(added);
 }
 
 export async function importPreparedDocumentForTurn(
@@ -382,6 +411,8 @@ export async function importPreparedDocumentForTurn(
     : Math.random().toString(36).slice(2, 8);
   const importId = `import-${Date.now()}-${id}`;
   await appendPreparedDocumentBatch(fileName, importId, prepared);
+  // 导入是高成本操作（全部 chunk 已完成嵌入），立即落盘保证持久性
+  await documentStore.flush();
   return { importId, chunkCount: prepared.length };
 }
 
@@ -399,11 +430,15 @@ export async function importDocumentForTurn(
     : Math.random().toString(36).slice(2, 8);
   const importId = `import-${Date.now()}-${id}`;
   control?.onProgress?.({ status: "embedding", completedChunks: 0, totalChunks: chunks.length });
-  await documentStore.addBatch(
+  const added = await documentStore.addBatch(
     chunks.map((c) => ({ text: c.text, source: "imported_doc", metadata: { fileName, chunkIndex: c.index, importId } })),
     provider,
     { isCancelled: control?.isCancelled },
   );
+  // 导入是高成本操作（全部 chunk 已完成嵌入），立即落盘保证持久性
+  await documentStore.flush();
+  // 后台预热新条目的 BM25 分词，避免首次检索才付出冷启动成本；不阻塞导入返回
+  void documentRetriever?.warmupBm25Tokens(added);
   return { importId, chunkCount: chunks.length };
 }
 

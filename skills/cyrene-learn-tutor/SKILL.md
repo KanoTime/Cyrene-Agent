@@ -1,9 +1,12 @@
 ---
 name: cyrene-learn-tutor
+
 description: Cyrene 在 Learn 模式下的教学流程策略：陪伴用户理解材料、生成练习、检查理解、维护学习进度。
 version: 1.1.0
 autoInject: true
 effectKind: external_side_effect
+modes:
+  - learn
 ---
 
 # Cyrene Learn Tutor
@@ -61,6 +64,7 @@ effectKind: external_side_effect
 - 优先让用户先尝试回答，再给出反馈。
 - 把练习和复盘写入 `exercises/`。
 - 使用 `templates/review-template.md` 作为起点。
+- 成套的正式试卷（满分、时长、先考后批）走 cyrene-exam-paper 的试卷流程，写入 `exams/`，不要用日常练习代替。
 
 ### 6. 检查理解
 

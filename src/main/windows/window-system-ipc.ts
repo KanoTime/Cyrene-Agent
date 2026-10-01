@@ -1,15 +1,21 @@
-import { BrowserWindow, ipcMain } from "electron";
+import { BrowserWindow } from "electron";
 import { IPC } from "../../shared/ipc-channels";
-import { getUsage } from "../token-usage-store";
+import { createIpcScope, type IpcScope } from "../application/ipc-scope";
+import { clearUsage, getUsageReport } from "../token-usage-store";
 import {
-  sidebarWindow,
-  tasksWindow,
-  settingsWindow,
+  musicPlayerWindow,
 } from "./window-state";
 import type { WindowManager } from "./window-manager";
 
 export interface WindowSystemIpcDependencies {
   get windowManager(): WindowManager | null;
+  /** 传入共享 scope 以便退出时统一注销；缺省时使用独立 scope。 */
+  ipc?: IpcScope;
+  /**
+   * 退出应用。由组合根注入（`() => app.quit()`），使本模块不直接依赖 electron app，
+   * 同时保留 before-quit 受控退出链路。
+   */
+  quit(): void;
 }
 
 /**
@@ -19,86 +25,88 @@ export interface WindowSystemIpcDependencies {
  * 挂靠在此；后续拆分统计模块时应二次归位。
  */
 export function registerWindowSystemIpc(deps: WindowSystemIpcDependencies): void {
-  ipcMain.handle(IPC.WINDOW_SET_INTERACTIVE, (_event, interactive: boolean) => {
-    deps.windowManager?.setMainWindowInteractive(interactive);
+  const ipc = deps.ipc ?? createIpcScope();
+  ipc.handle(IPC.WINDOW_SET_INTERACTIVE, (_event, interactive: boolean) => {
+    deps.windowManager?.setPetWindowInteractive(interactive);
   });
 
-  ipcMain.on(IPC.WINDOW_MOVE, (_event, dx: number, dy: number) => {
-    deps.windowManager?.moveMainWindowRelative(dx, dy);
+  ipc.on(IPC.WINDOW_MOVE, (_event, dx: number, dy: number) => {
+    deps.windowManager?.movePetWindowRelative(dx, dy);
   });
 
-  ipcMain.on(IPC.WINDOW_MOVE_TO, (_event, x: number, y: number) => {
-    deps.windowManager?.moveMainWindowTo(x, y);
+  ipc.on(IPC.WINDOW_MOVE_TO, (_event, x: number, y: number) => {
+    deps.windowManager?.movePetWindowTo(x, y);
   });
 
-  ipcMain.on(IPC.WINDOW_SET_DRAGGING, (_event, isDragging: boolean) => {
-    deps.windowManager?.setMainWindowDragging(isDragging);
+  ipc.on(IPC.WINDOW_SET_DRAGGING, (_event, isDragging: boolean) => {
+    deps.windowManager?.setPetWindowDragging(isDragging);
   });
 
-  ipcMain.handle(IPC.WINDOW_CAPTURE_FRAME, async () => deps.windowManager?.captureMainWindowFrame() ?? null);
-  ipcMain.handle(IPC.WINDOW_GET_CURSOR_POSITION, () => deps.windowManager?.getCursorScreenPosition() ?? { x: 0, y: 0 });
-
-  ipcMain.on(IPC.SIDEBAR_MINIMIZE, () => {
-    sidebarWindow?.minimize();
+  // 桌宠窗口自身的最小化/隐藏入口。两者曾随 index.ts 拆分（711a40d9）被误删，
+  // preload 侧 window.cyrene.minimize()/hide() 一直保留，此处按原语义补回。
+  ipc.on(IPC.WINDOW_MINIMIZE, () => {
+    deps.windowManager?.minimizePetWindow();
   });
 
-  ipcMain.on(IPC.SIDEBAR_CLOSE, () => {
-    sidebarWindow?.close();
+  ipc.on(IPC.WINDOW_CLOSE, () => {
+    deps.windowManager?.hidePetWindow();
   });
 
-  // 状态栏窗口置顶 toggle：返回切换后的新状态（true=已置顶）
-  ipcMain.handle(IPC.SIDEBAR_TOGGLE_ALWAYS_ON_TOP, () => {
-    if (!sidebarWindow) return false;
-    const next = !sidebarWindow.isAlwaysOnTop();
-    sidebarWindow.setAlwaysOnTop(next, next ? "screen-saver" : "normal");
-    return next;
-  });
+  ipc.handle(IPC.WINDOW_CAPTURE_FRAME, async () => deps.windowManager?.capturePetWindowFrame() ?? null);
+  ipc.handle(IPC.WINDOW_GET_CURSOR_POSITION, () => deps.windowManager?.getCursorScreenPosition() ?? { x: 0, y: 0 });
 
-  ipcMain.on(IPC.SIDEBAR_OPEN_TASKS, () => {
-    deps.windowManager?.createTasksWindow();
-  });
-
-  ipcMain.on(IPC.SIDEBAR_OPEN_SETTINGS, (_event, section?: string) => {
-    deps.windowManager?.createSettingsWindow(section);
-  });
-
-  ipcMain.on(IPC.SIDEBAR_OPEN_CALL, () => {
+  ipc.on(IPC.CALL_OPEN, () => {
     deps.windowManager?.createCallWindow();
   });
 
-  ipcMain.on(IPC.TASKS_MINIMIZE, () => {
-    tasksWindow?.minimize();
+  // 音乐播放器窗口控制
+  ipc.on(IPC.MUSIC_PLAYER_MINIMIZE, () => {
+    musicPlayerWindow?.minimize();
+  });
+  ipc.on(IPC.MUSIC_PLAYER_CLOSE, () => {
+    musicPlayerWindow?.close();
+  });
+  ipc.handle(IPC.MUSIC_OPEN_PLAYER, () => {
+    deps.windowManager?.createMusicPlayerWindow();
+    return true;
+  });
+  ipc.handle(IPC.MUSIC_OPEN_SETTINGS, (_event, section?: string) => {
+    return deps.windowManager?.openSettings(section ?? "music").then(() => true) ?? false;
   });
 
-  ipcMain.on(IPC.TASKS_CLOSE, () => {
-    tasksWindow?.close();
-  });
-  ipcMain.on(IPC.SETTINGS_MINIMIZE, () => {
-    settingsWindow?.minimize();
+  // 渲染端请求打开设置页指定标签（如头像菜单跳"常规"）：复用主进程统一推送路径
+  ipc.handle(IPC.SETTINGS_REQUEST_SWITCH_SECTION, (_event, section?: string) => {
+    return deps.windowManager?.openSettings(section ?? "appearance").then(() => true) ?? false;
   });
 
-  ipcMain.on(IPC.SETTINGS_CLOSE, () => {
-    settingsWindow?.close();
-  });
-
-  ipcMain.on(IPC.SETTINGS_OPEN_CHROME_GPU, async () => {
+  ipc.on(IPC.SETTINGS_OPEN_CHROME_GPU, async () => {
     const win = new BrowserWindow({ width: 1024, height: 768 });
     win.loadURL("chrome://gpu");
     win.show();
   });
 
   // Token 用量查询 IPC（临时挂靠，后续归到统计模块）
-  ipcMain.handle(IPC.TOKEN_USAGE_GET, (_event, days: number) => {
-    return getUsage(Math.max(1, Math.min(90, Number(days) || 7)));
+  // 上限 366：用量统计页的 52 周热力图需要一整年的按天数据。
+  ipc.handle(IPC.TOKEN_USAGE_GET, (_event, days: number) => {
+    return getUsageReport(Math.max(1, Math.min(366, Number(days) || 7)));
+  });
+  ipc.handle(IPC.TOKEN_USAGE_CLEAR, () => {
+    clearUsage();
   });
 
-  ipcMain.on(IPC.LIVE2D_SPEECH_PREPARE, () => {
-    deps.windowManager?.sendToMainWindow(IPC.LIVE2D_SPEECH_PREPARE);
+  ipc.on(IPC.LIVE2D_SPEECH_PREPARE, () => {
+    deps.windowManager?.sendToPetWindow(IPC.LIVE2D_SPEECH_PREPARE);
   });
-  ipcMain.on(IPC.LIVE2D_MOUTH_START, (_event, payload: { durationMs?: number }) => {
-    deps.windowManager?.sendToMainWindow(IPC.LIVE2D_MOUTH_START, { durationMs: Number(payload?.durationMs ?? 0) });
+  ipc.on(IPC.LIVE2D_MOUTH_START, (_event, payload: { durationMs?: number }) => {
+    deps.windowManager?.sendToPetWindow(IPC.LIVE2D_MOUTH_START, { durationMs: Number(payload?.durationMs ?? 0) });
   });
-  ipcMain.on(IPC.LIVE2D_MOUTH_STOP, () => {
-    deps.windowManager?.sendToMainWindow(IPC.LIVE2D_MOUTH_STOP);
+  ipc.on(IPC.LIVE2D_MOUTH_STOP, () => {
+    deps.windowManager?.sendToPetWindow(IPC.LIVE2D_MOUTH_STOP);
+  });
+
+  // 退出是应用级请求而非窗口操作：deps.quit() 最终走 app.quit()，
+  // 触发 before-quit 受控退出，由 ShutdownCoordinator 完成固定阶段清理后再退出。
+  ipc.on(IPC.APP_QUIT, () => {
+    deps.quit();
   });
 }

@@ -1,31 +1,28 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import * as fs from "fs";
-import * as path from "path";
-import { randomUUID } from "crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { app, BrowserWindow, shell } from "electron";
 import { IPC } from "../../shared/ipc-channels";
-import { DEFAULT_UI_FONT, isSupportedFontFileName } from "../../shared/ui-font";
-import type { GeneralSettings } from "../settings/general-settings";
+import { createIpcScope, type IpcScope } from "../application/ipc-scope";
+import type { GeneralSettings } from "./general-settings";
 import type { TimeoutSettings } from "../../shared/timeout-types";
 import { ensureCustomStylePrompt } from "../style-prompt";
 import type { WindowManager } from "../windows/window-manager";
 import {
   reactChatWindow,
-  sidebarWindow,
-  tasksWindow,
-  settingsWindow,
 } from "../windows/window-state";
 import type { RuntimeStateService } from "../orchestrator/runtime-state-service";
 import type { EmbeddingIndexService } from "../services/embedding/embedding-index-service";
 import { initReranker, getRerankerInstallStatus } from "../rag/reranker";
 import { switchEmbeddingModel } from "../rag";
-import { downloadEmbeddingModel, deleteEmbeddingModel, getEmbeddingStatus } from "../embedding-manager";
 import { testVendorConnection } from "../orchestrator/vendors/test-connection";
+import { getAdapterForConfig } from "../orchestrator/vendors";
 import type { VendorConfig } from "../orchestrator/vendors";
-import { normalizeModelSettings, getPublicModelConfig } from "../settings/model-settings";
-import type { ModelSettings } from "../settings/model-settings";
+import { normalizeModelSettings, getPublicModelConfig, listSavedModelProfiles, saveModelProfile, setDefaultModelProfile, saveModelSettings } from "./model-settings";
+import type { ModelSettings } from "./model-settings";
 import { getTimeoutSettings, saveTimeoutSettings } from "../timeout-manager";
 import type { syncVolcanoSearchMcp } from "./general-settings-lifecycle";
-import type { syncPlaywrightMcp } from "../sync-mcp-builtin";
+import type { syncPlaywrightMcp, syncFilesystemMcp } from "../sync-mcp-builtin";
+import { broadcastChatsChanged } from "../chats/chats-ipc";
 import { localAsrWorker } from "../asr/local-asr-worker-manager";
 
 export interface SettingsIpcDependencies {
@@ -40,24 +37,17 @@ export interface SettingsIpcDependencies {
   embeddingIndexService: EmbeddingIndexService;
   syncVolcanoSearchMcp: typeof syncVolcanoSearchMcp;
   syncPlaywrightMcp: typeof syncPlaywrightMcp;
-}
-
-function getUiFontsDir(): string {
-  return path.join(app.getPath("userData"), "ui-fonts");
-}
-
-function getCustomFontDisplayName(filePath: string): string {
-  return (
-    path.basename(filePath, path.extname(filePath)).replace(/[-_]+/g, " ").trim().slice(0, 80) || "自定义字体"
-  );
+  syncFilesystemMcp: typeof syncFilesystemMcp;
+  /** 传入共享 scope 以便退出时统一注销；缺省时使用独立 scope。 */
+  ipc?: IpcScope;
 }
 
 const VISION_TEST_IMAGE_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAJ0lEQVR42u3NsQkAAAjAsP7/tF7hIASyp6lTCQQCgUAgEAgEgi/BAjLD/C5w/SM9AAAAAElFTkSuQmCC";
 
 export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
+  const ipc = deps.ipc ?? createIpcScope();
   const {
-    windowManager,
     getGeneralSettings,
     saveGeneralSettings,
     getModelSettings,
@@ -68,29 +58,61 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     embeddingIndexService,
     syncVolcanoSearchMcp,
     syncPlaywrightMcp,
+    syncFilesystemMcp,
   } = deps;
+  // 注意：windowManager 不解构，统一用 deps.windowManager 实时读取 getter。
+  // registerSettingsIpc 在模块加载阶段调用，那时 windowManager 仍为 null，
+  // 解构会捕获 null 并导致后续 ?. 永远短路（设置里的打开侧边栏/日程等会失效）。
 
   function broadcastToAuxWindows(channel: string, payload: unknown): void {
-    for (const win of [reactChatWindow, sidebarWindow, tasksWindow, settingsWindow]) {
-      if (win && !win.isDestroyed()) {
-        win.webContents.send(channel, payload);
-      }
+    const win = reactChatWindow;
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(channel, payload);
     }
   }
 
   function broadcastModelConfigChanged(settings = getModelSettings()): void {
     broadcastToAuxWindows(IPC.MODEL_CONFIG_CHANGED, getPublicModelConfig(settings));
+    // 聊天窗口不在 aux 窗口里：模型窗口容量变更后它不会自己重读会话，
+    // 环形图分母会停在旧快照上。这里顺带广播一次会话变更，触发聊天窗口重载。
+    broadcastChatsChanged();
   }
 
   function broadcastRuntimeStateChanged(): void {
     broadcastToAuxWindows(IPC.RUNTIME_STATE_CHANGED, runtimeStateService.getState());
   }
 
-  ipcMain.handle(IPC.SETTINGS_GET_CONFIG, () => getModelSettings());
+  ipc.handle(IPC.SETTINGS_GET_CONFIG, () => getModelSettings());
+  ipc.handle(IPC.SETTINGS_MODEL_PROFILES_LIST, () => ({
+    profiles: listSavedModelProfiles(getModelSettings()),
+    defaultModelProfileId: getModelSettings().defaultModelProfileId,
+  }));
+  ipc.handle(IPC.SETTINGS_MODEL_PROFILE_SAVE, (_event, profile) => {
+    const saved = saveModelProfile(profile as Parameters<typeof saveModelProfile>[0]);
+    if (saved.added && saved.settings.defaultModelProfileId === saved.settings.modelProfiles?.at(-1)?.id) {
+      broadcastModelConfigChanged(saved.settings);
+    }
+    return { added: saved.added, profiles: listSavedModelProfiles(saved.settings), defaultModelProfileId: saved.settings.defaultModelProfileId };
+  });
+  ipc.handle(IPC.SETTINGS_MODEL_PROFILE_DELETE, (_event, id: unknown) => {
+    if (typeof id !== "string") return null;
+    const settings = getModelSettings();
+    const profiles = listSavedModelProfiles(settings).filter((profile) => profile.id !== id);
+    const defaultModelProfileId = settings.defaultModelProfileId === id ? profiles[0]?.id : settings.defaultModelProfileId;
+    const saved = saveModelSettings({ modelProfiles: profiles, defaultModelProfileId });
+    broadcastModelConfigChanged(saved);
+    return { profiles: listSavedModelProfiles(saved), defaultModelProfileId: saved.defaultModelProfileId };
+  });
+  ipc.handle(IPC.SETTINGS_MODEL_PROFILE_SET_DEFAULT, (_event, id: unknown) => {
+    if (typeof id !== "string") return null;
+    const saved = setDefaultModelProfile(id);
+    broadcastModelConfigChanged(saved);
+    return { profiles: listSavedModelProfiles(saved), defaultModelProfileId: saved.defaultModelProfileId };
+  });
 
-  ipcMain.handle(IPC.SETTINGS_GET_GENERAL, () => getGeneralSettings());
+  ipc.handle(IPC.SETTINGS_GET_GENERAL, () => getGeneralSettings());
 
-  ipcMain.handle(IPC.ASR_LOCAL_STATUS, async (_event, startWorker: boolean) => {
+  ipc.handle(IPC.ASR_LOCAL_STATUS, async (_event, startWorker: boolean) => {
     const settings = getGeneralSettings();
     return localAsrWorker.getStatus({
       engine: "local",
@@ -102,7 +124,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     }, Boolean(startWorker));
   });
 
-  ipcMain.handle(IPC.ASR_LOCAL_TEST, async () => {
+  ipc.handle(IPC.ASR_LOCAL_TEST, async () => {
     const settings = getGeneralSettings();
     const fixturePath = path.join(settings.asrLocalRoot, "fixtures", "zh_short.wav");
     const wav = fs.readFileSync(fixturePath);
@@ -123,63 +145,17 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     });
   });
 
-  ipcMain.handle(IPC.SETTINGS_GET_TIMEOUT_SETTINGS, () => getTimeoutSettings());
+  ipc.handle(IPC.SETTINGS_GET_TIMEOUT_SETTINGS, () => getTimeoutSettings());
 
-  ipcMain.handle(IPC.SETTINGS_SAVE_TIMEOUT_SETTINGS, (_event, settings: Partial<TimeoutSettings>) =>
+  ipc.handle(IPC.SETTINGS_SAVE_TIMEOUT_SETTINGS, (_event, settings: Partial<TimeoutSettings>) =>
     saveTimeoutSettings(settings),
   );
 
-  ipcMain.handle(IPC.UI_THEME_GET, () => getGeneralSettings().uiTheme);
+  ipc.handle(IPC.UI_THEME_GET, () => getGeneralSettings().uiTheme);
 
-  ipcMain.handle(IPC.UI_THEME_RADIUS_GET, () => getGeneralSettings().uiThemeRadius);
+  ipc.handle(IPC.UI_THEME_RADIUS_GET, () => getGeneralSettings().uiThemeRadius);
 
-  ipcMain.handle(IPC.UI_WINDOW_CORNER_RADIUS_GET, () => getGeneralSettings().windowCornerRadius);
-
-  ipcMain.handle(IPC.UI_FONT_GET, () => getGeneralSettings().uiFont);
-
-  ipcMain.handle(IPC.SETTINGS_PICK_UI_FONT, async () => {
-    const result = await dialog.showOpenDialog({
-      properties: ["openFile"],
-      filters: [{ name: "字体文件", extensions: ["ttf", "otf"] }],
-    });
-    return result.canceled ? null : result.filePaths[0] ?? null;
-  });
-
-  ipcMain.handle(IPC.SETTINGS_IMPORT_UI_FONT, (_event, sourcePath: unknown) => {
-    if (typeof sourcePath !== "string" || !sourcePath) throw new Error("未选择字体文件");
-    const extension = path.extname(sourcePath).toLowerCase();
-    if (extension !== ".ttf" && extension !== ".otf") throw new Error("仅支持 .ttf 或 .otf 字体文件");
-    const stat = fs.statSync(sourcePath);
-    if (!stat.isFile() || stat.size <= 0 || stat.size > 50 * 1024 * 1024) throw new Error("字体文件无效或超过 50 MB");
-
-    const fileName = `custom-${randomUUID()}${extension}`;
-    if (!isSupportedFontFileName(fileName)) throw new Error("字体文件名无效");
-    const fontsDir = getUiFontsDir();
-    fs.mkdirSync(fontsDir, { recursive: true });
-    const targetPath = path.join(fontsDir, fileName);
-    fs.copyFileSync(sourcePath, targetPath);
-
-    const before = getGeneralSettings().uiFont;
-    const saved = saveGeneralSettings({
-      uiFont: { kind: "custom", fileName, displayName: getCustomFontDisplayName(sourcePath) },
-    });
-    if (before.kind === "custom" && before.fileName !== fileName) {
-      const oldPath = path.join(fontsDir, before.fileName);
-      if (isSupportedFontFileName(before.fileName)) fs.rmSync(oldPath, { force: true });
-    }
-    return saved.uiFont;
-  });
-
-  ipcMain.handle(IPC.SETTINGS_RESET_UI_FONT, () => {
-    const before = getGeneralSettings().uiFont;
-    const saved = saveGeneralSettings({ uiFont: DEFAULT_UI_FONT });
-    if (before.kind === "custom" && isSupportedFontFileName(before.fileName)) {
-      fs.rmSync(path.join(getUiFontsDir(), before.fileName), { force: true });
-    }
-    return saved.uiFont;
-  });
-
-  ipcMain.handle(IPC.SETTINGS_SAVE_GENERAL, (_event, settings: Partial<GeneralSettings>) => {
+  ipc.handle(IPC.SETTINGS_SAVE_GENERAL, (_event, settings: Partial<GeneralSettings>) => {
     const saved = saveGeneralSettings(settings);
     if ("proactiveChatMode" in settings || "proactiveDeliveryTarget" in settings) {
       proactiveLifecycle.getProactiveChatService()?.invalidate();
@@ -188,9 +164,9 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
   });
 
   // TTS 面板调用的通用设置读写入口（历史命名遗留）
-  ipcMain.handle(IPC.TTS_LOAD_SETTINGS, () => getGeneralSettings());
+  ipc.handle(IPC.TTS_LOAD_SETTINGS, () => getGeneralSettings());
 
-  ipcMain.handle(IPC.TTS_SAVE_SETTINGS, async (_event, tts: Partial<GeneralSettings>) => {
+  ipc.handle(IPC.TTS_SAVE_SETTINGS, async (_event, tts: Partial<GeneralSettings>) => {
     const before = getGeneralSettings();
     const saved = saveGeneralSettings({ ...before, ...tts });
 
@@ -205,6 +181,14 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
       await syncPlaywrightMcp(saved);
     }
 
+    // Filesystem MCP：按 settings 字段自动连接/断开（允许目录固定为下载文件夹）
+    if ("filesystemMcpEnabled" in tts) {
+      await syncFilesystemMcp({
+        filesystemMcpEnabled: saved.filesystemMcpEnabled,
+        allowedDir: app.getPath("downloads"),
+      });
+    }
+
     // 主动聊天总开关变化时使现有评估失效（频率档位由 ProactiveChat 内部判定，无需重启）。
     if ("proactiveChatMode" in tts) {
       proactiveLifecycle.getProactiveChatService()?.invalidate();
@@ -214,53 +198,46 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     return saved;
   });
 
-  ipcMain.handle(IPC.SETTINGS_OPEN_CUSTOM_STYLE_PROMPT, async () => {
+  ipc.handle(IPC.SETTINGS_OPEN_CUSTOM_STYLE_PROMPT, async () => {
     const filePath = ensureCustomStylePrompt();
     await shell.showItemInFolder(filePath);
     return { ok: true, filePath };
   });
 
-  ipcMain.on(IPC.SETTINGS_OPEN_SIDEBAR, () => {
-    windowManager?.createSidebarWindow();
-  });
-
-  ipcMain.on(IPC.SETTINGS_CLOSE_SIDEBAR, async () => {
-    sidebarWindow?.close();
-  });
-
-  ipcMain.on(IPC.SETTINGS_OPEN_TASKS, () => {
-    windowManager?.createTasksWindow();
-  });
-
-  ipcMain.on(IPC.SETTINGS_CLOSE_TASKS, async () => {
-    tasksWindow?.close();
-  });
-
-  ipcMain.on(IPC.SETTINGS_SET_PET_ALWAYS_ON_TOP, (_event, value: boolean) => {
+  ipc.on(IPC.SETTINGS_SET_PET_ALWAYS_ON_TOP, (_event, value: boolean) => {
     const saved = saveGeneralSettings({ ...getGeneralSettings(), petAlwaysOnTop: Boolean(value) });
-    windowManager?.setMainWindowAlwaysOnTop(saved.petAlwaysOnTop);
+    deps.windowManager?.setPetWindowAlwaysOnTop(saved.petAlwaysOnTop);
   });
 
-  ipcMain.on(IPC.SETTINGS_SET_PET_VISIBLE, (_event, value: boolean) => {
+  ipc.on(IPC.SETTINGS_SET_PET_VISIBLE, (_event, value: boolean) => {
     saveGeneralSettings({ ...getGeneralSettings(), petVisible: Boolean(value) });
   });
 
-  ipcMain.on(IPC.SETTINGS_SET_PET_ZOOM, (_event, value: number) => {
+  ipc.on(IPC.SETTINGS_SET_PET_ZOOM, (_event, value: number) => {
     const saved = saveGeneralSettings({ ...getGeneralSettings(), petZoom: Number(value) });
-    windowManager?.applyMainWindowZoom(saved.petZoom);
+    deps.windowManager?.applyPetWindowZoom(saved.petZoom);
   });
 
-  ipcMain.handle(IPC.MODEL_CONFIG_GET, () => getPublicModelConfig());
+  ipc.handle(IPC.MODEL_CONFIG_GET, () => getPublicModelConfig());
 
-  ipcMain.handle(IPC.RUNTIME_STATE_GET, () => runtimeStateService.getState());
+  ipc.handle(IPC.RUNTIME_STATE_GET, () => runtimeStateService.getState());
 
-  ipcMain.handle(IPC.SETTINGS_SAVE_CONFIG, (_event, settings: Partial<ModelSettings>) => {
+  ipc.handle(IPC.SETTINGS_SAVE_CONFIG, (_event, settings: Partial<ModelSettings>) => {
     const saved = saveModelSettings(settings);
     broadcastModelConfigChanged(saved);
     return saved;
   });
 
-  ipcMain.handle(IPC.SETTINGS_TEST_CONNECTION, async (_event, cfg: VendorConfig) => testVendorConnection(cfg));
+  ipc.handle(IPC.SETTINGS_TEST_CONNECTION, async (_event, cfg: VendorConfig) => testVendorConnection(cfg));
+  ipc.handle(IPC.SETTINGS_PREVIEW_REASONING, (_event, cfg: VendorConfig) => {
+    const request = getAdapterForConfig(cfg).buildRequest({
+      model: cfg.model,
+      messages: [{ role: "user", content: "Hello" }],
+      stream: false,
+    }, cfg);
+    // 仅返回请求正文，不将认证头或 API 密钥暴露给设置页。
+    return JSON.parse(request.body) as Record<string, unknown>;
+  });
 
   /**
    * 测试视觉模型连通性。
@@ -269,7 +246,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
    * 32x32 是折中：足够小保持 payload 轻，又满足千问等厂商对图片长宽 > 10 像素的限制。
    * 验连通性（HTTP 2xx + 有内容返回）而非对答案——模型可能只说"一张红色图片"也算成功。
    */
-  ipcMain.handle(
+  ipc.handle(
     IPC.SETTINGS_TEST_VISION,
     async (_event, cfg: { baseUrl: string; apiKey: string; model: string }) => {
       const start = Date.now();
@@ -292,7 +269,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     },
   );
 
-  ipcMain.handle(IPC.EMBEDDING_SET_MODEL, async (_event, modelKey: string) => {
+  ipc.handle(IPC.EMBEDDING_SET_MODEL, async (_event, modelKey: string) => {
     console.log("[Cyrene] embedding model switch requested:", modelKey);
     try {
       const result = await switchEmbeddingModel(modelKey);
@@ -311,7 +288,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     }
   });
 
-  ipcMain.handle(IPC.RERANKER_SET_MODE, async (_event, mode: "standard" | "none") => {
+  ipc.handle(IPC.RERANKER_SET_MODE, async (_event, mode: "standard" | "none") => {
     const current = getModelSettings();
     saveModelSettings({ ...current, rerankerMode: mode });
     await initReranker(mode);
@@ -319,14 +296,14 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     return true;
   });
 
-  ipcMain.handle(IPC.RERANKER_GET_STATUS, () => getRerankerInstallStatus());
+  ipc.handle(IPC.RERANKER_GET_STATUS, () => getRerankerInstallStatus());
 
-  ipcMain.handle(IPC.MODEL_GET_INSTALL_STATUS, () => {
+  ipc.handle(IPC.MODEL_GET_INSTALL_STATUS, () => {
     const { getModelInstallStatus } = require("../rag/model-status");
     return getModelInstallStatus();
   });
 
-  ipcMain.handle(IPC.OPEN_EXTERNAL, async (_event, url: string) => {
+  ipc.handle(IPC.OPEN_EXTERNAL, async (_event, url: string) => {
     if (!url.startsWith("http://") && !url.startsWith("https://")) {
       return { ok: false, error: "Invalid URL" };
     }
@@ -338,44 +315,12 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     }
   });
 
-  ipcMain.on(IPC.SETTINGS_PREVIEW_RUNTIME_SYNC, (_event, value: "off" | "local" | "llm") => {
+  ipc.on(IPC.SETTINGS_PREVIEW_RUNTIME_SYNC, (_event, value: "off" | "local" | "llm") => {
     const current = getModelSettings();
     const preview = normalizeModelSettings({
       ...current,
       runtimeSync: value === "llm" ? "llm" : value === "local" ? "local" : "off",
     });
     broadcastModelConfigChanged(preview);
-  });
-
-  ipcMain.handle(IPC.EMBEDDING_GET_STATUS, async () => {
-    return getEmbeddingStatus();
-  });
-
-  ipcMain.handle(IPC.EMBEDDING_DOWNLOAD, async (_event, payload: unknown) => {
-    const p = payload as { model?: string; mirror?: string };
-    const model = p.model || "bgem3";
-    const mirror = p.mirror || "official";
-    try {
-      const win = BrowserWindow.getFocusedWindow();
-      await downloadEmbeddingModel(model, mirror, (info) => {
-        win?.webContents.send(IPC.EMBEDDING_PROGRESS, info);
-      });
-      return { ok: true };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: message };
-    }
-  });
-
-  ipcMain.handle(IPC.EMBEDDING_DELETE, async (_event, payload: unknown) => {
-    const p = payload as { model?: string };
-    const model = p.model || "bgem3";
-    try {
-      deleteEmbeddingModel(model);
-      return { ok: true };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: message };
-    }
   });
 }

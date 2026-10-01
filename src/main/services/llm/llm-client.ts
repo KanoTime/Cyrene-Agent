@@ -1,18 +1,14 @@
 import type { ModelSettings } from "../../settings/model-settings";
 import { getAdapterForConfig, createSseReader } from "../../orchestrator/vendors";
 import type {
-  ChatResponse,
   StructuredOutputRequest,
   VendorConfig,
 } from "../../orchestrator/vendors";
-import { classifyStructuredOutputEndpoint } from "../../orchestrator/structured-output/profiles";
-import { dispatchChatGeneration } from "../../orchestrator/structured-output/dispatcher";
-import { invokeLangChainStructured } from "../../orchestrator/structured-output/langchain-invoker";
 import {
   createVisibleStreamFilter,
   stripThinkBlocks,
 } from "../../chat-stream-utils";
-import { recordUsage } from "../../token-usage-store";
+import { recordUsage, recordRequest } from "../../token-usage-store";
 import { appendApiLog } from "../../chat-api-utils";
 
 export interface LlmClient {
@@ -36,7 +32,7 @@ export interface LlmClient {
   ): Promise<string>;
 
   chatNonStream(
-    settings: ModelSettings,
+    settings: LlmRequestSettings,
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
     temperature: number | undefined,
     timeoutMs: number,
@@ -57,7 +53,13 @@ export interface LlmClient {
   }>;
 }
 
-function buildVendorConfig(settings: ModelSettings): VendorConfig {
+/** 模型请求所需的已解析配置子集；供非聊天业务复用同一套厂商请求实现。 */
+export type LlmRequestSettings = Pick<
+  ModelSettings,
+  "provider" | "baseUrl" | "model" | "apiKey" | "explicitTransport" | "reasoning" | "manualReasoning"
+>;
+
+function buildVendorConfig(settings: LlmRequestSettings): VendorConfig {
   return {
     provider: settings.provider,
     baseUrl: settings.baseUrl,
@@ -65,6 +67,7 @@ function buildVendorConfig(settings: ModelSettings): VendorConfig {
     apiKey: settings.apiKey,
     explicitTransport: settings.explicitTransport,
     reasoning: settings.reasoning,
+    manualReasoning: settings.manualReasoning,
   };
 }
 
@@ -118,8 +121,16 @@ export function createLlmClient(): LlmClient {
         throw new Error("响应体为空，不支持流式读取");
       }
 
+      recordRequest(settings.model);
       let fullText = "";
       const visibleFilter = createVisibleStreamFilter();
+      // anthropic 流式 usage 分散在 message_start（input）和 message_delta（output）两个事件里，
+      // 逐 chunk 记会重复计数；改为逐字段取最大值合并，循环结束记一次。
+      let sawUsage = false;
+      let usageInput = 0;
+      let usageOutput = 0;
+      let usageCached: number | undefined;
+      let usageCacheCreation: number | undefined;
 
       for await (const event of createSseReader(adapter, response.body)) {
         const chunk = adapter.parseStreamEvent(event);
@@ -130,9 +141,20 @@ export function createLlmClient(): LlmClient {
           if (visibleDelta) onChunk(visibleDelta);
         }
         if (chunk.usage) {
-          recordUsage(chunk.usage.input, chunk.usage.output, 1);
+          sawUsage = true;
+          usageInput = Math.max(usageInput, chunk.usage.input ?? 0);
+          usageOutput = Math.max(usageOutput, chunk.usage.output ?? 0);
+          if (chunk.usage.cachedInput !== undefined) {
+            usageCached = Math.max(usageCached ?? 0, chunk.usage.cachedInput);
+          }
+          if (chunk.usage.cacheCreation !== undefined) {
+            usageCacheCreation = Math.max(usageCacheCreation ?? 0, chunk.usage.cacheCreation);
+          }
         }
         if (chunk.done) break;
+      }
+      if (sawUsage) {
+        recordUsage(usageInput, usageOutput, 1, usageCached, settings.model, usageCacheCreation);
       }
 
       const visibleTail = visibleFilter.flush();
@@ -176,7 +198,7 @@ export function createLlmClient(): LlmClient {
   }
 
   async function chatNonStream(
-    settings: ModelSettings,
+    settings: LlmRequestSettings,
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
     temperature: number | undefined,
     timeoutMs: number,
@@ -202,6 +224,7 @@ export function createLlmClient(): LlmClient {
       apiKey: settings.apiKey,
       explicitTransport: settings.explicitTransport,
       reasoning: reasoningOverride ?? settings.reasoning,
+      manualReasoning: settings.manualReasoning,
     };
     const adapter = getAdapterForConfig(cfg);
     const chatRequest = {
@@ -224,51 +247,22 @@ export function createLlmClient(): LlmClient {
     );
 
     try {
-      const parsed = await dispatchChatGeneration<ChatResponse>({
-        request: chatRequest,
-        provider: adapter.id,
-        endpointKind: classifyStructuredOutputEndpoint({
-          providerId: adapter.id,
-          configuredBaseUrl: cfg.baseUrl,
-          officialBaseUrl: adapter.capability.baseUrl,
-        }),
-        langchain: async () => {
-          const generated = await invokeLangChainStructured(
-            chatRequest,
-            {
-              ...cfg,
-              provider: adapter.id,
-              explicitTransport: adapter.transport,
-            },
-            controller.signal,
-          );
-          return {
-            assistantMessage: { role: "assistant" as const, content: generated.text },
-            text: generated.text,
-            toolCalls: [],
-            finishReason: generated.finishReason,
-            raw: { backend: "langchain" },
-            structuredValue: generated.structuredValue,
-          };
-        },
-        legacy: async () => {
-          const http = adapter.buildRequest(chatRequest, cfg);
-          const response = await fetch(http.url, {
-            method: "POST",
-            headers: http.headers,
-            body: http.body,
-            signal: controller.signal,
-          });
-          if (!response.ok) {
-            const errorData = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-            const errMsg = (errorData as { error?: { message?: string } }).error?.message;
-            throw new Error(errMsg || `模型请求失败：HTTP ${response.status}`);
-          }
-          return adapter.parseResponse(await response.json());
-        },
+      const http = adapter.buildRequest(chatRequest, cfg);
+      const response = await fetch(http.url, {
+        method: "POST",
+        headers: http.headers,
+        body: http.body,
+        signal: controller.signal,
       });
+      if (!response.ok) {
+        const errorData = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+        const errMsg = (errorData as { error?: { message?: string } }).error?.message;
+        throw new Error(errMsg || `模型请求失败：HTTP ${response.status}`);
+      }
+      const parsed = adapter.parseResponse(await response.json());
+      recordRequest(settings.model);
       if (parsed.usage) {
-        recordUsage(parsed.usage.input, parsed.usage.output, 1);
+        recordUsage(parsed.usage.input, parsed.usage.output, 1, parsed.usage.cachedInput, settings.model, parsed.usage.cacheCreation);
       }
       const totalTime = Date.now() - startTime;
       console.log(`[TIMING] ${label} OK in ${totalTime}ms resultLen=${parsed.text.length}`);

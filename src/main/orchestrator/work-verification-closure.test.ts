@@ -12,10 +12,10 @@ vi.mock("../index", () => ({
   sendToLive2DWindow: vi.fn(),
 }));
 
-import { toolRegistry } from "./tool-registry";
+import { toolRegistry } from "./tools/registry/tool-registry";
 import { setCurrentLevel } from "../permission";
-import { VerificationRunner, type VerificationResult } from "./code/verification-runner";
-import "./built-in-tools";
+import { VerificationRunner, type VerificationResult } from "./verification-runner";
+import "./tools/built-in-tools";
 
 const runVerification = toolRegistry.getById("run_verification")!.execute;
 
@@ -86,8 +86,83 @@ describe("Work run_verification 收口", () => {
     expect(runStep).toHaveBeenCalledOnce();
     expect(runStep.mock.calls[0][0]).toMatchObject({
       executable: "builtin:vitest",
-      args: ["--reporter=verbose"],
+      args: ["--reporter=default"],
     });
+  });
+
+  it("build 使用工作区检测到的包管理器执行标准 build 脚本", async () => {
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({
+      scripts: { build: "node -e \"console.log('built')\"" },
+    }));
+    fs.writeFileSync(path.join(cwd, "package-lock.json"), "{}\n");
+    const runStep = vi.spyOn(VerificationRunner.prototype, "runStep")
+      .mockResolvedValue(result({ cwd, type: "build", stepId: "run_verification_build" }));
+
+    const parsed = JSON.parse(await runVerification({ verificationType: "build", cwd }));
+
+    expect(runStep).toHaveBeenCalledOnce();
+    expect(runStep.mock.calls[0][0]).toMatchObject({
+      executable: "npm",
+      args: ["run", "build"],
+      cwd,
+      source: "package_script",
+    });
+    expect(parsed).toMatchObject({
+      verificationType: "build",
+      passed: true,
+    });
+    expect(parsed.command).toContain("npm run build");
+  });
+
+  it("build 尊重工作区声明的 pnpm 包管理器", async () => {
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({
+      packageManager: "pnpm@10.0.0",
+      scripts: { build: "node -e \"console.log('built')\"" },
+    }));
+    fs.writeFileSync(path.join(cwd, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const runStep = vi.spyOn(VerificationRunner.prototype, "runStep")
+      .mockResolvedValue(result({ cwd, type: "build", stepId: "run_verification_build" }));
+
+    await runVerification({ verificationType: "build", cwd });
+
+    expect(runStep).toHaveBeenCalledOnce();
+    expect(runStep.mock.calls[0][0]).toMatchObject({
+      executable: "pnpm",
+      args: ["run", "build"],
+    });
+  });
+
+  it("build 在工作区未定义 scripts.build 时返回结构化错误", async () => {
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
+    fs.writeFileSync(path.join(cwd, "package-lock.json"), "{}\n");
+    const runStep = vi.spyOn(VerificationRunner.prototype, "runStep");
+
+    const parsed = JSON.parse(await runVerification({ verificationType: "build", cwd }));
+
+    expect(runStep).not.toHaveBeenCalled();
+    expect(parsed).toMatchObject({
+      success: false,
+      errorCode: "PACKAGE_SCRIPT_NOT_FOUND",
+      passed: false,
+      actualCwd: cwd,
+    });
+  });
+
+  it("build 通过共享 Runner 实际执行工作区脚本", async () => {
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({
+      scripts: { build: "node -e \"process.stdout.write('workspace-build-ok')\"" },
+    }));
+    fs.writeFileSync(path.join(cwd, "package-lock.json"), "{}\n");
+
+    const parsed = JSON.parse(await runVerification({ verificationType: "build", cwd }));
+
+    expect(parsed).toMatchObject({
+      success: true,
+      verificationType: "build",
+      exitCode: 0,
+      passed: true,
+    });
+    expect(parsed.stdout).toContain("workspace-build-ok");
   });
 
   it("命令正常启动但退出码非零时 success 仍兼容旧协议，passed=false", async () => {

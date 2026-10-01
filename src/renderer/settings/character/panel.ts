@@ -1,3 +1,4 @@
+import { confirmForkDialog as showModal, inputForkDialog as showInputModal } from "../../react/features/settings/ForkDialogs";
 import {
   buildCharacterReplacementConfirmation,
   buildCharacterSwitchConfirmation,
@@ -6,16 +7,17 @@ import {
   type CharacterSettingsSnapshot,
 } from "../character-settings-view";
 import type { SettingsApi } from "../shared/types";
-import { showInputModal, showModal } from "../shared/modal";
 
-const currentName = document.getElementById("character-current-name") as HTMLElement;
-const currentMeta = document.getElementById("character-current-meta") as HTMLElement;
-const packageList = document.getElementById("character-package-list") as HTMLElement;
-const count = document.getElementById("character-count") as HTMLElement;
-const importButton = document.getElementById("character-import-btn") as HTMLButtonElement;
-const importStatus = document.getElementById("character-import-status") as HTMLElement;
-const archiveList = document.getElementById("character-archive-list") as HTMLElement;
-const archiveCount = document.getElementById("character-archive-count") as HTMLElement;
+
+export function initializeCharacterPanel(root: HTMLElement): () => void {
+const currentName = root.querySelector("#character-current-name") as HTMLElement;
+const currentMeta = root.querySelector("#character-current-meta") as HTMLElement;
+const packageList = root.querySelector("#character-package-list") as HTMLElement;
+const count = root.querySelector("#character-count") as HTMLElement;
+const importButton = root.querySelector("#character-import-btn") as HTMLButtonElement;
+const importStatus = root.querySelector("#character-import-status") as HTMLElement;
+const archiveList = root.querySelector("#character-archive-list") as HTMLElement;
+const archiveCount = root.querySelector("#character-archive-count") as HTMLElement;
 
 function settingsApi(): SettingsApi {
   return (window as unknown as { settings: SettingsApi }).settings;
@@ -35,7 +37,7 @@ function showSnapshot(snapshot: CharacterSettingsSnapshot): void {
   packageList.innerHTML = renderCharacterPackages(snapshot);
 }
 
-export async function loadCharacterPackages(): Promise<void> {
+async function loadCharacterPackages(): Promise<void> {
   try {
     const [snapshot, archives] = await Promise.all([
       settingsApi().listCharacters(),
@@ -221,3 +223,7 @@ packageList.addEventListener("click", async (event) => {
     importButton.disabled = false;
   }
 });
+
+void loadCharacterPackages();
+return () => {};
+}

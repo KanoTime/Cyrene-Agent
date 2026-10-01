@@ -63,6 +63,7 @@ describe("ChannelManager 微信消息调度接入", () => {
         targetId: message.chatId,
         parts: [{ kind: "text", text: `reply-${message.text}` }],
       };
+      await adapter.send(outgoing);
       return outgoing;
     });
 

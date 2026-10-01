@@ -6,16 +6,22 @@ import {
 
 describe("resolveStructuredOutputProfile", () => {
   test.each([
+    ["chatgpt", "gpt-6-astra", "openai", "provider_json_schema"],
+    ["chatgpt", "gpt-6-sol", "openai", "provider_json_schema"],
+    ["chatgpt", "gpt-6-luna", "openai", "provider_json_schema"],
     ["chatgpt", "gpt-5.6", "openai", "provider_json_schema"],
     ["claude", "claude-sonnet-4-6", "anthropic", "provider_json_schema"],
     ["kimi", "kimi-k3", "openai", "provider_json_schema"],
     ["kimi", "kimi-for-coding", "openai", "provider_json_schema"],
     ["doubao", "doubao-seed-2-1-pro-260628", "openai", "provider_json_schema"],
+    ["deepseek", "deepseek-flash", "openai", "provider_json_object"],
     ["deepseek", "deepseek-v4-pro", "openai", "provider_json_object"],
     ["qwen", "qwen3.7-plus", "openai", "provider_json_object"],
+    ["glm", "glm-5.3", "openai", "provider_json_object"],
     ["glm", "glm-5.2", "openai", "provider_json_object"],
     ["glm", "glm-5.1", "openai", "provider_json_object"],
     ["mimo", "mimo-v2.5-pro", "openai", "provider_json_object"],
+    ["mimo", "mimo-v2.6-pro", "openai", "provider_json_object"],
     ["minimax", "MiniMax-M3", "openai", "prompt_json"],
   ] as const)("%s/%s resolves to %s", (provider, model, transport, mode) => {
     expect(resolveStructuredOutputProfile({
@@ -126,7 +132,7 @@ describe("resolveStructuredOutputProfile", () => {
           totalBudgetMs: 10_000,
           perAttemptTimeoutMs: 5_500,
         },
-        action_gate: {
+        task_router: {
           maxAttempts: 2,
           totalBudgetMs: 12_000,
           perAttemptTimeoutMs: 7_000,
@@ -150,7 +156,7 @@ describe("resolveStructuredOutputProfile", () => {
           perAttemptTimeoutMs: 8_000,
           minimumRemainingBudgetMs: 500,
         },
-        action_gate: {
+        task_router: {
           maxAttempts: 2,
           totalBudgetMs: 20_000,
           perAttemptTimeoutMs: 10_000,
@@ -175,7 +181,7 @@ describe("resolveStructuredOutputProfile", () => {
           perAttemptTimeoutMs: 10_000,
           minimumRemainingBudgetMs: 500,
         },
-        action_gate: {
+        task_router: {
           maxAttempts: 2,
           totalBudgetMs: 25_000,
           perAttemptTimeoutMs: 12_500,
@@ -204,7 +210,7 @@ describe("resolveStructuredOutputProfile", () => {
           perAttemptTimeoutMs: 20_000,
           minimumRemainingBudgetMs: 500,
         },
-        action_gate: {
+        task_router: {
           maxAttempts: 2,
           totalBudgetMs: 25_000,
           perAttemptTimeoutMs: 12_500,

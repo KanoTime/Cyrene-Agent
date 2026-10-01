@@ -22,7 +22,7 @@ export type ActiveCharacterTextContext = Readonly<{
   worldbookDirectoryPath?: string;
 }>;
 
-export type CharacterPromptMode = "chat" | "talk" | "phone" | "proactive";
+export type CharacterPromptMode = "chat" | "talk" | "phone" | "proactive" | "work" | "code" | "learn";
 
 function readTextFile(filePath?: string): string {
   if (!filePath) return "";
@@ -102,8 +102,8 @@ export function composeCharacterSystemPrompt(input: Readonly<{
     ? [character.phoneIdentity || character.identity, character.soul, character.canonQuotes, character.phoneStyle]
     : [
         character.identity,
-        character.soul,
-        character.canonQuotes,
+        mode === "chat" || mode === "talk" || mode === "proactive" ? character.soul : "",
+        mode === "chat" || mode === "talk" || mode === "proactive" ? character.canonQuotes : "",
         mode === "chat"
           ? readStyle(character, input.styleFile)
           : mode === "proactive"

@@ -86,11 +86,11 @@ const toggleEffortAnthropicCap: ReasoningCapability = {
 };
 
 describe("applyReasoningPreference — auto 路径", () => {
-  test("auto + 任何 control → 不增加字段", () => {
+  test("旧 auto + 可调模型 → 显式发送默认档位", () => {
     const body = { model: "x", messages: [] };
     expect(applyReasoningPreference(body, { mode: "auto" }, noneCap, ctx)).toEqual(body);
-    expect(applyReasoningPreference(body, { mode: "auto" }, toggleQwenCap, ctx)).toEqual(body);
-    expect(applyReasoningPreference(body, { mode: "auto" }, toggleAdaptiveCap, ctx)).toEqual(body);
+    expect(applyReasoningPreference(body, { mode: "auto" }, toggleQwenCap, ctx)).toEqual({ ...body, enable_thinking: true });
+    expect(applyReasoningPreference(body, { mode: "auto" }, toggleAdaptiveCap, ctx)).toEqual({ ...body, thinking: { type: "adaptive" } });
   });
 
   test("不修改入参（snapshot）", () => {
@@ -199,9 +199,70 @@ describe("applyReasoningPreference — effort / supportsDisable（用户修订 #
       .toEqual({ reasoning_effort: "none" });
   });
 
-  test("effort + off + supportsDisable=false → body 不变（OpenAI GPT-5.6 路径）", () => {
+  test("effort + off + supportsDisable=false → 折叠为 on，发 defaultEffort（不发 disabled，避免落服务端默认档）", () => {
+    // 模型不支持关闭时 off 折叠为 on；
+    // 发 defaultEffort 比"不发字段"安全——后者会落服务端默认档（GLM-5.3 默认 max）
     expect(applyReasoningPreference({}, { mode: "off" }, effortNoDisableCap, ctx))
-      .toEqual({});
+      .toEqual({ reasoning_effort: "high" });
+  });
+});
+
+describe("applyReasoningPreference — 旧 auto 与不可关闭模型的默认档", () => {
+  // GLM-5.3 形状：toggle-effort + thinking-type + 不可关闭 + autoEffort
+  const glm53Cap: ReasoningCapability = {
+    control: "toggle-effort",
+    supportedEfforts: ["low", "high", "max"],
+    defaultEffort: "high",
+    requestStyle: "thinking-type",
+    supportsDisable: false,
+    autoEffort: "high",
+  };
+
+  test("旧 auto → 显式发送默认 high，避免服务端默认 max", () => {
+    expect(applyReasoningPreference({}, { mode: "auto" }, glm53Cap, ctx))
+      .toEqual({ thinking: { type: "enabled" }, reasoning_effort: "high" });
+  });
+
+  test("旧 auto + 无 autoEffort → 使用 defaultEffort", () => {
+    const body = { model: "x" };
+    expect(applyReasoningPreference(body, { mode: "auto" }, toggleEffortAnthropicCap, ctx))
+      .toEqual({ ...body, thinking: { type: "adaptive" }, output_config: { effort: "high" } });
+  });
+
+  test("off + supportsDisable=false（强制思考模型）→ 折叠为 on，绝不发 disabled 字段", () => {
+    // saved off 可能是换模型前的残留；对 GLM-5.3 发 disabled 会直接报错
+    expect(applyReasoningPreference({}, { mode: "off" }, glm53Cap, ctx))
+      .toEqual({ thinking: { type: "enabled" }, reasoning_effort: "high" });
+  });
+
+  test("on + effort 在档位内 → thinking.enabled + reasoning_effort（GLM-5.3 常规路径）", () => {
+    expect(applyReasoningPreference({}, { mode: "on", effort: "low" }, glm53Cap, ctx))
+      .toEqual({ thinking: { type: "enabled" }, reasoning_effort: "low" });
+  });
+
+  // Kimi K3 形状：effort + openai-effort + 不可关闭 + autoEffort（2026-08-27 补维护）
+  const kimiK3Cap: ReasoningCapability = {
+    control: "effort",
+    supportedEfforts: ["low", "high", "max"],
+    defaultEffort: "high",
+    requestStyle: "openai-effort",
+    supportsDisable: false,
+    autoEffort: "high",
+  };
+
+  test("K3 旧 auto → reasoning_effort=high，且不发 K2.x 的 thinking 参数", () => {
+    expect(applyReasoningPreference({}, { mode: "auto" }, kimiK3Cap, ctx))
+      .toEqual({ reasoning_effort: "high" });
+  });
+
+  test("K3 off + supportsDisable=false → 折叠为 on，发 defaultEffort 而非 none", () => {
+    expect(applyReasoningPreference({}, { mode: "off" }, kimiK3Cap, ctx))
+      .toEqual({ reasoning_effort: "high" });
+  });
+
+  test("K3 on + effort 在档位内 → reasoning_effort 原样下发", () => {
+    expect(applyReasoningPreference({}, { mode: "on", effort: "max" }, kimiK3Cap, ctx))
+      .toEqual({ reasoning_effort: "max" });
   });
 });
 

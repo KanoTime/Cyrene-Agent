@@ -14,6 +14,7 @@ vi.mock("electron", () => {
   return {
     app: {
       getPath: (_k: string) => os.tmpdir(),
+      isReady: () => true,
     },
     safeStorage: {
       isEncryptionAvailable: () => true,
@@ -54,7 +55,30 @@ describe("channels/settings-store", () => {
     const cfg = loadChannelsSettings();
     expect(cfg.wechat.enabled).toBe(false);
     expect(cfg.feishu.enabled).toBe(false);
+    expect(cfg.qq.enabled).toBe(false);
+    expect(cfg.qq.port).toBe(6200);
     expect(cfg.rateLimitPerUser).toBe(10);
+  });
+
+  it("encrypts the QQ access token and normalizes numeric allowlists", () => {
+    saveChannelsSettings({ qq: {
+      enabled: true,
+      listenMode: "wsl",
+      port: 6200,
+      accessToken: "qq-secret",
+      allowedPrivateUserIds: [" 10001 ", "bad", "10001"],
+      allowedGroupIds: ["20001"],
+      groupRequireMention: true,
+      groupReplyStyle: "reply-and-mention",
+      groupToolPolicy: "off",
+      groupMemoryPolicy: "shared-personal",
+    } });
+    const raw = fs.readFileSync(path.join(os.tmpdir(), "channels-settings.json"), "utf8");
+    expect(raw).not.toContain("qq-secret");
+    const loaded = loadChannelsSettings();
+    expect(loaded.qq.accessToken).toBe("qq-secret");
+    expect(loaded.qq.allowedPrivateUserIds).toEqual(["10001"]);
+    expect(loaded.qq.allowedGroupIds).toEqual(["20001"]);
   });
 
   it("saveChannelsSettings + load: 私密字段加密落盘 + 解密还原", () => {
@@ -95,6 +119,16 @@ describe("channels/settings-store", () => {
 
   it("saveChannelsSettings: persists the off tool sandbox", () => {
     saveChannelsSettings({ toolSandbox: "off" });
+    expect(loadChannelsSettings().toolSandbox).toBe("off");
+  });
+
+  it("migrates the removed safe-only mode to off without elevating permissions", () => {
+    fs.writeFileSync(
+      path.join(os.tmpdir(), "channels-settings.json"),
+      JSON.stringify({ toolSandbox: "safe-only" }),
+      "utf8",
+    );
+
     expect(loadChannelsSettings().toolSandbox).toBe("off");
   });
 });

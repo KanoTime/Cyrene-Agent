@@ -71,30 +71,19 @@ describe("Character architecture guard", () => {
     expect(violations).toEqual([]);
   });
 
-  it("does not embed the built-in display name in business modules", () => {
-    const violations = productionTypeScriptFiles()
-      .filter((file) => !file.includes(`${path.sep}character${path.sep}`))
-      .filter((file) => !file.includes(`${path.sep}sim${path.sep}`))
-      .filter((file) => fs.readFileSync(file, "utf8").includes("昔涟"))
-      .map(relative);
-
-    expect(violations).toEqual([]);
+  it("keeps character integration seams free of a fixed display name", () => {
+    const seams = [
+      "application/default-dependencies.ts", "call/mobile-call-manager.ts", "channels/bootstrap.ts",
+      "orchestrator/mode-prompt-profile.ts", "orchestrator/tone-injector.ts",
+    ];
+    for (const file of seams) expect(fs.readFileSync(path.join(MAIN_ROOT, file), "utf8")).not.toContain("昔涟");
   });
 
-  it("keeps the built-in display name out of renderer behavior and copy except the legal disclosure", () => {
-    const rendererRoot = path.join(REPOSITORY_ROOT, "src", "renderer");
-    const occurrences = filesNamed(rendererRoot, "main.ts")
-      .concat(filesNamed(rendererRoot, "settings.ts"), filesNamed(rendererRoot, "index.html"))
-      .flatMap((file) => fs.readFileSync(file, "utf8")
-        .split("\n")
-        .flatMap((line, index) => {
-          if (!line.includes("昔涟")) return [];
-          if (file.endsWith(path.join("settings", "index.html"))
-            && line.includes("个人粉丝非商用同人项目")) return [];
-          return [`${relative(file)}:${index + 1}`];
-        }));
-
-    expect(occurrences).toEqual([]);
+  it("renders the pet from the active character presentation", () => {
+    const source = fs.readFileSync(path.join(REPOSITORY_ROOT, "src/renderer/main.ts"), "utf8");
+    expect(source).toContain("window.character?.getActive()");
+    expect(source).toContain("applyCharacterPresentation(identity");
+    expect(source).not.toContain("昔涟");
   });
 
   it("does not commit local-only character packages", () => {

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAskSubmission,
+  buildPlanApprovalSubmission,
   createAskDrafts,
   describePermissionRequest,
   describeRunStage,
   isAskComplete,
   normalizeChoiceInteraction,
+  normalizePopQuizCard,
   normalizeTaskPlanPresentation,
   resolveComposerSlot,
   selectAskOption,
@@ -68,64 +70,6 @@ describe("work run presentation", () => {
     })).toBe("执行「自定义操作」");
   });
 
-  it("turns a pending Code verification command into the shared approval slot", () => {
-    const normalize = (runPresentation as typeof runPresentation & {
-      normalizeCodeVerificationInteraction?: (value: unknown) => ComposerInteraction | undefined;
-    }).normalizeCodeVerificationInteraction;
-
-    expect(normalize?.({
-      approvalId: "verification-1",
-      runId: "run-1",
-      chatSessionId: "chat-1",
-      clineSessionId: "cline-1",
-      stepId: "step-1",
-      trust: "workspace_script",
-      executable: "npm",
-      args: ["test"],
-      cwd: "C:\\repo",
-      source: "package_script",
-      status: "pending",
-      createdAt: 1,
-    })).toEqual({
-      kind: "permission",
-      id: "verification-1",
-      source: "code_verification",
-      sessionId: "chat-1",
-      toolName: "验证命令",
-      summary: "npm test",
-      workspaceName: "C:\\repo",
-      targetPath: "package_script",
-    });
-  });
-
-  it("turns a Cline Ask into the shared Ask slot with custom input", () => {
-    const normalize = (runPresentation as typeof runPresentation & {
-      normalizeCodeAskInteraction?: (value: unknown) => ComposerInteraction | undefined;
-    }).normalizeCodeAskInteraction;
-
-    expect(normalize?.({
-      promptId: "ask-1",
-      chatSessionId: "chat-1",
-      clineSessionId: "cline-1",
-      runId: "run-1",
-      question: "最喜欢什么水果？",
-      options: ["草莓", "西瓜"],
-      createdAt: 1,
-    })).toEqual({
-      kind: "ask",
-      id: "ask-1",
-      source: "code",
-      runId: "run-1",
-      question: "最喜欢什么水果？",
-      options: [
-        { id: "草莓", label: "草莓" },
-        { id: "西瓜", label: "西瓜" },
-      ],
-      allowCustomInput: true,
-      responseKind: "choice",
-    });
-  });
-
   it("normalizes both legacy choices and structured clarification into the same composer slot", () => {
     expect(normalizeChoiceInteraction({
       id: "choice-1",
@@ -180,6 +124,7 @@ describe("work run presentation", () => {
       id: "choice-3",
       runId: "run-7",
       revision: 2,
+      cardMode: "semantic_clarification",
       intro: "还需要确认两个细节。",
       responseKind: "submission",
       question: "希望生成哪种格式？",
@@ -198,6 +143,57 @@ describe("work run presentation", () => {
         freeTextPlaceholder: "填写其他格式",
         multiple: false,
       }],
+    });
+  });
+
+  it("normalizes a required text-only Ask question", () => {
+    expect(normalizeChoiceInteraction({
+      interactionId: "choice-text",
+      runId: "run-text",
+      revision: 1,
+      mode: "semantic_clarification",
+      intro: "还需要一句补充。",
+      questions: [{
+        id: "note",
+        prompt: "还有什么要求？",
+        required: true,
+        multiple: false,
+        options: [],
+        customInput: { enabled: true, placeholder: "请输入要求" },
+      }],
+    })).toMatchObject({
+      kind: "ask",
+      id: "choice-text",
+      responseKind: "submission",
+      questions: [{
+        id: "note",
+        options: [],
+        allowCustomInput: true,
+        multiple: false,
+      }],
+    });
+  });
+
+  it("accepts a runtime-owned fixed-choice card with custom input disabled", () => {
+    expect(normalizeChoiceInteraction({
+      interactionId: "confirm-1",
+      runId: "run-1",
+      revision: 1,
+      mode: "semantic_clarification",
+      questions: [{
+        id: "decision",
+        prompt: "是否仍要允许下一次相同操作？",
+        required: true,
+        multiple: false,
+        options: [
+          { id: "allow", label: "仍然允许" },
+          { id: "deny", label: "不要重复" },
+        ],
+        customInput: { enabled: false, placeholder: "" },
+      }],
+    })).toMatchObject({
+      id: "confirm-1",
+      questions: [{ id: "decision", allowCustomInput: false }],
     });
   });
 
@@ -279,6 +275,92 @@ describe("work run presentation", () => {
     })).toBe(true);
   });
 
+  it("keeps the plan_approval card mode so the composer slot can route to the approval panel", () => {
+    const payload = {
+      interactionId: "choice-plan",
+      runId: "run-plan",
+      revision: 1,
+      mode: "plan_approval",
+      intro: "计划已提交，请审阅计划内容后决定",
+      questions: [{
+        id: "question-1",
+        prompt: "是否批准此计划？",
+        required: true,
+        multiple: false,
+        options: [
+          { id: "question-1-option-1", label: "批准" },
+          { id: "question-1-option-2", label: "需要修改" },
+          { id: "question-1-option-3", label: "不批准" },
+        ],
+        customInput: { enabled: true, placeholder: "请描述你想修改的内容…" },
+      }],
+    };
+
+    expect(normalizeChoiceInteraction(payload)).toMatchObject({
+      kind: "ask",
+      id: "choice-plan",
+      cardMode: "plan_approval",
+      responseKind: "submission",
+    });
+    // 未知 mode 不进 plan_approval 分支，普通询问卡照常渲染
+    expect(normalizeChoiceInteraction({ ...payload, mode: "unknown_mode" })).toMatchObject({
+      cardMode: undefined,
+    });
+  });
+
+  it("builds plan approval submissions by option position with revise text attached", () => {
+    const interaction = normalizeChoiceInteraction({
+      interactionId: "choice-plan",
+      runId: "run-plan",
+      revision: 3,
+      mode: "plan_approval",
+      intro: "计划已提交，请审阅计划内容后决定",
+      questions: [{
+        id: "question-1",
+        prompt: "是否批准此计划？",
+        required: true,
+        multiple: false,
+        options: [
+          { id: "question-1-option-1", label: "批准" },
+          { id: "question-1-option-2", label: "需要修改" },
+          { id: "question-1-option-3", label: "不批准" },
+        ],
+        customInput: { enabled: true, placeholder: "请描述你想修改的内容…" },
+      }],
+    })!;
+
+    // 位置契约：第 1 个=批准、第 2 个=需要修改、第 3 个=不批准
+    expect(buildPlanApprovalSubmission(interaction, "approve")).toEqual({
+      interactionId: "choice-plan",
+      runId: "run-plan",
+      revision: 3,
+      answers: [{ questionId: "question-1", source: "option", optionId: "question-1-option-1" }],
+    });
+    expect(buildPlanApprovalSubmission(interaction, "reject")).toEqual({
+      interactionId: "choice-plan",
+      runId: "run-plan",
+      revision: 3,
+      answers: [{ questionId: "question-1", source: "option", optionId: "question-1-option-3" }],
+    });
+    expect(buildPlanApprovalSubmission(interaction, "revise", "  第三步改成先写测试  ")).toEqual({
+      interactionId: "choice-plan",
+      runId: "run-plan",
+      revision: 3,
+      answers: [{
+        questionId: "question-1",
+        source: "option_with_text",
+        optionId: "question-1-option-2",
+        text: "第三步改成先写测试",
+      }],
+    });
+
+    // 空意见 / 非 plan_approval 卡：拒绝构造提交
+    expect(() => buildPlanApprovalSubmission(interaction, "revise", "   ")).toThrow("E_ASK_SUBMISSION_INCOMPLETE");
+    expect(() => buildPlanApprovalSubmission(interaction, "revise")).toThrow("E_ASK_SUBMISSION_INCOMPLETE");
+    const plain = { ...interaction, cardMode: undefined } as typeof interaction;
+    expect(() => buildPlanApprovalSubmission(plain, "approve")).toThrow("E_ASK_SUBMISSION_INCOMPLETE");
+  });
+
   it("keeps one plan card updated from task-plan snapshots", () => {
     expect(normalizeTaskPlanPresentation({
       goal: "整理今日信息",
@@ -295,5 +377,101 @@ describe("work run presentation", () => {
         { id: "s3", title: "清理旧文件", status: "pending" },
       ],
     });
+  });
+
+  it("normalizes a valid pop quiz card and gives it its own composer slot", () => {
+    const card = {
+      quizId: "quiz-1-1",
+      runId: "run-quiz",
+      intro: "答完这几题看看掌握没有。",
+      questions: [
+        {
+          id: "q1",
+          type: "choice",
+          question: "true + true 的结果是？",
+          options: [
+            { id: "q1-opt-1", label: "2" },
+            { id: "q1-opt-2", label: "true" },
+          ],
+          learningObjective: "布尔值的隐式类型转换",
+        },
+        {
+          id: "q2",
+          type: "short_answer",
+          question: "用自己的话说说什么是闭包。",
+          options: [],
+          learningObjective: "闭包的概念",
+        },
+      ],
+    };
+    const interaction = normalizePopQuizCard(card)!;
+    expect(interaction).toEqual({
+      kind: "quiz",
+      id: "quiz-1-1",
+      runId: "run-quiz",
+      intro: "答完这几题看看掌握没有。",
+      questions: [
+        {
+          id: "q1",
+          type: "choice",
+          question: "true + true 的结果是？",
+          options: [
+            { id: "q1-opt-1", label: "2" },
+            { id: "q1-opt-2", label: "true" },
+          ],
+          learningObjective: "布尔值的隐式类型转换",
+        },
+        {
+          id: "q2",
+          type: "short_answer",
+          question: "用自己的话说说什么是闭包。",
+          options: [],
+          learningObjective: "闭包的概念",
+        },
+      ],
+    });
+    expect(resolveComposerSlot(interaction)).toBe("quiz");
+  });
+
+  it("rejects malformed pop quiz payloads instead of rendering half a card", () => {
+    const valid = {
+      quizId: "quiz-2-1",
+      runId: "run-quiz",
+      intro: "",
+      questions: [{
+        id: "q1",
+        type: "true_false",
+        question: "1 + 1 === 2",
+        options: [],
+        learningObjective: "",
+      }],
+    };
+    // 完整合法的卡片本身可以通过
+    expect(normalizePopQuizCard(valid)).toBeDefined();
+    // 缺 quizId / runId / questions：直接失效
+    expect(normalizePopQuizCard({ ...valid, quizId: "" })).toBeUndefined();
+    expect(normalizePopQuizCard({ ...valid, runId: "" })).toBeUndefined();
+    expect(normalizePopQuizCard({ ...valid, questions: "not-array" })).toBeUndefined();
+    // 题型不在四种之内：整卡失效
+    expect(normalizePopQuizCard({
+      ...valid,
+      questions: [{ ...valid.questions[0], type: "fill_blank" }],
+    })).toBeUndefined();
+    // 选择题选项不足 2 个：整卡失效（渲染出来也没法答）
+    expect(normalizePopQuizCard({
+      ...valid,
+      questions: [{
+        id: "q1",
+        type: "choice",
+        question: "选一个",
+        options: [{ id: "q1-opt-1", label: "唯一选项" }],
+        learningObjective: "",
+      }],
+    })).toBeUndefined();
+    // 题目数组里有任何一题废掉，不能只渲染剩下那半张卡
+    expect(normalizePopQuizCard({
+      ...valid,
+      questions: [valid.questions[0], { id: "q2", type: "choice", question: "", options: [] }],
+    })).toBeUndefined();
   });
 });

@@ -1,9 +1,10 @@
-export type AsrEngine = "off" | "aliyun" | "local";
+export type AsrEngine = "off" | "aliyun" | "local" | "mossland" | "minimax";
 export type AsrLanguage = "zh" | "en" | "auto";
 
 export interface AsrConfig {
   engine: AsrEngine;
-  language: AsrLanguage;
+  language?: AsrLanguage;
+  apiKey?: string;
   appKey?: string;
   accessKeyId?: string;
   accessKeySecret?: string;

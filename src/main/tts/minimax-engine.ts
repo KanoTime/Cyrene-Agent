@@ -13,6 +13,7 @@ import * as path from "path";
 import { WebSocket } from "ws";
 import { trackCharacterBoundActivity } from "../character/character-bound-activity";
 import { resolveTimeoutPolicy } from "../runtime-policy";
+import { buildMiniMaxErrorMessage } from "../../shared/minimax-voice";
 import { enhanceMiniMaxText, type MiniMaxVocalEnhanceOptions } from "./minimax-vocal-enhancer";
 
 const BASE_URL = "https://api.minimaxi.com";
@@ -70,6 +71,7 @@ export async function uploadFile(
     },
     body,
   });
+  const traceId = response.headers.get("trace_id") ?? response.headers.get("trace-id");
 
   const data = (await response.json()) as {
     file?: { file_id: string; bytes: number; filename: string; purpose: string };
@@ -77,7 +79,7 @@ export async function uploadFile(
   };
 
   if (data.base_resp?.status_code !== 0 || !data.file) {
-    throw new Error(`上传失败: ${data.base_resp?.status_msg ?? "未知错误"} (code: ${data.base_resp?.status_code})`);
+    throw new Error(`上传失败：${buildMiniMaxErrorMessage(data.base_resp?.status_code, data.base_resp?.status_msg, traceId ?? undefined)}`);
   }
 
   return {
@@ -133,6 +135,7 @@ export async function cloneVoice(opts: CloneVoiceOptions): Promise<CloneVoiceRes
     },
     body: JSON.stringify(payload),
   });
+  const traceId = response.headers.get("trace_id") ?? response.headers.get("trace-id");
 
   const data = (await response.json()) as {
     data?: { audio?: string; demo_audio?: string };
@@ -140,7 +143,7 @@ export async function cloneVoice(opts: CloneVoiceOptions): Promise<CloneVoiceRes
   };
 
   if (data.base_resp?.status_code !== 0) {
-    throw new Error(`复刻失败: ${data.base_resp?.status_msg ?? "未知错误"} (code: ${data.base_resp?.status_code})`);
+    throw new Error(`复刻失败：${buildMiniMaxErrorMessage(data.base_resp?.status_code, data.base_resp?.status_msg, traceId ?? undefined)}`);
   }
 
   return {
@@ -342,7 +345,7 @@ async function synthesizeUntracked(opts: SynthesizeOptions): Promise<Buffer> {
             removeAbortListener();
             ws.close();
             log({ phase: "error", base_resp: msg.base_resp, durationMs: Date.now() - startedAt });
-            reject(new Error(`合成失败: ${msg.base_resp.status_msg} (code: ${msg.base_resp.status_code})`));
+            reject(new Error(`合成失败：${buildMiniMaxErrorMessage(msg.base_resp.status_code, msg.base_resp.status_msg)}`));
           }
         }
       } catch (err) {

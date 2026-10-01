@@ -2,11 +2,10 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const html = fs.readFileSync(fileURLToPath(new URL("./index.html", import.meta.url)), "utf8");
+import { CHARACTER_SETTINGS_MARKUP as html } from "../react/features/settings/fork-settings-markup";
 
 describe("character settings markup", () => {
-  it("adds a dedicated character navigation entry and import surface", () => {
-    expect(html).toContain('data-section="characters"');
+  it("retains character import and archive controls in the React settings surface", () => {
     expect(html).toContain('id="characters-panel"');
     expect(html).toContain('id="character-import-btn"');
     expect(html).toContain('id="character-package-list"');

@@ -1,6 +1,5 @@
-import { app } from "electron";
 import * as fs from "node:fs";
-import * as path from "node:path";
+import { findPromptPath } from "../external-content-paths";
 
 /**
  * 加载 prompts 目录下的 Markdown/文本文件。
@@ -8,8 +7,8 @@ import * as path from "node:path";
  */
 export function loadPromptFile(filename: string): string {
   try {
-    const filePath = path.join(app.getAppPath(), "prompts", filename);
-    if (!fs.existsSync(filePath)) return "";
+    const filePath = findPromptPath(filename);
+    if (!filePath) return "";
     return fs.readFileSync(filePath, "utf8").trim();
   } catch {
     return "";

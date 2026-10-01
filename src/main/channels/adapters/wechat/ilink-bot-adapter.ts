@@ -37,7 +37,7 @@ import {
   isWechatSaveIntent,
   type InboundMediaDescriptor,
 } from "./inbound-media";
-import { getAsrConfig } from "../../../asr/volcano-asr-engine";
+import { getAsrConfig } from "../../../asr/asr-config";
 import { transcribeWechatVoiceSource } from "./wechat-voice-asr";
 import type {
   ChannelAttachment,
@@ -505,6 +505,8 @@ export class ILinkBotAdapter implements ChannelAdapter {
         : {}),
       senderId: msg.fromUserId,
       chatId: msg.fromUserId,
+      // 透传平台消息 ID：turn ID 由此保持稳定，同一入站消息重投不会重复执行
+      messageId: msg.msgId,
       text: voiceText || msg.content || "",
       attachments: attachments.length > 0 ? attachments : undefined,
       at: new Date(),
@@ -821,7 +823,9 @@ async function transcribeInboundWechatVoice(
 ): Promise<string> {
   if (!item.media) throw new Error("缺少语音下载参数");
   const cfg = getAsrConfig();
-  if (!cfg || cfg.engine === "off") {
+  if (!cfg
+      || (cfg.engine === "aliyun" && (!cfg.appKey || !cfg.accessKeyId || !cfg.accessKeySecret))
+      || ((cfg.engine === "mossland" || cfg.engine === "minimax") && !cfg.apiKey)) {
     throw new Error("ASR 未配置");
   }
 
@@ -921,8 +925,16 @@ function isWechatAsrConfigured(): boolean {
       asrAliyunAppKey?: unknown;
       asrAliyunAccessKeyId?: unknown;
       asrAliyunAccessKeySecret?: unknown;
+      ttsMosslandKey?: unknown;
+      asrMinimaxKey?: unknown;
     };
     if (settings.asrEngine === "local") return true;
+    if (settings.asrEngine === "mossland") {
+      return Boolean(typeof settings.ttsMosslandKey === "string" && settings.ttsMosslandKey.trim());
+    }
+    if (settings.asrEngine === "minimax") {
+      return Boolean(typeof settings.asrMinimaxKey === "string" && settings.asrMinimaxKey.trim());
+    }
     if (settings.asrEngine !== "aliyun") return false;
     return Boolean(
       typeof settings.asrAliyunAppKey === "string" && settings.asrAliyunAppKey.trim()

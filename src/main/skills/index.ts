@@ -9,6 +9,8 @@ import { skillRegistry } from "./skill-registry";
 import { registerSkillTools } from "./skill-tools";
 import type { SkillEntry } from "./types";
 import { logger, LogTag } from "../logger";
+import { getExternalContentPaths, resolveSkillScanSources, resolveSkillsSnapshotArchivePath } from "../external-content-paths";
+import { installSkillsSnapshot } from "./snapshot-install";
 
 const LOG_PREFIX = "[Skills]";
 
@@ -29,20 +31,25 @@ function loadEnabledState(): Record<string, boolean> {
 }
 
 /**
- * 启动入口：扫描双源 skills → 灌入 registry（user 目录级覆盖 builtin + 合并 enabled 状态）→ 注册 meta-tool。
+ * 启动入口：首启把第三方 skills 快照解压到 user 区（哨兵保证只装一次），
+ * 再扫描双源 skills → 灌入 registry（user 目录级覆盖 builtin + 合并 enabled 状态）→ 注册 meta-tool。
  * 必须在 app.whenReady 之后调用（依赖 app.getPath）。
  */
-export function initSkills(): void {
-  const builtinDir = path.join(app.getAppPath(), "skills");
-  const userDir = path.join(app.getPath("userData"), "skills");
+export async function initSkills(): Promise<void> {
+  const paths = getExternalContentPaths();
 
-  const builtin = scanSkills(builtinDir, "builtin");
-  const user = scanSkills(userDir, "user");
+  // 快照安装必须在扫描之前完成，否则首启扫不到归档里的第三方 skill。
+  const archivePath = resolveSkillsSnapshotArchivePath(paths);
+  const userSkillsDir = paths.userSkillDirectories[0];
+  await installSkillsSnapshot({ archivePath, userSkillsDir });
 
-  // 合并：按 id，user 覆盖 builtin（目录级整体覆盖，见 spec 4.1）
+  const sources = resolveSkillScanSources(paths);
+
+  // 合并：扫描源按低到高优先级排列，user 覆盖 builtin。
   const map = new Map<string, SkillEntry>();
-  for (const s of builtin) map.set(s.id, s);
-  for (const s of user) map.set(s.id, s);
+  for (const source of sources) {
+    for (const skill of scanSkills(source.directory, source.source)) map.set(skill.id, skill);
+  }
 
   // 合并 enabled 状态（settings.json 持久化的覆盖默认 true）
   const saved = loadEnabledState();
@@ -52,6 +59,7 @@ export function initSkills(): void {
   }
 
   registerSkillTools();
+  logger.info(LogTag.Skills, "scan roots:", sources.map((source) => `${source.source}:${source.directory}`).join(" | "));
   logger.info(LogTag.Skills, `loaded ${map.size} skills:`, Array.from(map.keys()).join(", ") || "(none)");
 }
 
@@ -68,18 +76,48 @@ export function setSkillEnabled(id: string, enabled: boolean): void {
   }
 }
 
-/** 返回所有 skill 的元数据（给 UI 用）。 */
+/** 返回所有 skill 的元数据（给 UI 用）。hiddenFromUi 的技能不暴露。 */
 export function listSkillsForUi() {
-  return skillRegistry.getAll().map(s => ({
-    id: s.id,
-    name: s.name,
-    description: s.description,
-    tools: s.tools ?? [],
-    enabled: s.enabled,
-    source: s.source,
-    version: s.version,
-    references: s.references,
-  }));
+  return skillRegistry
+    .getAll()
+    .filter((s) => !s.hiddenFromUi)
+    .map(s => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      tools: s.tools ?? [],
+      enabled: s.enabled,
+      source: s.source,
+      version: s.version,
+      references: s.references,
+    }));
+}
+
+/**
+ * 重新扫描 user skills 目录并更新 registry。
+ * 用于用户安装/删除 skill 后，无需重启应用即可刷新 UI。
+ * 返回扫描后 registry 中 skill 总数。
+ */
+export function rescanSkills(): number {
+  const sources = resolveSkillScanSources(getExternalContentPaths());
+
+  const map = new Map<string, SkillEntry>();
+  for (const source of sources) {
+    for (const skill of scanSkills(source.directory, source.source)) map.set(skill.id, skill);
+  }
+
+  const saved = loadEnabledState();
+  // 清理 registry 中已不存在的 skill，避免删除后仍残留
+  for (const id of skillRegistry.getAll().map((s) => s.id)) {
+    if (!map.has(id)) skillRegistry.unregister?.(id);
+  }
+  for (const s of map.values()) {
+    if (s.id in saved) s.enabled = saved[s.id];
+    skillRegistry.register(s);
+  }
+
+  logger.info(LogTag.Skills, `rescanned ${map.size} skills:`, Array.from(map.keys()).join(", ") || "(none)");
+  return map.size;
 }
 
 export { skillRegistry } from "./skill-registry";

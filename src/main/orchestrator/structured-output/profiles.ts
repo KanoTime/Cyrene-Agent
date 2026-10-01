@@ -24,7 +24,9 @@ const DEFINITIONS: readonly ProfileDefinition[] = [
     id: "openai-structured-output",
     provider: "chatgpt",
     transport: "openai",
-    modelPattern: /^(?:gpt-5(?:\.\d+)?(?:-(?:sol|terra|luna))?|gpt-4\.1(?:$|-)|gpt-4o-mini(?:$|-)|gpt-4o-(?:2024-08-06|2024-11-20)|o[134](?:$|-))/i,
+    // gpt-6 按家族前缀匹配（已发布型号自动覆盖：astra / sol / luna），
+    // 不预测未来小版本号，协议兼容矩阵比 UI 能力表更保守。
+    modelPattern: /^(?:gpt-6(?:$|-)|gpt-5(?:\.\d+)?(?:-(?:sol|terra|luna))?|gpt-4\.1(?:$|-)|gpt-4o-mini(?:$|-)|gpt-4o-(?:2024-08-06|2024-11-20)|o[134](?:$|-))/i,
     tier: "A",
     mode: "provider_json_schema",
     verification: "official",
@@ -60,7 +62,8 @@ const DEFINITIONS: readonly ProfileDefinition[] = [
     id: "deepseek-json-object",
     provider: "deepseek",
     transport: "openai",
-    modelPattern: /^deepseek-v4-(?:pro|flash)$/i,
+    // V4.1 Flash（deepseek-flash）与 V4 旧名（官方路由到 V4.1 Flash）均支持 JSON Output
+    modelPattern: /^deepseek-(?:v4-(?:pro|flash)|flash)$/i,
     tier: "B",
     mode: "provider_json_object",
     verification: "official",
@@ -78,7 +81,7 @@ const DEFINITIONS: readonly ProfileDefinition[] = [
     id: "glm-json-object",
     provider: "glm",
     transport: "openai",
-    modelPattern: /^glm-(?:5\.[12]|4\.[67])(?:$|-)/i,
+    modelPattern: /^glm-(?:5\.[123]|4\.[67])(?:$|-)/i,
     tier: "B",
     mode: "provider_json_object",
     verification: "official",
@@ -87,7 +90,9 @@ const DEFINITIONS: readonly ProfileDefinition[] = [
     id: "mimo-json-object",
     provider: "mimo",
     transport: "openai",
-    modelPattern: /^mimo-v2\.5(?:$|-)/i,
+    // V2.6（2026-09-22 发布）与 V2.5 同 API 面（官方文档请求体一致），json_object
+    // 同适用；V2.5 官方 2026-10-21 下线，模式保留至下线后清理。
+    modelPattern: /^mimo-v2\.(?:5|6)(?:$|-)/i,
     tier: "B",
     mode: "provider_json_object",
     verification: "official",
@@ -111,8 +116,8 @@ const MEMORY_REPAIR: StructuredOutputProfile["repair"]["memory_judge"] = {
   minimumRemainingBudgetMs: 500,
 };
 
-// 默认 repair 策略（所有新 stage 复用 action_gate 的配置）
-const DEFAULT_GATE_REPAIR = {
+// 通用 stage（task_router / planner / native_fc / memory）的默认 repair 策略
+const DEFAULT_STAGE_REPAIR = {
   maxAttempts: 2,
   totalBudgetMs: 10_000,
   perAttemptTimeoutMs: 5_000,
@@ -126,18 +131,17 @@ const REPAIR: StructuredOutputProfile["repair"] = {
     perAttemptTimeoutMs: 4_000,
     minimumRemainingBudgetMs: 500,
   },
-  action_gate: DEFAULT_GATE_REPAIR,
-  task_router: DEFAULT_GATE_REPAIR,
-  planner: DEFAULT_GATE_REPAIR,
-  native_fc: DEFAULT_GATE_REPAIR,
-  memory: DEFAULT_GATE_REPAIR,
+  task_router: DEFAULT_STAGE_REPAIR,
+  planner: DEFAULT_STAGE_REPAIR,
+  native_fc: DEFAULT_STAGE_REPAIR,
+  memory: DEFAULT_STAGE_REPAIR,
   memory_judge: MEMORY_REPAIR,
   memory_compress: MEMORY_REPAIR,
   memory_reflect: MEMORY_REPAIR,
   memory_resolve: MEMORY_REPAIR,
 };
 
-const A_GATE_REPAIR = {
+const A_STAGE_REPAIR = {
   maxAttempts: 2,
   totalBudgetMs: 25_000,
   perAttemptTimeoutMs: 12_500,
@@ -151,11 +155,10 @@ const A_REPAIR: StructuredOutputProfile["repair"] = {
     perAttemptTimeoutMs: 10_000,
     minimumRemainingBudgetMs: 500,
   },
-  action_gate: A_GATE_REPAIR,
-  task_router: A_GATE_REPAIR,
-  planner: A_GATE_REPAIR,
-  native_fc: A_GATE_REPAIR,
-  memory: A_GATE_REPAIR,
+  task_router: A_STAGE_REPAIR,
+  planner: A_STAGE_REPAIR,
+  native_fc: A_STAGE_REPAIR,
+  memory: A_STAGE_REPAIR,
   memory_judge: MEMORY_REPAIR,
   memory_compress: MEMORY_REPAIR,
   memory_reflect: MEMORY_REPAIR,
@@ -169,18 +172,17 @@ const KIMI_SLOW_REPAIR: StructuredOutputProfile["repair"] = {
     perAttemptTimeoutMs: 20_000,
     minimumRemainingBudgetMs: 500,
   },
-  action_gate: A_GATE_REPAIR,
-  task_router: A_GATE_REPAIR,
-  planner: A_GATE_REPAIR,
-  native_fc: A_GATE_REPAIR,
-  memory: A_GATE_REPAIR,
+  task_router: A_STAGE_REPAIR,
+  planner: A_STAGE_REPAIR,
+  native_fc: A_STAGE_REPAIR,
+  memory: A_STAGE_REPAIR,
   memory_judge: MEMORY_REPAIR,
   memory_compress: MEMORY_REPAIR,
   memory_reflect: MEMORY_REPAIR,
   memory_resolve: MEMORY_REPAIR,
 };
 
-const B_GATE_REPAIR = {
+const B_STAGE_REPAIR = {
   maxAttempts: 2,
   totalBudgetMs: 20_000,
   perAttemptTimeoutMs: 10_000,
@@ -194,18 +196,17 @@ const B_REPAIR: StructuredOutputProfile["repair"] = {
     perAttemptTimeoutMs: 8_000,
     minimumRemainingBudgetMs: 500,
   },
-  action_gate: B_GATE_REPAIR,
-  task_router: B_GATE_REPAIR,
-  planner: B_GATE_REPAIR,
-  native_fc: B_GATE_REPAIR,
-  memory: B_GATE_REPAIR,
+  task_router: B_STAGE_REPAIR,
+  planner: B_STAGE_REPAIR,
+  native_fc: B_STAGE_REPAIR,
+  memory: B_STAGE_REPAIR,
   memory_judge: MEMORY_REPAIR,
   memory_compress: MEMORY_REPAIR,
   memory_reflect: MEMORY_REPAIR,
   memory_resolve: MEMORY_REPAIR,
 };
 
-const MINIMAX_GATE_REPAIR = {
+const MINIMAX_STAGE_REPAIR = {
   maxAttempts: 2,
   totalBudgetMs: 12_000,
   perAttemptTimeoutMs: 7_000,
@@ -219,11 +220,10 @@ const MINIMAX_REPAIR: StructuredOutputProfile["repair"] = {
     perAttemptTimeoutMs: 5_500,
     minimumRemainingBudgetMs: 500,
   },
-  action_gate: MINIMAX_GATE_REPAIR,
-  task_router: MINIMAX_GATE_REPAIR,
-  planner: MINIMAX_GATE_REPAIR,
-  native_fc: MINIMAX_GATE_REPAIR,
-  memory: MINIMAX_GATE_REPAIR,
+  task_router: MINIMAX_STAGE_REPAIR,
+  planner: MINIMAX_STAGE_REPAIR,
+  native_fc: MINIMAX_STAGE_REPAIR,
+  memory: MINIMAX_STAGE_REPAIR,
   memory_judge: MEMORY_REPAIR,
   memory_compress: MEMORY_REPAIR,
   memory_reflect: MEMORY_REPAIR,

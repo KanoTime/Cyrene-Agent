@@ -1,19 +1,16 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import {
-  DEFAULT_WINDOW_CORNER_RADIUS,
-  normalizeWindowCornerRadius,
-} from "../../shared/window-corner-radius";
-import { DEFAULT_UI_FONT, normalizeUiFont } from "../../shared/ui-font";
+import { DEFAULT_MESSAGE_TYPOGRAPHY, normalizeMessageTypography } from "../../shared/message-typography";
 import {
   DEFAULT_CUSTOM_STYLE,
   normalizeCustomStyleConfig,
   normalizeStyleId,
 } from "../../shared/style-sampling";
 import { normalizeUiTheme } from "../../shared/ui-theme";
+import { MAX_PARALLEL_TOOL_CALLS } from "../../shared/task-session";
 import { normalizeUiIcon } from "../../shared/ui-icon";
-import { normalizeChatAppearance } from "../../shared/chat-appearance";
+import { normalizeUiLanguage } from "../../shared/ui-language";
 import {
   normalizeChatSocialContextEnabled,
   normalizeDefaultChatMode,
@@ -22,27 +19,43 @@ import {
   normalizeProactiveDeliveryTarget,
   normalizeSegmentedOutputMode,
 } from "../../shared/preferences";
-import { normalizeWindowVisibilitySettings } from "../window-visibility-settings";
 import { normalizeCitaSettings } from "../cita/settings";
 import { getGeneralSettingsPath } from "../settings-store";
 import type { GeneralSettings } from "./general-settings";
+import { DEFAULT_MOSSLAND_TTS_MODEL } from "../../shared/tts-types";
+import type { ToolModeOverrides } from "../orchestrator/tools/registry/tool-registry";
+import type { ConversationMode } from "../../shared/chat-types";
+import type { SkillModeOverrides } from "../skills/types";
+import { normalizeLspServerOverrides } from "../lsp/server-catalog";
+import {
+  applyInstallerLaunchAtLoginSelection,
+  consumeInstallerLaunchAtLoginSelection,
+} from "./launch-at-login";
 
 const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
+  plugins: {},
+  maxParallelToolCalls: 4,
+  taskCharacterPersonaEnabled: true,
   citaEnabled: false,
   citaSemanticEngine: "remote",
   chatSocialContextEnabled: false,
+  momentsEnabled: true,
+  chatMomentsContextEnabled: true,
+  cyreneMomentsPostingEnabled: false,
+  cyreneMomentsReactionsEnabled: true,
+  momentsCharacterReactionsEnabled: true,
+  momentsLiveliness: "quiet",
   petAlwaysOnTop: true,
+  rememberWindowState: true,
   petVisible: true,
   petZoom: 1,
-  sidebarVisible: true,
-  tasksVisible: true,
+  toastSoundEnabled: true,
   launchAtLogin: false,
   language: "zh-CN",
   uiTheme: "pearl-white",
-  windowCornerRadius: DEFAULT_WINDOW_CORNER_RADIUS,
   uiThemeRadius: false,
-  uiFont: DEFAULT_UI_FONT,
   uiIcon: "cyrene-sun",
+  messageTypography: DEFAULT_MESSAGE_TYPOGRAPHY,
   defaultChatMode: "chat",
   currentStyleId: "default",
   customStyle: DEFAULT_CUSTOM_STYLE,
@@ -54,6 +67,8 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   ttsAutoRead: true,
   ttsSpeed: 1,
   ttsVolume: 1,
+  ttsEarlyReadSplitEnabled: true,
+  ttsEarlyReadSplitMode: "sentence",
   ttsMinimaxKey: "",
   ttsMinimaxVoiceId: "",
   ttsMinimaxModel: "speech-2.8-turbo",
@@ -76,14 +91,15 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   ttsMimoStylePrompt: "温柔、自然、略带亲近感，像在轻声陪用户聊天。",
   ttsMosslandKey: "",
   ttsMosslandVoiceId: "",
-  ttsMosslandModel: "moss-tts",
-  ttsMosslandTestText: "你好呀，很高兴见到你。今天也请多多关照♪",
+  ttsMosslandModel: DEFAULT_MOSSLAND_TTS_MODEL,
+  ttsMosslandTestText: "你好呀，今天也请多多关照♪",
   ttsMosslandFormat: "mp3",
   weatherSource: "open-meteo",
   weatherEnabled: false,
   amapKey: "",
   travelEnabled: false,
   playwrightMcpEnabled: false,
+  filesystemMcpEnabled: false,
   searchEngine: "off",
   searchBochaKey: "",
   searchTavilyKey: "",
@@ -104,6 +120,7 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   asrLocalModelPath: path.join(os.homedir(), "Documents", "local-llms", "qwen3-asr-1.7b", "model"),
   asrLocalTimeoutMs: 30000,
   asrLocalSystemPrompt: "以下是语音转写。技术名词可能包括：Qwen3.5、Cyrene。请忠实转写，不要改写。",
+  asrMinimaxKey: "",
   asrLanguage: "zh",
   asrVadSilenceMs: 1000,
   asrVadThreshold: 0.01,
@@ -113,9 +130,18 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   mobileCallLiveKitApiSecret: "",
   openerMode: "off",
   screenshotHotkey: "Alt+Shift+S",
-  chatLineHeight: 1.75,
-  assistantBubbleEnabled: true,
+  toolModeOverrides: {},
+  chatToolsEnabled: false,
+  skillModeOverrides: {},
+  lspServerOverrides: [],
+  recentProjects: [],
+  disclaimerAcceptedVersion: "",
 };
+
+function normalizeMosslandTtsModel(value: unknown): string {
+  const model = typeof value === "string" ? value.trim() : "";
+  return model && model !== "moss-tts" ? model : DEFAULT_MOSSLAND_TTS_MODEL;
+}
 
 const listeners = new Set<(before: GeneralSettings, after: GeneralSettings) => void>();
 
@@ -134,10 +160,9 @@ function notifyGeneralSettingsChanged(before: GeneralSettings, after: GeneralSet
   }
 }
 
-function normalizeGeneralSettings(
+export function normalizeGeneralSettings(
   input: Partial<GeneralSettings> | null | undefined,
 ): GeneralSettings {
-  const windowVisibility = normalizeWindowVisibilitySettings(input);
   const cita = normalizeCitaSettings({
     enabled: input?.citaEnabled,
     semanticEngine: input?.citaSemanticEngine,
@@ -154,13 +179,56 @@ function normalizeGeneralSettings(
     const num = typeof value === "number" ? value : Number(value);
     return Number.isFinite(num) ? Math.max(1000, Math.min(120000, Math.round(num))) : fallback;
   };
+  const normalizeMaxParallelToolCalls = (value: unknown): number => {
+    const numberValue = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(numberValue)
+      ? Math.max(1, Math.min(MAX_PARALLEL_TOOL_CALLS, Math.trunc(numberValue)))
+      : DEFAULT_GENERAL_SETTINGS.maxParallelToolCalls;
+  };
   return {
+    plugins: Object.fromEntries(
+      Object.entries(input?.plugins ?? {}).filter(
+        (entry): entry is [string, boolean] => typeof entry[1] === "boolean",
+      ),
+    ),
+    maxParallelToolCalls: normalizeMaxParallelToolCalls(input?.maxParallelToolCalls),
+    taskCharacterPersonaEnabled: input?.taskCharacterPersonaEnabled === undefined
+      ? DEFAULT_GENERAL_SETTINGS.taskCharacterPersonaEnabled
+      : Boolean(input.taskCharacterPersonaEnabled),
+    taskModelProfileId: typeof input?.taskModelProfileId === "string" && input.taskModelProfileId
+      ? input.taskModelProfileId
+      : undefined,
+    taskModel: typeof input?.taskModel === "string" && input.taskModel
+      ? input.taskModel
+      : undefined,
     citaEnabled: cita.enabled,
     citaSemanticEngine: cita.semanticEngine,
     chatSocialContextEnabled: normalizeChatSocialContextEnabled(input?.chatSocialContextEnabled),
+    momentsEnabled: input?.momentsEnabled === undefined
+      ? DEFAULT_GENERAL_SETTINGS.momentsEnabled
+      : Boolean(input.momentsEnabled),
+    chatMomentsContextEnabled: input?.chatMomentsContextEnabled === undefined
+      ? DEFAULT_GENERAL_SETTINGS.chatMomentsContextEnabled
+      : Boolean(input.chatMomentsContextEnabled),
+    cyreneMomentsPostingEnabled: input?.cyreneMomentsPostingEnabled === undefined
+      ? DEFAULT_GENERAL_SETTINGS.cyreneMomentsPostingEnabled
+      : Boolean(input.cyreneMomentsPostingEnabled),
+    cyreneMomentsReactionsEnabled: input?.cyreneMomentsReactionsEnabled === undefined
+      ? DEFAULT_GENERAL_SETTINGS.cyreneMomentsReactionsEnabled
+      : Boolean(input.cyreneMomentsReactionsEnabled),
+    momentsCharacterReactionsEnabled: input?.momentsCharacterReactionsEnabled === undefined
+      ? DEFAULT_GENERAL_SETTINGS.momentsCharacterReactionsEnabled
+      : Boolean(input.momentsCharacterReactionsEnabled),
+    // 热闹程度只认三个合法档位，非法值回落默认档（旧配置无此字段也走默认）
+    momentsLiveliness: ["quiet", "natural", "lively"].includes(input?.momentsLiveliness as string)
+      ? (input?.momentsLiveliness as GeneralSettings["momentsLiveliness"])
+      : DEFAULT_GENERAL_SETTINGS.momentsLiveliness,
     petAlwaysOnTop: input?.petAlwaysOnTop === undefined
       ? DEFAULT_GENERAL_SETTINGS.petAlwaysOnTop
       : Boolean(input.petAlwaysOnTop),
+    rememberWindowState: input?.rememberWindowState === undefined
+      ? true
+      : Boolean(input.rememberWindowState),
     petVisible: input?.petVisible === undefined
       ? DEFAULT_GENERAL_SETTINGS.petVisible
       : Boolean(input.petVisible),
@@ -174,15 +242,16 @@ function normalizeGeneralSettings(
       ? Math.round(input.petWindowY)
       : undefined,
     disableGpuElectron: input?.disableGpuElectron,
-    sidebarVisible: windowVisibility.sidebarVisible,
-    tasksVisible: windowVisibility.tasksVisible,
+    toastSoundEnabled: input?.toastSoundEnabled === undefined
+      ? DEFAULT_GENERAL_SETTINGS.toastSoundEnabled
+      : Boolean(input.toastSoundEnabled),
     launchAtLogin: Boolean(input?.launchAtLogin),
-    language: "zh-CN",
+    // 界面语言只认已翻译完成的语种，非法值（含旧配置的 ja/ko）一律回落中文
+    language: normalizeUiLanguage(input?.language),
     uiTheme: normalizeUiTheme(input?.uiTheme),
-    windowCornerRadius: normalizeWindowCornerRadius(input?.windowCornerRadius),
     uiThemeRadius: input?.uiThemeRadius ?? true,
-    uiFont: normalizeUiFont(input?.uiFont),
     uiIcon: normalizeUiIcon(input?.uiIcon),
+    messageTypography: normalizeMessageTypography(input?.messageTypography),
     defaultChatMode: normalizeDefaultChatMode(input?.defaultChatMode),
     currentStyleId: normalizeStyleId(input?.currentStyleId),
     customStyle: normalizeCustomStyleConfig(input?.customStyle),
@@ -202,6 +271,12 @@ function normalizeGeneralSettings(
     ttsVolume: typeof input?.ttsVolume === "number"
       ? Math.max(0, Math.min(1, input.ttsVolume))
       : DEFAULT_GENERAL_SETTINGS.ttsVolume,
+    ttsEarlyReadSplitEnabled: typeof input?.ttsEarlyReadSplitEnabled === "boolean"
+      ? input.ttsEarlyReadSplitEnabled
+      : DEFAULT_GENERAL_SETTINGS.ttsEarlyReadSplitEnabled,
+    ttsEarlyReadSplitMode: ["sentence", "paragraph"].includes(String(input?.ttsEarlyReadSplitMode))
+      ? (input!.ttsEarlyReadSplitMode as "sentence" | "paragraph")
+      : DEFAULT_GENERAL_SETTINGS.ttsEarlyReadSplitMode,
     ttsMinimaxKey: typeof input?.ttsMinimaxKey === "string" ? input.ttsMinimaxKey : "",
     ttsMinimaxVoiceId: typeof input?.ttsMinimaxVoiceId === "string" ? input.ttsMinimaxVoiceId : "",
     ttsMinimaxModel: input?.ttsMinimaxModel === "speech-2.8-hd" ? "speech-2.8-hd" : "speech-2.8-turbo",
@@ -216,6 +291,7 @@ function normalizeGeneralSettings(
     amapKey: typeof input?.amapKey === "string" ? input.amapKey : "",
     travelEnabled: Boolean(input?.travelEnabled),
     playwrightMcpEnabled: Boolean(input?.playwrightMcpEnabled),
+    filesystemMcpEnabled: Boolean(input?.filesystemMcpEnabled),
     searchEngine: ["off", "bocha", "tavily", "minimax", "anySearch"].includes(String(input?.searchEngine))
       ? (input!.searchEngine as "off" | "bocha" | "tavily" | "minimax" | "anySearch")
       : "off",
@@ -232,8 +308,8 @@ function normalizeGeneralSettings(
     emailSmtpUser: typeof input?.emailSmtpUser === "string" ? input.emailSmtpUser : "",
     emailSmtpPass: typeof input?.emailSmtpPass === "string" ? input.emailSmtpPass : "",
     emailFromName: typeof input?.emailFromName === "string" ? input.emailFromName : "",
-    asrEngine: ["off", "aliyun", "local"].includes(String(input?.asrEngine))
-      ? (input!.asrEngine as "off" | "aliyun" | "local")
+    asrEngine: ["off", "aliyun", "mossland", "minimax", "local"].includes(String(input?.asrEngine))
+      ? (input!.asrEngine as "off" | "aliyun" | "mossland" | "minimax" | "local")
       : "off",
     asrAliyunAppKey: typeof input?.asrAliyunAppKey === "string" ? input.asrAliyunAppKey : "",
     asrAliyunAccessKeyId: typeof input?.asrAliyunAccessKeyId === "string" ? input.asrAliyunAccessKeyId : "",
@@ -250,6 +326,7 @@ function normalizeGeneralSettings(
     asrLocalSystemPrompt: typeof input?.asrLocalSystemPrompt === "string"
       ? input.asrLocalSystemPrompt.slice(0, 2000)
       : DEFAULT_GENERAL_SETTINGS.asrLocalSystemPrompt,
+    asrMinimaxKey: typeof input?.asrMinimaxKey === "string" ? input.asrMinimaxKey : "",
     asrLanguage: ["zh", "en", "auto"].includes(String(input?.asrLanguage))
       ? (input!.asrLanguage as "zh" | "en" | "auto")
       : "zh",
@@ -302,22 +379,111 @@ function normalizeGeneralSettings(
       : DEFAULT_GENERAL_SETTINGS.ttsMimoStylePrompt,
     ttsMosslandKey: typeof input?.ttsMosslandKey === "string" ? input.ttsMosslandKey : "",
     ttsMosslandVoiceId: typeof input?.ttsMosslandVoiceId === "string" ? input.ttsMosslandVoiceId : "",
-    ttsMosslandModel: typeof input?.ttsMosslandModel === "string" ? input.ttsMosslandModel : DEFAULT_GENERAL_SETTINGS.ttsMosslandModel,
+    ttsMosslandModel: normalizeMosslandTtsModel(input?.ttsMosslandModel),
     ttsMosslandTestText: typeof input?.ttsMosslandTestText === "string" ? input.ttsMosslandTestText : DEFAULT_GENERAL_SETTINGS.ttsMosslandTestText,
-    ttsMosslandFormat: input?.ttsMosslandFormat === "wav" || input?.ttsMosslandFormat === "pcm"
-      ? input.ttsMosslandFormat
-      : "mp3",
-    ...normalizeChatAppearance(input),
+    ttsMosslandFormat: input?.ttsMosslandFormat === "wav" ? "wav" : "mp3",
+    toolModeOverrides: normalizeToolModeOverrides(input?.toolModeOverrides),
+    chatToolsEnabled: Boolean(input?.chatToolsEnabled),
+    skillModeOverrides: normalizeSkillModeOverrides(input?.skillModeOverrides),
+    lspServerOverrides: normalizeLspServerOverrides(input?.lspServerOverrides),
+    recentProjects: normalizeRecentProjects(input?.recentProjects),
+    disclaimerAcceptedVersion: typeof input?.disclaimerAcceptedVersion === "string"
+      ? input.disclaimerAcceptedVersion.trim().slice(0, 64)
+      : "",
   };
+}
+
+/** 最近项目列表的保留上限。 */
+export const MAX_RECENT_PROJECTS = 10;
+
+/** 规范化最近项目列表：只保留非空字符串、去重，并截断到上限。 */
+function normalizeRecentProjects(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const unique: string[] = [];
+  for (const item of input) {
+    if (typeof item === "string" && item && !unique.includes(item)) {
+      unique.push(item);
+    }
+  }
+  return unique.slice(0, MAX_RECENT_PROJECTS);
+}
+
+/** 记录最近绑定的项目文件夹：新路径置顶、去重、截断到上限后落盘。
+ *  顺序无变化时跳过写盘，避免重复绑定同一项目产生无意义 IO。 */
+export function recordRecentProject(workspaceRoot: string): void {
+  const before = loadGeneralSettings().recentProjects;
+  const next = [workspaceRoot, ...before.filter((p) => p !== workspaceRoot)]
+    .slice(0, MAX_RECENT_PROJECTS);
+  if (next.length === before.length && next.every((p, i) => p === before[i])) return;
+  saveGeneralSettings({ recentProjects: next });
+}
+
+/** 规范化工具-模式覆盖层：仅保留合法的 { toolId: { mode: boolean } } 结构。
+ *  非法值（非对象、非 boolean）被丢弃，空对象兜底。 */
+function normalizeToolModeOverrides(
+  input: unknown,
+): ToolModeOverrides {
+  if (!input || typeof input !== "object") return {};
+  const result: ToolModeOverrides = {};
+  const raw = input as Record<string, unknown>;
+  for (const [toolId, modeMap] of Object.entries(raw)) {
+    if (!modeMap || typeof modeMap !== "object") continue;
+    const filtered: Partial<Record<ConversationMode, boolean>> = {};
+    for (const [mode, value] of Object.entries(modeMap as Record<string, unknown>)) {
+      if (mode !== "chat" && mode !== "work" && mode !== "code" && mode !== "learn") continue;
+      if (typeof value === "boolean") {
+        filtered[mode as ConversationMode] = value;
+      }
+    }
+    if (Object.keys(filtered).length > 0) {
+      result[toolId] = filtered;
+    }
+  }
+  return result;
+}
+
+const SKILL_MODES = new Set(["work", "code", "learn"] as const);
+
+/** 规范化 Skill-模式覆盖层：仅保留合法的 { skillId: { work|code|learn: boolean } } 结构。
+ *  非法值被丢弃，空对象兜底。 */
+function normalizeSkillModeOverrides(
+  input: unknown,
+): SkillModeOverrides {
+  if (!input || typeof input !== "object") return {};
+  const result: SkillModeOverrides = {};
+  const raw = input as Record<string, unknown>;
+  for (const [skillId, modeMap] of Object.entries(raw)) {
+    if (!modeMap || typeof modeMap !== "object") continue;
+    const filtered: Partial<Record<"work" | "code" | "learn", boolean>> = {};
+    for (const [mode, value] of Object.entries(modeMap as Record<string, unknown>)) {
+      if (!SKILL_MODES.has(mode as "work" | "code" | "learn")) continue;
+      if (typeof value === "boolean") {
+        filtered[mode as "work" | "code" | "learn"] = value;
+      }
+    }
+    if (Object.keys(filtered).length > 0) {
+      result[skillId] = filtered;
+    }
+  }
+  return result;
 }
 
 function loadGeneralSettings0(): GeneralSettings {
   try {
     const filePath = getGeneralSettingsPath();
-    if (!fs.existsSync(filePath)) return { ...DEFAULT_GENERAL_SETTINGS };
-    return normalizeGeneralSettings(
-      JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<GeneralSettings>,
+    const existing = fs.existsSync(filePath)
+      ? JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<GeneralSettings>
+      : {};
+    const installerSelection = consumeInstallerLaunchAtLoginSelection(
+      path.join(path.dirname(filePath), "installer-options.json"),
+      fs,
     );
+    const withInstallerSelection = applyInstallerLaunchAtLoginSelection(existing, installerSelection);
+    if (installerSelection !== null) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, JSON.stringify(normalizeGeneralSettings(withInstallerSelection), null, 2));
+    }
+    return normalizeGeneralSettings(withInstallerSelection);
   } catch (err) {
     console.error("[Cyrene] load general settings failed:", err);
     return { ...DEFAULT_GENERAL_SETTINGS };

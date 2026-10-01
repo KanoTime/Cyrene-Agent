@@ -1,5 +1,6 @@
-import type { ChatVendorAdapter, ChatMessage, ChatRequest } from "./vendors/types";
-import type { AgentLoopSettings, TwoPhaseEvent } from "./two-phase-fc-loop";
+import type { ChatVendorAdapter, ChatMessage, ChatRequest, OpenAIContentBlock } from "./vendors/types";
+import type { AgentLoopSettings } from "./cyrene-agent";
+import { recordRequest, recordUsage } from "../token-usage-store";
 import { getActiveCharacterText } from "../character/active-character";
 
 const COMPRESSION_PROMPT = `你正在帮当前活动角色整理对话记忆。请把下面这段较早的对话历史总结成一段简洁的摘要，供后续回复参考。
@@ -17,21 +18,6 @@ const COMPRESSION_PROMPT = `你正在帮当前活动角色整理对话记忆。�
 
 请直接输出摘要内容，不要加任何前缀说明。`;
 
-/** 每轮对话 = user + assistant 两条消息。 */
-function keepRecentCount(mode: string): number {
-  switch (mode) {
-    case "work":
-    case "daily":
-      return 6;
-    case "learn":
-      return 10;
-    case "chat":
-      return 20;
-    default:
-      return 6;
-  }
-}
-
 /** 简单 token 估算：中文字符按 1 token / 1.5 字符，英文按 4 字符 / token。 */
 export function estimateTokens(text: string): number {
   if (!text) return 0;
@@ -44,17 +30,35 @@ export function estimateTokens(text: string): number {
   return Math.ceil(nonAscii / 1.5 + ascii / 4);
 }
 
-export function estimateMessageTokens(messages: ChatMessage[]): number {
-  return messages.reduce((sum, m) => {
-    const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-    return sum + estimateTokens(text) + 4; // +4 为角色/格式开销
-  }, 0);
+/**
+ * 保守固定回退值。协议 ≠ tokenizer：MiniMax 模型走 Anthropic 协议并不会因此
+ * 使用 Claude 的视觉计费算法，故不绑定任何厂商公式。
+ * 现实区间：主流多模态模型单图 1k~5k token；取 4096 保守偏高——
+ * 压缩安全判定宁可高估，不可低估撞穿 context window。
+ */
+export const DEFAULT_IMAGE_TOKEN_ESTIMATE = 4096;
+
+/**
+ * 图片块不计 base64 字符串（按 DEFAULT_IMAGE_TOKEN_ESTIMATE 估算），text 块照常估算。
+ * estimateMessageTokens 与 buildContextUsageSnapshot 共用此函数，防止计量与
+ * 压缩判定口径分裂（见 docs/design/2026-08-26-image-context-screenshot-known-issues.md 问题 2）。
+ */
+export function estimateMessageContentTokens(
+  content: string | OpenAIContentBlock[],
+): number {
+  if (typeof content === "string") return estimateTokens(content);
+  let sum = 0;
+  for (const block of content) {
+    if (block.type === "text") sum += estimateTokens(block.text);
+    else sum += DEFAULT_IMAGE_TOKEN_ESTIMATE; // image_url 块
+  }
+  return sum;
 }
 
-/** 单条工具结果截断，保留摘要即可。 */
-export function truncateToolResult(output: string, maxChars = 2000): string {
-  if (!output || output.length <= maxChars) return output;
-  return output.slice(0, maxChars) + `\n...[截断，原长度 ${output.length}]`;
+export function estimateMessageTokens(messages: ChatMessage[]): number {
+  return messages.reduce((sum, m) => {
+    return sum + estimateMessageContentTokens(m.content ?? "") + 4; // +4 为角色/格式开销
+  }, 0);
 }
 
 function formatConversation(messages: ChatMessage[]): string {
@@ -71,65 +75,11 @@ function formatConversation(messages: ChatMessage[]): string {
     .join("\n\n");
 }
 
-function splitMessages(messages: ChatMessage[]): { systems: ChatMessage[]; conversation: ChatMessage[] } {
-  const systems: ChatMessage[] = [];
-  const conversation: ChatMessage[] = [];
-  for (const m of messages) {
-    if (m.role === "system") systems.push(m);
-    else conversation.push(m);
-  }
-  return { systems, conversation };
-}
-
-export interface CompressOptions {
-  messages: ChatMessage[];
-  adapter: ChatVendorAdapter;
-  settings: AgentLoopSettings;
-  /** 当前要附加到请求里的 system prompt（Tool/Soul 阶段不同）。 */
-  systemContent: string;
-  mode?: string;
-  onEvent?: (event: TwoPhaseEvent) => void;
-  signal?: AbortSignal;
-}
-
-export async function compressConversation(options: CompressOptions): Promise<ChatMessage[]> {
-  const { messages, adapter, settings, systemContent, mode = "work", onEvent, signal } = options;
-  const contextWindow = settings.contextWindowTokens ?? 256000;
-  const threshold = Math.floor(contextWindow * 0.8);
-
-  const { systems, conversation } = splitMessages(messages);
-  const keepCount = keepRecentCount(mode) * 2;
-
-  // 消息太少，不需要压缩
-  if (conversation.length <= keepCount) return messages;
-
-  const systemTokens = estimateTokens(systemContent) + estimateMessageTokens(systems);
-  const conversationTokens = estimateMessageTokens(conversation);
-  const totalTokens = systemTokens + conversationTokens;
-
-  // 未超过阈值，不压缩
-  if (totalTokens < threshold) return messages;
-
-  const compressible = conversation.slice(0, -keepCount);
-  const recent = conversation.slice(-keepCount);
-
-  onEvent?.({ type: "compressing_context" });
-
-  try {
-    const summary = await callSummarizeModel(compressible, adapter, settings, signal);
-    const summaryMessage: ChatMessage = {
-      role: "assistant",
-      content: `[此前对话已压缩为记忆摘要]\n${summary}`,
-    };
-    return [...systems, summaryMessage, ...recent];
-  } catch (err) {
-    console.warn("[ContextManager] 模型压缩失败，回退到截断:", err);
-    // 压缩失败时兜底：直接丢弃最旧的消息，不调用模型
-    return [...systems, ...recent];
-  }
-}
-
-async function callSummarizeModel(
+/**
+ * 独立的 LLM 摘要调用：把一段历史消息摘要成文本。
+ * Chat 模式循环内压缩与「主动压缩」IPC（chats:compact）共用；失败直接 throw，由调用方决定兜底。
+ */
+export async function callSummarizeModel(
   messages: ChatMessage[],
   adapter: ChatVendorAdapter,
   settings: AgentLoopSettings,
@@ -152,6 +102,7 @@ async function callSummarizeModel(
     apiKey: settings.apiKey,
     explicitTransport: settings.explicitTransport,
     reasoning: settings.reasoning,
+    manualReasoning: settings.manualReasoning,
   };
 
   const effectiveRequest = adapter.applyCacheHints?.(request, vendorConfig) ?? request;
@@ -172,6 +123,11 @@ async function callSummarizeModel(
       throw new Error(`压缩请求失败：HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`);
     }
     const parsed = adapter.parseResponse(await response.json());
+    // 压缩是一次真实 LLM 请求，与其他调用一样记入 Token 用量统计
+    recordRequest(settings.model);
+    if (parsed.usage) {
+      recordUsage(parsed.usage.input, parsed.usage.output, 1, parsed.usage.cachedInput, settings.model, parsed.usage.cacheCreation);
+    }
     return parsed.text.trim() || "[压缩结果为空]";
   } finally {
     signal?.removeEventListener("abort", abort);

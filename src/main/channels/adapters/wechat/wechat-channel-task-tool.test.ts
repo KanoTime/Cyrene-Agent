@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { toolRegistry } from "../../../orchestrator/tool-registry";
+import { toolRegistry } from "../../../orchestrator/tools/registry/tool-registry";
 import {
   registerWechatChannelTaskTool,
   setWechatChannelTaskService,

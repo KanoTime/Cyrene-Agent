@@ -1,8 +1,8 @@
 import type { MusicPaths } from "./paths";
 import { MusicService } from "./music-service";
 import { registerMusicIpcHandlers } from "./ipc-handlers";
-import { buildMusicTools, type MusicToolHooks } from "../orchestrator/tools/music-tools";
-import { toolRegistry } from "../orchestrator/tool-registry";
+import { buildMusicTools } from "../orchestrator/tools/music-tools";
+import { toolRegistry } from "../orchestrator/tools/registry/tool-registry";
 import type { MusicShutdownReport } from "./types";
 
 export interface MusicBootstrap {
@@ -11,16 +11,14 @@ export interface MusicBootstrap {
   shutdown(): Promise<MusicShutdownReport>;
 }
 
-export function bootstrapMusicService(paths: MusicPaths, hooks: MusicToolHooks = {}): MusicBootstrap {
+export function bootstrapMusicService(paths: MusicPaths): MusicBootstrap {
   const service = new MusicService(paths);
   const ipcDisposer = registerMusicIpcHandlers(service);
-  const tools = buildMusicTools(service, hooks);
+  const tools = buildMusicTools(service);
   for (const tool of tools) toolRegistry.register(tool);
-  // start() emits the "failed" backend state on error and then re-throws;
-  // attach a no-op .catch() so the rejection does not surface as
-  // UnhandledPromiseRejectionWarning. Callers observe failures via
-  // service.getBackendState() (e.g. smoke harness polls state).
-  service.start().catch(() => { /* failure is signalled via backendState="failed" */ });
+  // Do not start the music backend here.  It is connected lazily by the first
+  // real music action (ensureReady) so an idle Cyrene window never holds a
+  // network session merely because the extension is installed.
 
   let shuttingDown = false;
   return {

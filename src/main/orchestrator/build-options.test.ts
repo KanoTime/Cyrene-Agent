@@ -3,13 +3,15 @@ import * as os from "os"
 import * as path from "path"
 import { describe, expect, it, vi } from "vitest"
 import {
-  buildAgentRunOptions,
+  buildAgentRunOptions as buildAgentRunOptionsProduction,
   buildChannelSystem,
   onAgentRunFinished,
   type BuildOptionsDeps,
   type OnRunFinishedDeps,
 } from "./build-options"
+import type { MaterializedTranscript } from "./conversation-transcript-context"
 import type { SocialAtom } from "../social-context/types"
+import type { ConversationMode } from "../../shared/chat-types"
 
 function createBuildDeps(): BuildOptionsDeps {
   return {
@@ -23,11 +25,16 @@ function createBuildDeps(): BuildOptionsDeps {
     buildEnvironmentContext: () => "ENV",
     buildSkillCatalog: () => "",
     buildAutoInjectedSkillContext: () => "",
-    skillRegistry: { getEnabled: () => [] },
+    skillRegistry: {
+      getEnabled: () => [],
+      // 三模适配层：测试 mock skill 都不声明 modes，等价于全模式通用。
+      getEnabledForMode(this: { getEnabled(): ReadonlyArray<unknown> }, _mode: import("../skills/types").SkillMode) {
+        return this.getEnabled()
+      },
+      getBody: () => null,
+    },
     resolveSlashActivation: () => "",
-    buildToneInjection: async () => "",
-    sceneEmbeddingIndex: null,
-    getSceneEmbeddingProvider: () => null,
+    buildToneInjection: () => "",
     buildAlwaysOnContext: async () => "ALWAYS",
     buildRelationshipContext: async () => "RELATIONSHIP",
     buildSystemPrompt: () => "BASE_SYSTEM",
@@ -35,19 +42,163 @@ function createBuildDeps(): BuildOptionsDeps {
     buildSoulSystemBasePrompt: () => "SOUL_SYSTEM_BASE",
     readStylePrompt: (styleId) => `STYLE_PROMPT:${styleId}`,
     resolveSoulSampling: () => ({}),
-    toolRegistry: { getEnabled: () => [] },
+    toolRegistry: {
+      getEnabled: () => [],
+      // 三模适配层：测试 mock 工具都不声明 modes，等价于全模式通用，
+      // 因此 getEnabledToolsForMode 直接转发到 getEnabled，单测覆写 getEnabled 即可生效。
+      getEnabledToolsForMode(this: { getEnabled(): ReadonlyArray<unknown> }, _mode: ConversationMode) {
+        return this.getEnabled()
+      },
+    },
     normalizeChatMessages: (raw) => raw as never,
     chatRequestTimeoutMs: 1000,
-    loadActionGateSystemPrompt: () => "",
-    loadNativeFcSystemPrompt: () => "",
-    loadAskSystemPrompt: () => "ASK_SYSTEM",
-    loadAskPersonaPrompt: () => "ASK_PERSONA",
-    loadAskQuotesPrompt: () => "ASK_QUOTES",
   }
 }
 
+// 测试夹具把历史消息物化为 canonical journal 的 modelContext；生产入口不再接受旁路 messages。
+async function buildAgentRunOptions(
+  input: Record<string, unknown>,
+  deps: BuildOptionsDeps,
+) {
+  const rawMessages = input.messages
+  const { messages: _legacyMessages, ...canonicalInput } = input
+  const modelContext = !canonicalInput.currentUser && Array.isArray(rawMessages)
+    ? {
+      messages: rawMessages,
+      uncertainEffects: [],
+      throughSeq: 0,
+    } as MaterializedTranscript
+    : undefined
+  return buildAgentRunOptionsProduction({
+    ...canonicalInput,
+    ...(modelContext ? { modelContext } : {}),
+  } as never, deps)
+}
+
 describe("build-options", () => {
-  it("builds the lightweight Ask Soul prompt in the approved order with trusted identity only", async () => {
+  it.each(["chat", "work", "learn", "code"] as const)("uses the explicit %s mode prompt", async (mode) => {
+    const deps = createBuildDeps();
+    deps.buildModePrompt = (target) => `[MODE:${target}]`;
+    const result = await buildAgentRunOptions({
+      sessionId: `${mode}-session`,
+      mode,
+      executionMode: mode === "chat" ? "chat" : "work",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps);
+    expect(result.options.soulSystemBaseContent).toContain(`[MODE:${mode}]`);
+  });
+
+  it("把全局模型重试设置冻结进聊天运行配置，旧设置默认为 5", async () => {
+    const deps = createBuildDeps();
+    const defaultResult = await buildAgentRunOptions({
+      sessionId: "retry-default",
+      mode: "chat",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps);
+    expect(defaultResult.options.settings.modelRequestMaxRetries).toBe(5);
+
+    deps.loadModelSettings = () => ({
+      provider: "test", baseUrl: "https://example.test", model: "m", apiKey: "k", modelRequestMaxRetries: 3,
+    });
+    const configuredResult = await buildAgentRunOptions({
+      sessionId: "retry-configured",
+      mode: "work",
+      executionMode: "work",
+      messages: [{ role: "user", content: "开始" }],
+    }, deps);
+    expect(configuredResult.options.settings.modelRequestMaxRetries).toBe(3);
+  });
+
+  it("把插件贡献放入每轮 runtime context，并传递可信运行元数据", async () => {
+    const deps = createBuildDeps();
+    deps.buildPluginPromptContext = vi.fn(async (input) => (
+      `[插件上下文：demo]\n${input.mode}:${input.userText}`
+    ));
+
+    const result = await buildAgentRunOptions({
+      sessionId: "plugin-prompt-session",
+      mode: "chat",
+      executionMode: "chat",
+      channel: "wechat",
+      messages: [{ role: "user", content: "今天天气如何" }],
+    }, deps);
+
+    expect(deps.buildPluginPromptContext).toHaveBeenCalledWith({
+      source: "conversation",
+      mode: "chat",
+      userText: "今天天气如何",
+      conversationId: "plugin-prompt-session",
+      channel: "wechat",
+    });
+    expect(result.options.soulRuntimeContext).toContain("[插件上下文：demo]\nchat:今天天气如何");
+    expect(result.options.soulSystemBaseContent).not.toContain("插件上下文：demo");
+    expect(result.options.toolSystemContent).not.toContain("插件上下文：demo");
+  });
+
+  it("无头插件任务把显式 promptSource 传给插件提示词 Provider", async () => {
+    const deps = createBuildDeps();
+    deps.buildPluginPromptContext = vi.fn(async (input) => `[${input.source}] ${input.channel}`);
+
+    const result = await buildAgentRunOptions({
+      sessionId: "plugin:minecraft-bot",
+      mode: "work",
+      executionMode: "work",
+      promptSource: "plugin-agent",
+      promptChannel: "minecraft",
+      messages: [{ role: "user", content: "收集木头" }],
+    } as never, deps);
+
+    expect(deps.buildPluginPromptContext).toHaveBeenCalledWith({
+      source: "plugin-agent",
+      mode: "work",
+      userText: "收集木头",
+      conversationId: "plugin:minecraft-bot",
+      channel: "minecraft",
+    });
+    expect(result.options.soulRuntimeContext).toContain("[plugin-agent] minecraft");
+  });
+
+  it("keeps chat tool-free when enhancement switch is off", async () => {
+    const deps = createBuildDeps();
+    deps.toolRegistry.getEnabled = () => [
+      { id: "music_search", name: "搜索歌曲", description: "d", enabled: true } as never,
+    ];
+    const result = await buildAgentRunOptions({
+      sessionId: "chat-plain",
+      mode: "chat",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps);
+    expect(result.options.tools).toEqual([]);
+    expect(result.options.toolSystemContent).not.toContain("TOOL_SYSTEM");
+  });
+
+  it("exposes only opted-in tools for enhanced chat", async () => {
+    const deps = createBuildDeps();
+    deps.loadGeneralSettings = () => ({
+      currentStyleId: "default",
+      customStyle: { diversity: { driver: "model-default" }, repetition: "model-default" },
+      chatSocialContextEnabled: false,
+      chatToolsEnabled: true,
+      // 勾选 music_search；read_file 不勾（验证未声明 modes 的工具不漏进 chat）。
+      toolModeOverrides: { music_search: { chat: true }, read_file: { chat: false } },
+    });
+    deps.toolRegistry.getEnabled = () => [
+      { id: "music_search", name: "搜索歌曲", description: "d", enabled: true },
+      { id: "read_file", name: "读文件", description: "d", enabled: true },
+    ] as never;
+    const result = await buildAgentRunOptions({
+      sessionId: "chat-tools",
+      mode: "chat",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "放首歌" }],
+    }, deps);
+    expect((result.options.tools ?? []).map((t: { id: string }) => t.id)).toEqual(["music_search"]);
+    // 有工具时 chat 也注入工具目录 prompt（进 harness stablePrefix）。
+    expect(result.options.toolSystemContent).toContain("TOOL_SYSTEM");
+  });
+  it("does not include legacy Ask Soul prompt fields", async () => {
     const deps = createBuildDeps()
     deps.loadUserProfile = () => ({
       nickname: "小王",
@@ -66,12 +217,8 @@ describe("build-options", () => {
       trustedAskUserProfile?: Record<string, unknown>
     }
 
-    expect(askOptions.askSystemContent).toBe("ASK_SYSTEM\n\nASK_PERSONA\n\nASK_QUOTES")
-    expect(askOptions.trustedAskUserProfile).toEqual({
-      nickname: "小王",
-      callPreference: "伙伴",
-      gender: "male",
-    })
+    expect(askOptions.askSystemContent).toBeUndefined()
+    expect(askOptions.trustedAskUserProfile).toBeUndefined()
   })
 
   it("passes the trusted runtime environment to the agent decision stages", async () => {
@@ -103,6 +250,30 @@ describe("build-options", () => {
     expect(result.options.settings.reasoning).toEqual({ mode: "off" })
   })
 
+  it.each(["chat", "work", "code", "learn"] as const)(
+    "preserves the saved reasoning preference in %s mode",
+    async (executionMode) => {
+      const deps = createBuildDeps()
+      deps.loadModelSettings = () => ({
+        provider: "Qwen（通义千问）",
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model: "qwen3-max",
+        apiKey: "k",
+        reasoning: { mode: "on" },
+      })
+
+      const result = await buildAgentRunOptions({
+        messages: [{ role: "user", content: "你好" }],
+        style: "01_default.md",
+        executionMode,
+        mode: executionMode,
+      }, deps)
+
+      expect(result.options.settings.reasoning).toEqual({ mode: "on" })
+      expect(result.options.executionMode).toBe(executionMode === "chat" ? "chat" : "work")
+    },
+  )
+
   it("adds a concise WeChat system when the run comes from WeChat", async () => {
     const result = await buildAgentRunOptions({
       messages: [{ role: "user", content: "你好" }],
@@ -112,7 +283,7 @@ describe("build-options", () => {
 
     expect(result.options.soulSystemBaseContent).toContain("你正在通过微信回复用户")
     expect(result.options.soulSystemBaseContent).toContain("SOUL_SYSTEM_BASE")
-    expect(result.options.soulSystemBaseContent).toContain("RELATIONSHIP")
+    expect(result.options.soulRuntimeContext).toContain("RELATIONSHIP")
     expect(result.options.toolSystemContent).toBe("TOOL_SYSTEM")
   })
 
@@ -136,8 +307,8 @@ describe("build-options", () => {
       { includePersonalMemory: false },
     )
     expect(buildChannelRelationshipContext).toHaveBeenCalledWith("channel:wechat:session-a")
-    expect(result.options.soulSystemBaseContent).toContain("WORLD_ONLY")
-    expect(result.options.soulSystemBaseContent).toContain("SCOPED_RELATIONSHIP")
+    expect(result.options.soulRuntimeContext).toContain("WORLD_ONLY")
+    expect(result.options.soulRuntimeContext).toContain("SCOPED_RELATIONSHIP")
   })
 
   it("结构化微信只使用账号绑定者资料，不读取桌面全局资料", async () => {
@@ -180,13 +351,13 @@ describe("build-options", () => {
     expect(result.options.soulSystemBaseContent).not.toContain("你正在通过飞书回复用户")
   })
 
-  it("messages 不含 system，FC 循环按阶段动态注入", async () => {
+  it("messages 不含 system，由循环层组装 system", async () => {
     const result = await buildAgentRunOptions({
       messages: [{ role: "user", content: "你好" }],
       style: "01_default.md",
     }, createBuildDeps())
 
-    // 第一期：原始 messages 不含 system 消息
+    // 原始 messages 不含 system 消息
     expect(result.options.messages.some((m) => m.role === "system")).toBe(false)
   })
 
@@ -203,11 +374,13 @@ describe("build-options", () => {
       style: "01_default.md",
     }, deps)
 
-    expect(result.options.messages[0].content).toBe("[2026-07-12 20:00, Asia/Taipei]\n今天有点累")
-    expect(result.options.messages[2].content).toBe("[2026-07-13 11:00, Asia/Taipei]\n我回来啦")
-    expect(result.options.soulSystemBaseContent).toContain("[对话时间信息]")
-    expect(result.options.soulSystemBaseContent).toContain("距离上一条有效聊天消息：约 14 小时 58 分钟")
-    expect(result.options.soulSystemBaseContent.match(/距离上一条有效聊天消息/g)).toHaveLength(1)
+    expect(result.options.messages[0].content).toContain("<internal_context>用户发送这条消息的时间：2026-07-12 20:00")
+    expect(result.options.messages[2].content).toContain("<internal_context>用户发送这条消息的时间：2026-07-13 11:00")
+    expect(result.options.soulRuntimeContext).toContain("## Internal Context Policy")
+    expect(result.options.toolSystemContent).toContain("## Internal Context Policy")
+    expect(result.options.soulRuntimeContext).toContain("[对话时间信息]")
+    expect(result.options.soulRuntimeContext).toContain("距离上一条有效聊天消息：约 14 小时 58 分钟")
+    expect(result.options.soulRuntimeContext?.match(/距离上一条有效聊天消息/g)).toHaveLength(1)
     expect(result.options.toolSystemContent).not.toContain("[对话时间信息]")
   })
 
@@ -240,7 +413,7 @@ describe("build-options", () => {
     expect(result.options.executionMode).toBe("chat")
     expect(result.options.tools).toEqual([])
     expect(result.options.citaContextBlock).toBe("")
-    expect(result.options.soulSystemBaseContent).toContain("STYLE_PROMPT:lively")
+    expect(result.options.soulRuntimeContext).toContain("STYLE_PROMPT:lively")
     expect(result.options.toolSystemContent).not.toContain("STYLE_PROMPT:lively")
   })
 
@@ -260,6 +433,27 @@ describe("build-options", () => {
     expect(result.options.resolvedWorkspaceRoot).toBe("C:\\projects\\daily")
     expect(result.options.toolSystemContent).toContain("可信根目录：C:\\projects\\daily")
     expect(result.options.toolSystemContent).toContain("不得写入桌面")
+  })
+
+  it("does not load a workspace when the main-process caller disables workspace inheritance", async () => {
+    const deps = createBuildDeps()
+    deps.getWorkspaceBinding = vi.fn(() => ({
+      workspaceRoot: "C:\\projects\\desktop",
+      displayName: "desktop",
+      boundAt: 1,
+    }))
+
+    const result = await buildAgentRunOptions({
+      sessionId: "conversation-bound",
+      workspaceBindingSessionId: null,
+      messages: [{ role: "user", content: "继续对话" }],
+      style: "01_default.md",
+      executionMode: "work",
+    }, deps)
+
+    expect(deps.getWorkspaceBinding).not.toHaveBeenCalled()
+    expect(result.options.resolvedWorkspaceRoot).toBeUndefined()
+    expect(result.options.toolSystemContent).not.toContain("可信根目录")
   })
 
   it("adds a bounded social background only to enabled Chat runs", async () => {
@@ -301,8 +495,9 @@ describe("build-options", () => {
       conversationId: "chat-a",
       query: "message-13",
     })
-    expect(result.options.messages).toHaveLength(12)
-    expect(result.options.soulSystemBaseContent).toContain("用户喜欢海边")
+    // CTA Phase 1：社交开关只影响检索块，不再截断模型历史
+    expect(result.options.messages).toHaveLength(14)
+    expect(result.options.soulRuntimeContext).toContain("用户喜欢海边")
     expect(result.options.socialContext).toMatchObject({
       enabled: true,
       conversationId: "chat-a",
@@ -394,10 +589,11 @@ describe("build-options", () => {
       executionMode: "work",
     }, deps)
 
-    for (const result of [chat, work]) {
-      expect(result.options.soulSystemBaseContent).toContain("STYLE_PROMPT:sweet")
-      expect(result.options.soulSampling).toEqual({ temperature: 0.82, frequencyPenalty: 0.2 })
-    }
+    // chat 保留 style prompt 与采样；work/code 完全不受 style 影响，走厂商默认
+    expect(chat.options.soulRuntimeContext).toContain("STYLE_PROMPT:sweet")
+    expect(chat.options.soulSampling).toEqual({ temperature: 0.82, frequencyPenalty: 0.2 })
+    expect(work.options.soulRuntimeContext).not.toContain("STYLE_PROMPT:sweet")
+    expect(work.options.soulSampling).toBeUndefined()
     expect(chat.options.executionMode).toBe("chat")
     expect(work.options.executionMode).toBe("work")
   })
@@ -459,8 +655,9 @@ describe("build-options", () => {
     expect(deps.prepareCitaTurn).toHaveBeenCalledTimes(1)
     expect(result.options.conversationId).toBe("conversation-1")
     expect(result.options.messages.at(-1)).toEqual(originalUserMessage)
-    expect(result.options.toolSystemContent).toContain("[CITA_CONTEXT]")
-    expect(result.options.toolSystemContent).toContain("music-candidate-1")
+    expect(result.options.toolSystemContent).not.toContain("[CITA_CONTEXT]")
+    expect(result.options.citaContextBlock).toContain("[CITA_CONTEXT]")
+    expect(result.options.citaContextBlock).toContain("music-candidate-1")
     expect(result.options.originalQuery).toBe("第二首")
     expect(result.options.contextualizedQuery).toBe("播放当前网易云日推第二首")
     expect(result.options.citaContextBlock).toContain("music-candidate-1")
@@ -506,7 +703,7 @@ describe("build-options", () => {
 
     expect(result.options.toolSystemContent).toContain("AUTO_MUSIC_RULES")
     expect(result.options.soulSystemBaseContent).not.toContain("AUTO_MUSIC_RULES")
-    expect(result.options.soulSystemBaseContent).toContain("SOUL_MUSIC_REPLY_RULES")
+    expect(result.options.soulRuntimeContext).toContain("SOUL_MUSIC_REPLY_RULES")
   })
 
   it("attaches direct image content blocks to the latest user message", async () => {
@@ -517,6 +714,10 @@ describe("build-options", () => {
       0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     ]))
 
+    // 直发判定只看 multimodal 开关（默认开）：任意 provider/协议都直发，
+    // 能力对错由服务端仲裁（400 时 chat-loop 走 imageCaptionFallback 降级）。
+    const deps = createBuildDeps()
+
     const result = await buildAgentRunOptions({
       messages: [
         { role: "user", content: "上一轮" },
@@ -525,7 +726,7 @@ describe("build-options", () => {
       ],
       style: "01_default.md",
       imageAttachments: [{ name: "图 像.png", filePath: imagePath, mime: "image/png" }],
-    }, createBuildDeps())
+    }, deps)
 
     const latestUser = result.options.messages.at(-1)
     expect(latestUser?.content).toEqual([
@@ -537,6 +738,44 @@ describe("build-options", () => {
     ])
     // 第一期：原始 messages 不含 system，所以 messages[0] 就是首条用户消息
     expect(result.options.messages[0].content).toBe("上一轮")
+  })
+
+  it("uses a vision caption instead of sending image data when the primary model is not multimodal", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "test", baseUrl: "https://example.test", model: "text-only", apiKey: "k", multimodal: false,
+      vision: { baseUrl: "https://vlm.test/v1", apiKey: "k", model: "vlm-model" },
+    })
+    deps.captionImageForFallback = async () => ({ ok: true, caption: "截图显示一个红色错误提示" })
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "这张图报什么错？" }],
+      imageAttachments: [{ name: "error.png", filePath: "C:\\tmp\\error.png", mime: "image/png" }],
+    }, deps)
+
+    const latestUser = result.options.messages.at(-1)
+    expect(latestUser?.content).toBe(
+      "这张图报什么错？\n\n【图片视觉信息】\n以下内容是视觉模型对用户本轮图片的观察结果，请将其视为你已经看到的图片内容；如果某张图分析失败，请不要编造。\n- error.png：截图显示一个红色错误提示",
+    )
+    expect(result.options.imageCaptionFallback).toBeUndefined()
+  })
+
+  it("纯文本主模型且未配视觉模型时注入人话拒绝提示（不再静默丢图）", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "test", baseUrl: "https://example.test", model: "text-only", apiKey: "k", multimodal: false,
+    })
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "这张图报什么错？" }],
+      imageAttachments: [{ name: "error.png", filePath: "C:\\tmp\\error.png", mime: "image/png" }],
+    }, deps)
+
+    const latestUser = result.options.messages.at(-1)
+    expect(latestUser?.content).toContain("【图片发送失败】")
+    expect(latestUser?.content).toContain("error.png")
+    expect(latestUser?.content).toContain("视觉模型")
+    expect(latestUser?.content).not.toContain("image_url")
   })
 
   it("builds caption fallback messages for direct image send failures", async () => {
@@ -554,6 +793,55 @@ describe("build-options", () => {
     expect(userMessage?.content).toContain("这图哪里不对？")
     expect(userMessage?.content).toContain("setup.png：画面里有一张安装截图")
     expect(userMessage?.content).not.toContain("image_url")
+  })
+
+  it("MiniMax + anthropic 入口直发 image 块（anthropic-adapter 会转成 image source 块）", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cyrene-image-mm-m3-"))
+    const imagePath = path.join(dir, "shot.png")
+    fs.writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "MiniMax（稀宇科技）", baseUrl: "https://api.minimaxi.com/anthropic", model: "MiniMax-M3", apiKey: "k",
+    })
+    deps.captionImageForFallback = async () => ({ ok: true, caption: "一张截图" })
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "看图" }],
+      imageAttachments: [{ name: "shot.png", filePath: imagePath, mime: "image/png" }],
+    }, deps)
+
+    const latestUser = result.options.messages.at(-1)
+    expect(latestUser?.content).toEqual([
+      { type: "text", text: "看图" },
+      { type: "image_url", image_url: { url: expect.stringMatching(/^data:image\/png;base64,/) } },
+    ])
+    // 直发场景构建 caption 兜底（直发 400 时可降级重试）。
+    expect(result.options.imageCaptionFallback).toBeDefined()
+  })
+
+  it("MiniMax M2.7 开关开着也直发（本地不做模型级防呆，能力由服务端仲裁）", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cyrene-image-mm-m2-"))
+    const imagePath = path.join(dir, "shot.png")
+    fs.writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "MiniMax（稀宇科技）", baseUrl: "https://api.minimaxi.com/anthropic", model: "MiniMax-M2.7", apiKey: "k",
+    })
+
+    const result = await buildAgentRunOptions({
+      messages: [{ role: "user", content: "看图" }],
+      imageAttachments: [{ name: "shot.png", filePath: imagePath, mime: "image/png" }],
+    }, deps)
+
+    // 用户开了多模态开关就直发：M2.x 拒收与否由服务端说了算，
+    // 失败时 chat-loop 用 imageCaptionFallback 降级重试。
+    const latestUser = result.options.messages.at(-1)
+    expect(latestUser?.content).toEqual([
+      { type: "text", text: "看图" },
+      { type: "image_url", image_url: { url: expect.stringMatching(/^data:image\/png;base64,/) } },
+    ])
   })
 
   it("has distinct system text for Feishu work chat", () => {
@@ -795,5 +1083,306 @@ describe("build-options", () => {
       retrievedAtoms,
       now: 100,
     })
+  })
+
+  it("#26 sessionModelSettings 直达请求装配：会话模型不被 loadModelSettings 重解析覆盖", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = vi.fn(() => ({
+      provider: "test", baseUrl: "https://example.test", model: "profile-default", apiKey: "k",
+    }))
+
+    const result = await buildAgentRunOptions({
+      sessionId: "session-override",
+      messages: [{ role: "user", content: "你好" }],
+      // 即便同时携带 modelProfileId，也不允许 downstream 据此把会话模型覆盖回档案默认
+      modelProfileId: "p-a",
+      sessionModelSettings: {
+        provider: "test", baseUrl: "https://example.test", model: "glm-session", apiKey: "k",
+      },
+    }, deps)
+
+    expect(result.options.settings.model).toBe("glm-session")
+    expect(deps.loadModelSettings).not.toHaveBeenCalled()
+  })
+
+  it("不传 sessionModelSettings 时按 modelProfileId 解析（非桌面入口回退路径不变）", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = vi.fn((modelProfileId?: string) => ({
+      provider: "test", baseUrl: "https://example.test", model: `by-profile:${modelProfileId}`, apiKey: "k",
+    }))
+
+    const result = await buildAgentRunOptions({
+      sessionId: "channel-run",
+      messages: [{ role: "user", content: "你好" }],
+      modelProfileId: "p-b",
+    }, deps)
+
+    expect(deps.loadModelSettings).toHaveBeenCalledWith("p-b")
+    expect(result.options.settings.model).toBe("by-profile:p-b")
+  })
+})
+
+describe("moments context 注入（Phase 3 Chat Awareness）", () => {
+  function momentsDeps(overrides: {
+    momentsEnabled?: boolean;
+    chatMomentsContextEnabled?: boolean;
+    blockText?: string;
+    throwInBuild?: boolean;
+  }) {
+    const deps = createBuildDeps()
+    deps.loadGeneralSettings = () => ({
+      currentStyleId: "default",
+      customStyle: { diversity: { driver: "model-default" }, repetition: "model-default" },
+      chatSocialContextEnabled: false,
+      momentsEnabled: overrides.momentsEnabled ?? true,
+      chatMomentsContextEnabled: overrides.chatMomentsContextEnabled ?? true,
+    })
+    deps.buildMomentsContext = vi.fn((query: string) => {
+      if (overrides.throwInBuild) throw new Error("moments store 未初始化")
+      return overrides.blockText ?? `【近期朋友圈动态】\n${query}`
+    })
+    return deps
+  }
+
+  it("Chat 模式且双开关开启时注入 momentsContextBlock，并把最新用户文本传给门控检索", async () => {
+    const deps = momentsDeps({})
+    const result = await buildAgentRunOptions({
+      sessionId: "moments-chat",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "你刚才朋友圈发的是什么意思" }],
+    }, deps)
+
+    expect(deps.buildMomentsContext).toHaveBeenCalledWith("你刚才朋友圈发的是什么意思")
+    expect(result.options.soulRuntimeContext).toContain("【近期朋友圈动态】")
+  })
+
+  it("chatMomentsContextEnabled=false 时 block 不出现", async () => {
+    const deps = momentsDeps({ chatMomentsContextEnabled: false })
+    const result = await buildAgentRunOptions({
+      sessionId: "moments-off",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps)
+
+    expect(deps.buildMomentsContext).not.toHaveBeenCalled()
+    expect(result.options.soulRuntimeContext).not.toContain("【近期朋友圈动态】")
+  })
+
+  it("momentsEnabled=false 总开关关闭时不注入", async () => {
+    const deps = momentsDeps({ momentsEnabled: false })
+    await buildAgentRunOptions({
+      sessionId: "moments-master-off",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps)
+
+    expect(deps.buildMomentsContext).not.toHaveBeenCalled()
+  })
+
+  it("Work 模式不注入", async () => {
+    const deps = momentsDeps({})
+    await buildAgentRunOptions({
+      sessionId: "moments-work",
+      executionMode: "work",
+      messages: [{ role: "user", content: "帮我修个 bug" }],
+    }, deps)
+
+    expect(deps.buildMomentsContext).not.toHaveBeenCalled()
+  })
+
+  it("构建抛错时静默降级为空，不影响本轮运行", async () => {
+    const deps = momentsDeps({ throwInBuild: true })
+    const result = await buildAgentRunOptions({
+      sessionId: "moments-error",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps)
+
+    expect(result.options.soulRuntimeContext).not.toContain("【近期朋友圈动态】")
+  })
+
+  it("返回空串时按空省略，不产生空分隔段", async () => {
+    const deps = momentsDeps({ blockText: "" })
+    const result = await buildAgentRunOptions({
+      sessionId: "moments-empty",
+      executionMode: "chat",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps)
+
+    expect(result.options.soulRuntimeContext).not.toContain("【近期朋友圈动态】")
+    expect(result.options.soulRuntimeContext).not.toMatch(/(^|\n)---(\n|$)\s*(^|\n)---/)
+  })
+})
+
+describe("权威轨迹上下文源（CTA Phase 1）", () => {
+  it("desktop transcript context 启用时忽略渲染端消息", async () => {
+    const deps = createBuildDeps()
+    deps.buildModelContext = vi.fn(async () => ({
+      messages: [{ role: "user" as const, content: "authoritative" }],
+      uncertainEffects: [],
+      throughSeq: 3,
+    }))
+
+    const built = await buildAgentRunOptions({
+      sessionId: "c1",
+      currentUser: { turnId: "turn-1", text: "next", visibleContent: "next" },
+      messages: [{ role: "user" as const, content: "stale renderer" }],
+    } as never, deps)
+
+    expect(deps.buildModelContext).toHaveBeenCalledWith("c1", expect.any(Number))
+    expect(built.options.cleanMessages).toContainEqual(expect.objectContaining({ content: "authoritative" }))
+    expect(JSON.stringify(built.options.messages)).not.toContain("stale renderer")
+    expect(built.latestUserText).toBe("authoritative")
+  })
+
+  it("渠道与内部调用方不触发轨迹上下文，继续使用传入消息", async () => {
+    const deps = createBuildDeps()
+    deps.buildModelContext = vi.fn(async () => ({
+      messages: [],
+      uncertainEffects: [],
+      throughSeq: 0,
+    }))
+
+    const built = await buildAgentRunOptions({
+      sessionId: "channel-binding",
+      messages: [{ role: "user" as const, content: "channel text" }],
+    } as never, deps)
+
+    expect(deps.buildModelContext).not.toHaveBeenCalled()
+    expect(built.latestUserText).toBe("channel text")
+    expect(built.options.cleanMessages).toContainEqual(expect.objectContaining({ content: "channel text" }))
+  })
+
+  it("缺失 buildModelContext 注入时轨迹上下文请求 fail-closed", async () => {
+    const deps = createBuildDeps()
+    await expect(buildAgentRunOptions({
+      sessionId: "missing-dep",
+      currentUser: { turnId: "turn-1", text: "hi", visibleContent: "hi" },
+      messages: [{ role: "user" as const, content: "hi" }],
+    } as never, deps)).rejects.toThrow("buildModelContext")
+  })
+
+  it("完整活动视图超预算时先提交会话级 compaction，再重新物化上下文", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "test", baseUrl: "https://example.test", model: "m", apiKey: "k",
+      contextWindowTokens: 10_000,
+    })
+    const full = [{ role: "user" as const, content: "历史".repeat(2_000) }]
+    const compacted = [{ role: "system" as const, content: "<cyrene_compaction_checkpoint>\n摘要\n</cyrene_compaction_checkpoint>" }]
+    let reads = 0
+    deps.buildModelContext = vi.fn(async () => ({
+      messages: reads++ === 0 ? full : compacted,
+      uncertainEffects: [], throughSeq: 8,
+    }))
+    deps.compactTranscript = vi.fn(async () => ({ checkpointEntryId: "cp-1" }))
+
+    const built = await buildAgentRunOptions({
+      sessionId: "auto-compact", currentUser: { turnId: "turn-1", text: "继续", visibleContent: "继续" },
+    } as never, deps)
+
+    expect(deps.compactTranscript).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "auto-compact", trigger: "automatic", retainTokens: expect.any(Number),
+    }))
+    expect(deps.buildModelContext).toHaveBeenCalledTimes(2)
+    expect(built.options.cleanMessages).toContainEqual(expect.objectContaining({ content: expect.stringContaining("<cyrene_compaction_checkpoint>") }))
+  })
+
+  it("传入 modelContext 超预算时同样执行自动压缩并重读 journal", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "test", baseUrl: "https://example.test", model: "m", apiKey: "k",
+      contextWindowTokens: 10_000,
+    })
+    const compacted = [{ role: "system" as const, content: "<cyrene_compaction_checkpoint>\n摘要\n</cyrene_compaction_checkpoint>" }]
+    deps.buildModelContext = vi.fn(async () => ({
+      messages: compacted, uncertainEffects: [], throughSeq: 8,
+    }))
+    deps.compactTranscript = vi.fn(async () => ({ checkpointEntryId: "cp-1" }))
+
+    const built = await buildAgentRunOptions({
+      sessionId: "prebuilt-compact",
+      currentUser: { turnId: "turn-1", text: "继续", visibleContent: "继续" },
+      // 模拟桌面/渠道入口预传入的超长上下文
+      modelContext: {
+        messages: [{ role: "user" as const, content: "历史".repeat(2_000) }],
+        uncertainEffects: [], throughSeq: 8,
+      },
+    } as never, deps)
+
+    expect(deps.compactTranscript).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "prebuilt-compact", trigger: "automatic", retainTokens: expect.any(Number),
+    }))
+    // 压缩后只发生一次重读（初始上下文来自传入值）
+    expect(deps.buildModelContext).toHaveBeenCalledTimes(1)
+    expect(built.options.cleanMessages).toContainEqual(expect.objectContaining({ content: expect.stringContaining("<cyrene_compaction_checkpoint>") }))
+  })
+
+  it("自动 compaction 摘要失败时对外只报告 TRANSCRIPT_COMPACTION_REQUIRED", async () => {
+    const deps = createBuildDeps()
+    deps.loadModelSettings = () => ({
+      provider: "test", baseUrl: "https://example.test", model: "m", apiKey: "k", contextWindowTokens: 100,
+    })
+    deps.buildModelContext = vi.fn(async () => ({
+      messages: [{ role: "user" as const, content: "历史".repeat(300) }], uncertainEffects: [], throughSeq: 8,
+    }))
+    deps.compactTranscript = vi.fn(async () => { throw new Error("provider down") })
+
+    await expect(buildAgentRunOptions({
+      sessionId: "auto-compact-failure",
+      currentUser: { turnId: "turn-1", text: "继续", visibleContent: "继续" },
+    } as never, deps)).rejects.toThrow("TRANSCRIPT_COMPACTION_REQUIRED")
+  })
+
+  it("崩溃孤儿不确定效果并入 recoveryContext", async () => {
+    const deps = createBuildDeps()
+    deps.buildModelContext = vi.fn(async () => ({
+      messages: [{ role: "user" as const, content: "authoritative" }],
+      uncertainEffects: [{
+        id: "run-1:call-1",
+        toolCallId: "call-1",
+        fingerprint: "send_email:abc",
+        toolName: "send_email",
+        message: "该外部副作用在应用中断时尚未确认结果",
+      }],
+      throughSeq: 5,
+    }))
+
+    const built = await buildAgentRunOptions({
+      sessionId: "uncertain",
+      currentUser: { turnId: "turn-1", text: "继续", visibleContent: "继续" },
+      messages: [{ role: "user" as const, content: "继续" }],
+    } as never, deps)
+
+    expect(built.options.recoveryContext).toContain("send_email")
+    expect(built.options.recoveryContext).toContain("不得自动重放")
+  })
+
+  it("开启社交上下文不再截断模型历史（slice(-12) 已废除）", async () => {
+    const deps = createBuildDeps()
+    deps.buildChatSocialContext = vi.fn(async () => ({ contextBlock: "SOCIAL", retrievedAtoms: [] }))
+    const messages = Array.from({ length: 16 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: `消息${index}`,
+    }))
+
+    const built = await buildAgentRunOptions({
+      sessionId: "social-no-truncate",
+      executionMode: "chat",
+      userTurnId: "turn-8",
+      assistantTurnId: "turn-7",
+      messages,
+    } as never, {
+      ...deps,
+      loadGeneralSettings: () => ({
+        ...deps.loadGeneralSettings(),
+        chatSocialContextEnabled: true,
+      }),
+    })
+
+    // 16 条消息全部进入模型上下文，社交开关只影响检索块不再影响历史
+    expect(built.options.cleanMessages).toHaveLength(16)
+    expect(JSON.stringify(built.options.messages)).toContain("消息0")
+    expect(JSON.stringify(built.options.messages)).toContain("消息15")
   })
 })

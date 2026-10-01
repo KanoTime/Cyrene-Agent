@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ToolDefinition } from "../orchestrator/tool-registry";
+import type { ToolDefinition } from "../orchestrator/tools/registry/tool-registry";
 import { filterToolsForChannelConversation } from "./channel-tool-isolation";
 import type { IncomingMessage } from "./types";
 

@@ -1,4 +1,5 @@
-import type { AskCardSubmission } from "../../../../../shared/ask-clarification";
+import { t } from "../../../i18n";
+import type { AskCardMode, AskCardSubmission } from "../../../../../shared/ask-clarification";
 
 export type AgentRunStageKind =
   | "understanding"
@@ -8,6 +9,8 @@ export type AgentRunStageKind =
   | "waiting_user"
   | "responding"
   | "completed"
+  | "cancelled"
+  | "timeout"
   | "failed";
 
 export interface AgentRunStage {
@@ -29,9 +32,11 @@ export interface TaskPlanPresentation {
 export interface AskUserInteraction {
   kind: "ask";
   id: string;
-  source?: "agent" | "code";
+  source?: "agent";
   runId?: string;
   revision?: number;
+  /** 卡片模式沿用主进程下发的 AskCardPayload.mode；plan_approval 走专属三按钮审批面板。 */
+  cardMode?: AskCardMode;
   intro?: string;
   question: string;
   options: Array<{
@@ -71,12 +76,27 @@ export type AskDrafts = Record<string, AskQuestionDraft>;
 export interface PermissionInteraction {
   kind: "permission";
   id: string;
-  source?: "agent" | "code_verification";
+  source?: "agent";
   sessionId?: string;
   toolName: string;
   summary: string;
   workspaceName?: string;
   targetPath?: string;
+}
+
+export interface PopQuizInteraction {
+  kind: "quiz";
+  /** quizId，同时是提交与结算广播的幂等键。 */
+  id: string;
+  runId?: string;
+  intro: string;
+  questions: Array<{
+    id: string;
+    type: "choice" | "multi" | "true_false" | "short_answer";
+    question: string;
+    options: Array<{ id: string; label: string }>;
+    learningObjective: string;
+  }>;
 }
 
 export interface PermissionRequestDescription {
@@ -85,12 +105,78 @@ export interface PermissionRequestDescription {
   args: Record<string, unknown>;
 }
 
-export type ComposerInteraction = AskUserInteraction | PermissionInteraction;
+export type ComposerInteraction = AskUserInteraction | PermissionInteraction | PopQuizInteraction;
 
 export type ComposerSlotKind = "composer" | ComposerInteraction["kind"];
 
 export function resolveComposerSlot(interaction?: ComposerInteraction): ComposerSlotKind {
   return interaction?.kind ?? "composer";
+}
+
+/**
+ * 从 RUN_FINISHED 事件 result 字段解析终态 stage。
+ * - success → completed
+ * - cancelled → cancelled（保留已有部分输出，不生成"任务已完成"）
+ * - timeout → timeout（不伪装成功）
+ * - runtime_error → failed（防御性；正常走 RUN_ERROR 路径）
+ * - 缺失 result.status → completed（向后兼容旧 upstream）
+ */
+export function resolveRunFinishedStage(
+  result: { status?: string } | undefined | null,
+): AgentRunStage {
+  const status = result?.status;
+  switch (status) {
+    case "success":
+      return { kind: "completed" };
+    case "cancelled":
+      return { kind: "cancelled" };
+    case "timeout":
+      return { kind: "timeout" };
+    case "runtime_error":
+      return { kind: "failed" };
+    default:
+      return { kind: "completed" };
+  }
+}
+
+/**
+ * 根据终态 status 决定显示内容。
+ * - success：有内容用内容，空则用"任务已完成。"兜底
+ * - cancelled：保留已有部分输出，空则返回空串（绝不生成"任务已完成。"）
+ * - timeout：同 cancelled
+ * - runtime_error / 未知：保留已有内容
+ */
+export function resolveTerminalContent(
+  streamContent: string,
+  status: string | undefined,
+): string {
+  const trimmed = streamContent.trim();
+  switch (status) {
+    case "success":
+      return trimmed;
+    case "cancelled":
+    case "timeout":
+      // 保留已有部分输出；空或纯空白则返回空串（绝不生成"任务已完成。"）
+      return trimmed;
+    default:
+      return streamContent;
+  }
+}
+
+export function isFormalAnswerCommitted(
+  content: string,
+  status: string | undefined,
+  finalMessageCompleted: boolean,
+): boolean {
+  return status === "success" && finalMessageCompleted && content.trim().length > 0;
+}
+
+/** A stale terminal from an older run must not dismiss the current run's card. */
+export function shouldClearComposerInteractionForTerminal(
+  activeRunId: string | undefined,
+  terminalRunId: string | undefined,
+): boolean {
+  return !activeRunId || !terminalRunId || activeRunId === terminalRunId;
 }
 
 function readPermissionString(args: Record<string, unknown>, keys: string[]): string | undefined {
@@ -110,47 +196,53 @@ export function describePermissionRequest(request: PermissionRequestDescription)
   switch (request.toolId) {
     case "weather": {
       const city = readPermissionString(request.args, ["city"]);
-      return city ? `查询${shortenPermissionText(city, 24)}天气` : "查询天气";
+      return city ? t("runPresentation.permissionWeather", { city: shortenPermissionText(city, 24) }) : t("runPresentation.permissionWeatherPlain");
     }
     case "web_search": {
       const query = readPermissionString(request.args, ["query", "keyword"]);
-      return query ? `搜索“${shortenPermissionText(query)}”` : "搜索网页";
+      return query ? t("runPresentation.permissionSearch", { query: shortenPermissionText(query) }) : t("runPresentation.permissionSearchPlain");
     }
     case "write_word": {
       const filename = readPermissionString(request.args, ["filename"]);
-      return filename ? `创建 Word 文档：${shortenPermissionText(filename)}` : "创建 Word 文档";
+      return filename ? t("runPresentation.permissionWord", { filename: shortenPermissionText(filename) }) : t("runPresentation.permissionWordPlain");
     }
     case "write_excel": {
       const filename = readPermissionString(request.args, ["filename"]);
-      return filename ? `创建 Excel 表格：${shortenPermissionText(filename)}` : "创建 Excel 表格";
+      return filename ? t("runPresentation.permissionExcel", { filename: shortenPermissionText(filename) }) : t("runPresentation.permissionExcelPlain");
     }
     case "write_powerpoint": {
       const filename = readPermissionString(request.args, ["filename"]);
-      return filename ? `创建演示文稿：${shortenPermissionText(filename)}` : "创建演示文稿";
+      return filename ? t("runPresentation.permissionPowerpoint", { filename: shortenPermissionText(filename) }) : t("runPresentation.permissionPowerpointPlain");
     }
     default:
-      return `执行「${request.toolName || request.toolId}」`;
+      return t("runPresentation.permissionFallback", { toolName: request.toolName || request.toolId });
   }
 }
 
 export function describeRunStage(stage: AgentRunStage): string {
   switch (stage.kind) {
     case "understanding":
-      return "昔涟正在理解需求…";
+      return t("runPresentation.stageUnderstanding");
     case "planning":
-      return "昔涟正在规划任务…";
+      return t("runPresentation.stagePlanning");
     case "executing":
-      return stage.detail ? `昔涟正在执行：${stage.detail}…` : "昔涟正在执行任务…";
+      return stage.detail
+        ? t("runPresentation.stageExecutingDetail", { detail: stage.detail })
+        : t("runPresentation.stageExecuting");
     case "waiting_permission":
-      return "昔涟正在获取审批…";
+      return t("runPresentation.stageWaitingPermission");
     case "waiting_user":
-      return "昔涟正在询问…";
+      return t("runPresentation.stageWaitingUser");
     case "responding":
-      return "昔涟正在组织回复…";
+      return t("runPresentation.stageResponding");
     case "completed":
-      return "昔涟已完成本轮处理";
+      return t("runPresentation.stageCompleted");
+    case "cancelled":
+      return t("runPresentation.stageCancelled");
+    case "timeout":
+      return t("runPresentation.stageTimeout");
     case "failed":
-      return "昔涟这一步没有顺利完成";
+      return t("runPresentation.stageFailed");
   }
 }
 
@@ -164,50 +256,13 @@ function asNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-export function normalizeCodeVerificationInteraction(value: unknown): PermissionInteraction | undefined {
-  const approval = asRecord(value);
-  const id = asNonEmptyString(approval?.approvalId);
-  const sessionId = asNonEmptyString(approval?.chatSessionId);
-  const executable = asNonEmptyString(approval?.executable);
-  const cwd = asNonEmptyString(approval?.cwd);
-  if (!id || !sessionId || !executable || !cwd || approval?.status !== "pending") return undefined;
-  const args = Array.isArray(approval.args)
-    ? approval.args.filter((arg): arg is string => typeof arg === "string")
-    : [];
-  return {
-    kind: "permission",
-    id,
-    source: "code_verification",
-    sessionId,
-    toolName: "验证命令",
-    summary: [executable, ...args].join(" "),
-    workspaceName: cwd,
-    targetPath: asNonEmptyString(approval.source),
-  };
-}
-
-export function normalizeCodeAskInteraction(value: unknown): AskUserInteraction | undefined {
-  const ask = asRecord(value);
-  const id = asNonEmptyString(ask?.promptId);
-  const runId = asNonEmptyString(ask?.runId);
-  const question = asNonEmptyString(ask?.question);
-  const options = Array.isArray(ask?.options)
-    ? [...new Set(ask.options.flatMap((option) => {
-        const normalized = asNonEmptyString(option);
-        return normalized ? [normalized] : [];
-      }))]
-    : [];
-  if (!id || !runId || !question || options.length < 2) return undefined;
-  return {
-    kind: "ask",
-    id,
-    source: "code",
-    runId,
-    question,
-    options: options.map((option) => ({ id: option, label: option })),
-    allowCustomInput: true,
-    responseKind: "choice",
-  };
+/** 抽查题型白名单校验：合法值收敛为字面量联合（string 的负向 !== 检查不产生收窄） */
+function asPopQuizQuestionType(
+  value: unknown,
+): PopQuizInteraction["questions"][number]["type"] | undefined {
+  return value === "choice" || value === "multi" || value === "true_false" || value === "short_answer"
+    ? value
+    : undefined;
 }
 
 function normalizeOptions(value: unknown): AskUserQuestion["options"] {
@@ -232,12 +287,19 @@ function normalizePublicOptions(value: unknown): AskUserQuestion["options"] {
   });
 }
 
+function asAskCardMode(value: unknown): AskCardMode | undefined {
+  return value === "plan_approval" || value === "semantic_clarification" || value === "action_parameters"
+    ? value
+    : undefined;
+}
+
 /**
  * Accepts the two card payloads already emitted by main. Keeping this at the
  * renderer boundary makes malformed CUSTOM events inert instead of interactive.
  */
 export function normalizeChoiceInteraction(value: unknown): AskUserInteraction | undefined {
   const card = asRecord(value);
+  if (!card) return undefined;
   const interactionId = asNonEmptyString(card?.interactionId);
   const runId = asNonEmptyString(card?.runId);
   const revision = typeof card?.revision === "number" && Number.isInteger(card.revision)
@@ -246,16 +308,20 @@ export function normalizeChoiceInteraction(value: unknown): AskUserInteraction |
   if (interactionId && runId && revision !== undefined && Array.isArray(card.questions)) {
     const questions = card.questions.flatMap((item) => {
       const question = asRecord(item);
+      if (!question) return [];
       const customInput = asRecord(question?.customInput);
       const id = asNonEmptyString(question?.id);
       const prompt = asNonEmptyString(question?.prompt);
       const options = normalizePublicOptions(question?.options);
-      if (!id || !prompt || options.length < 2 || customInput?.enabled !== true) return [];
+      const isTextQuestion = options.length === 0;
+      if (!id || !prompt || typeof customInput?.enabled !== "boolean") return [];
+      if (!isTextQuestion && options.length < 2) return [];
+      if (isTextQuestion && customInput.enabled !== true) return [];
       return [{
         id,
         question: prompt,
         options,
-        allowCustomInput: true,
+        allowCustomInput: customInput.enabled,
         freeTextPlaceholder: asNonEmptyString(customInput.placeholder),
         multiple: question.multiple === true,
       } satisfies AskUserQuestion];
@@ -266,6 +332,7 @@ export function normalizeChoiceInteraction(value: unknown): AskUserInteraction |
       id: interactionId,
       runId,
       revision,
+      cardMode: asAskCardMode(card.mode),
       intro: asNonEmptyString(card.intro),
       responseKind: "submission",
       question: questions[0].question,
@@ -279,6 +346,7 @@ export function normalizeChoiceInteraction(value: unknown): AskUserInteraction |
 
   const structuredQuestions = Array.isArray(card.questions) ? card.questions.flatMap((item) => {
     const question = asRecord(item);
+    if (!question) return [];
     const field = asNonEmptyString(question?.field);
     const text = asNonEmptyString(question?.question);
     if (!field || !text) return [];
@@ -313,6 +381,52 @@ export function normalizeChoiceInteraction(value: unknown): AskUserInteraction |
     options,
     allowCustomInput: true,
     responseKind: "choice",
+  };
+}
+
+/**
+ * 边界校验主进程推来的抽查卡片。畸形 payload 直接判失效（不渲染），
+ * 与 ask 卡片同款防线；主进程 10s 幂等重播，短暂畸形不会卡住用户。
+ */
+export function normalizePopQuizCard(value: unknown): PopQuizInteraction | undefined {
+  const card = asRecord(value);
+  if (!card) return undefined;
+  const quizId = asNonEmptyString(card?.quizId);
+  const runId = asNonEmptyString(card?.runId);
+  if (!quizId || !runId || !Array.isArray(card.questions)) return undefined;
+  const questions = (card.questions as unknown[]).flatMap((item) => {
+    const question = asRecord(item);
+    if (!question) return [];
+    const id = asNonEmptyString(question?.id);
+    const type = asPopQuizQuestionType(question?.type);
+    const prompt = asNonEmptyString(question?.question);
+    if (!id || !prompt || !type) return [];
+    const options = Array.isArray(question.options)
+      ? question.options.flatMap((option) => {
+          const record = asRecord(option);
+          const optionId = asNonEmptyString(record?.id);
+          const label = asNonEmptyString(record?.label);
+          return optionId && label ? [{ id: optionId, label }] : [];
+        })
+      : [];
+    // 选择题没选项就没法答；判断题/简答题本来就不带选项
+    if ((type === "choice" || type === "multi") && options.length < 2) return [];
+    return [{
+      id,
+      type,
+      question: prompt,
+      options,
+      learningObjective: asNonEmptyString(question.learningObjective) ?? "",
+    }];
+  });
+  // 题目数量或内容对不上主进程的发布（1-3 题）时整卡废弃，避免渲染半张残卡
+  if (questions.length === 0 || questions.length !== card.questions.length) return undefined;
+  return {
+    kind: "quiz",
+    id: quizId,
+    runId,
+    intro: asNonEmptyString(card.intro) ?? "",
+    questions,
   };
 }
 
@@ -392,6 +506,38 @@ export function buildAskSubmission(
   };
 }
 
+/**
+ * 构造计划审批卡的提交：批准 / 不批准直接回传档位；需要修改把意见原文随档位同卡附上。
+ * 选项顺序是位置契约（第 1 个=批准、第 2 个=需要修改、第 3 个=不批准），与主进程建卡端约定一致。
+ */
+export function buildPlanApprovalSubmission(
+  interaction: AskUserInteraction,
+  decision: "approve" | "revise" | "reject",
+  reviseText?: string,
+): AskCardSubmission {
+  if (interaction.responseKind !== "submission"
+    || interaction.cardMode !== "plan_approval"
+    || !interaction.runId
+    || interaction.revision === undefined) {
+    throw new Error("E_ASK_SUBMISSION_INCOMPLETE");
+  }
+  const question = interaction.questions?.[0];
+  // 空意见的"需要修改"没有信息量，提交前必须已填写
+  const text = reviseText?.trim();
+  if (decision === "revise" && !text) throw new Error("E_ASK_SUBMISSION_INCOMPLETE");
+  const optionIndex = decision === "approve" ? 0 : decision === "revise" ? 1 : 2;
+  const optionId = question?.options[optionIndex]?.id;
+  if (!question || !optionId) throw new Error("E_ASK_SUBMISSION_INCOMPLETE");
+  return {
+    interactionId: interaction.id,
+    runId: interaction.runId,
+    revision: interaction.revision,
+    answers: [decision === "revise"
+      ? { questionId: question.id, source: "option_with_text" as const, optionId, text: text! }
+      : { questionId: question.id, source: "option" as const, optionId }],
+  };
+}
+
 export function shouldDismissAsk(interaction: AskUserInteraction, value: unknown): boolean {
   const settlement = asRecord(value);
   if (asNonEmptyString(settlement?.id) !== interaction.id) return false;
@@ -405,6 +551,7 @@ export function normalizeTaskPlanPresentation(value: unknown): TaskPlanPresentat
   const snapshot = asRecord(value);
   const steps = Array.isArray(snapshot?.steps) ? snapshot.steps.flatMap((item) => {
     const step = asRecord(item);
+    if (!step) return [];
     const id = asNonEmptyString(step?.stepId);
     const title = asNonEmptyString(step?.objective);
     if (!id || !title) return [];

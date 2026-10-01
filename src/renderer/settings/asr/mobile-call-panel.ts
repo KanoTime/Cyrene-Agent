@@ -3,10 +3,13 @@ import type {
   DesktopOwnerBootstrapDisplay,
   DesktopPairingReviewDisplay,
 } from "../../../shared/device-pairing";
-import type { GeneralSettings } from "../shared/types";
+import type { SettingsApi, GeneralSettings } from "../shared/types";
 
+export function initializeMobileCallPanel(root: HTMLElement): () => void {
+const api = window.settings as unknown as SettingsApi | undefined;
+let disposed = false;
 const byId = <T extends HTMLElement>(id: string): T | null =>
-  document.getElementById(id) as T | null;
+  root.querySelector(`#${id}`) as T | null;
 const hide = (element: HTMLElement | null): void => element?.setAttribute("hidden", "");
 const show = (element: HTMLElement | null): void => element?.removeAttribute("hidden");
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -140,10 +143,10 @@ function terminalPairingMessage(status: DesktopPairingReviewDisplay["status"]): 
 }
 
 async function pollPairingReview(): Promise<void> {
-  if (!activeChallengeId || !window.settings?.reviewDevicePairing || pairingPollInFlight) return;
+  if (disposed || !activeChallengeId || !api?.reviewDevicePairing || pairingPollInFlight) return;
   pairingPollInFlight = true;
   try {
-    const review = await window.settings.reviewDevicePairing(activeChallengeId);
+    const review = await api.reviewDevicePairing(activeChallengeId);
     if (review.status === "OPEN") {
       setPairingMessage("等待手机扫码…");
       return;
@@ -172,7 +175,7 @@ async function pollPairingReview(): Promise<void> {
 }
 
 async function loadAuthorizationStatus(): Promise<void> {
-  if (!window.settings?.getDeviceAuthorizationStatus) {
+  if (!api?.getDeviceAuthorizationStatus) {
     if (pairingState) {
       pairingState.textContent = "当前版本不可用";
       pairingState.className = "device-pairing-state is-error";
@@ -180,7 +183,7 @@ async function loadAuthorizationStatus(): Promise<void> {
     return;
   }
   try {
-    const status = await window.settings.getDeviceAuthorizationStatus();
+    const status = await api.getDeviceAuthorizationStatus();
     if (status.status === "paired") {
       hide(ownerBootstrapPanel);
       hide(ownerRecoverPanel);
@@ -217,11 +220,11 @@ async function loadAuthorizationStatus(): Promise<void> {
 }
 
 ownerBootstrapSubmit?.addEventListener("click", async () => {
-  if (!window.settings?.bootstrapOwner || !ownerBootstrapOrigin || !ownerBootstrapLabel || !ownerBootstrapCode) return;
+  if (!api?.bootstrapOwner || !ownerBootstrapOrigin || !ownerBootstrapLabel || !ownerBootstrapCode) return;
   ownerBootstrapSubmit.disabled = true;
   setPairingMessage("正在初始化首台桌面并写入钥匙串…");
   try {
-    const result = await window.settings.bootstrapOwner({
+    const result = await api.bootstrapOwner({
       controlPlaneOrigin: ownerBootstrapOrigin.value,
       deploymentBootstrapCode: ownerBootstrapCode.value,
       label: ownerBootstrapLabel.value,
@@ -247,11 +250,11 @@ ownerRecoverCancel?.addEventListener("click", () => {
   void loadAuthorizationStatus();
 });
 ownerRecoverSubmit?.addEventListener("click", async () => {
-  if (!window.settings?.recoverOwner || !ownerRecoverOrigin || !ownerRecoverLabel || !ownerRecoverKey) return;
+  if (!api?.recoverOwner || !ownerRecoverOrigin || !ownerRecoverLabel || !ownerRecoverKey) return;
   ownerRecoverSubmit.disabled = true;
   setPairingMessage("正在验证恢复密钥并撤销旧桌面…");
   try {
-    const result = await window.settings.recoverOwner({
+    const result = await api.recoverOwner({
       controlPlaneOrigin: ownerRecoverOrigin.value,
       ownerRecoveryKey: ownerRecoverKey.value,
       label: ownerRecoverLabel.value,
@@ -282,7 +285,7 @@ ownerRecoveryCancel?.addEventListener("click", () => {
   setPairingMessage("恢复密钥尚未确认；新增桌面将被拒绝", "error");
 });
 ownerRecoveryConfirm?.addEventListener("click", async () => {
-  if (!window.settings?.confirmOwnerRecoveryKey || !ownerRecoveryConfirmInput) return;
+  if (!api?.confirmOwnerRecoveryKey || !ownerRecoveryConfirmInput) return;
   const entered = ownerRecoveryConfirmInput.value.trim();
   if (expectedRecoveryFragment && entered !== expectedRecoveryFragment) {
     setPairingMessage("随机片段不匹配，请检查已保存的恢复密钥", "error");
@@ -291,7 +294,7 @@ ownerRecoveryConfirm?.addEventListener("click", async () => {
   ownerRecoveryConfirm.disabled = true;
   setPairingMessage("正在确认恢复密钥…");
   try {
-    await window.settings.confirmOwnerRecoveryKey(pendingRecoveryKey ?? entered);
+    await api.confirmOwnerRecoveryKey(pendingRecoveryKey ?? entered);
     clearRecoverySecret();
     hide(ownerRecoveryPanel);
     setPairingMessage("恢复密钥已确认，可以配对新设备", "ok");
@@ -304,12 +307,12 @@ ownerRecoveryConfirm?.addEventListener("click", async () => {
 });
 
 pairingBegin?.addEventListener("click", async () => {
-  if (!window.settings?.beginDevicePairing) return;
+  if (!api?.beginDevicePairing) return;
   resetPairingDisplay();
   pairingBegin.disabled = true;
   setPairingMessage("正在创建 2 分钟配对挑战…");
   try {
-    const challenge = await window.settings.beginDevicePairing();
+    const challenge = await api.beginDevicePairing();
     activeChallengeId = challenge.challengeId;
     if (pairingQr) pairingQr.src = challenge.qrDataUrl;
     if (pairingShortCode) pairingShortCode.textContent = challenge.shortCode;
@@ -322,6 +325,7 @@ pairingBegin?.addEventListener("click", async () => {
     }
     show(pairingInvitation);
     setPairingMessage("等待手机扫码…", "ok");
+    if (disposed) return;
     pairingPollTimer = window.setInterval(() => void pollPairingReview(), 1_500);
     void pollPairingReview();
   } catch (error) {
@@ -331,12 +335,12 @@ pairingBegin?.addEventListener("click", async () => {
 });
 
 async function decidePairing(allow: boolean): Promise<void> {
-  if (!activeChallengeId || !window.settings?.decideDevicePairing) return;
+  if (!activeChallengeId || !api?.decideDevicePairing) return;
   if (pairingAllow) pairingAllow.disabled = true;
   if (pairingReject) pairingReject.disabled = true;
   setPairingMessage(allow ? "正在批准…" : "正在拒绝…");
   try {
-    const result = await window.settings.decideDevicePairing(activeChallengeId, allow);
+    const result = await api.decideDevicePairing(activeChallengeId, allow);
     setPairingMessage(
       result.status === "APPROVED" ? "手机已获得独立设备授权" : "已拒绝这台手机",
       result.status === "APPROVED" ? "ok" : "error",
@@ -397,7 +401,7 @@ function applyMobileStatus(status: MobileCallStatus): void {
     status.state === "error" ? "error" : ["waiting-for-mobile", "connected", "ended"].includes(status.state) ? "ok" : "default",
   );
 }
-window.settings?.onMobileCallStatus?.(applyMobileStatus);
+const unsubscribe = api?.onMobileCallStatus?.(applyMobileStatus);
 
 function currentLiveKitSettings(): Partial<GeneralSettings> {
   return {
@@ -407,7 +411,7 @@ function currentLiveKitSettings(): Partial<GeneralSettings> {
   };
 }
 async function saveLiveKitSettings(): Promise<void> {
-  await window.settings?.saveGeneral(currentLiveKitSettings());
+  await api?.saveGeneral(currentLiveKitSettings());
 }
 for (const field of [liveKitUrl, liveKitKey, liveKitSecret]) {
   field?.addEventListener("input", () => {
@@ -423,7 +427,7 @@ for (const field of [liveKitUrl, liveKitKey, liveKitSecret]) {
 
 async function loadLiveKitSettings(): Promise<void> {
   try {
-    const settings = await window.settings?.getGeneral();
+    const settings = await api?.getGeneral();
     if (!settings) return;
     if (liveKitUrl) liveKitUrl.value = settings.mobileCallLiveKitUrl ?? "";
     if (liveKitKey) liveKitKey.value = settings.mobileCallLiveKitApiKey ?? "";
@@ -435,7 +439,7 @@ async function loadLiveKitSettings(): Promise<void> {
 }
 
 mobileStart?.addEventListener("click", async () => {
-  if (!window.settings?.startMobileCall) {
+  if (!api?.startMobileCall) {
     setMobileStatus("当前桌面版本不支持手机通话配对", "error");
     return;
   }
@@ -445,7 +449,7 @@ mobileStart?.addEventListener("click", async () => {
   let started = false;
   try {
     await saveLiveKitSettings();
-    const pairing = await window.settings.startMobileCall();
+    const pairing = await api.startMobileCall();
     if (mobileQr) mobileQr.src = pairing.qrDataUrl;
     if (mobileExpiry) {
       mobileExpiry.textContent = `请在 ${new Date(pairing.expiresAt).toLocaleString("zh-CN", {
@@ -465,11 +469,11 @@ mobileStart?.addEventListener("click", async () => {
   }
 });
 mobileStop?.addEventListener("click", async () => {
-  if (!window.settings?.stopMobileCall) return;
+  if (!api?.stopMobileCall) return;
   mobileStop.disabled = true;
   setMobileStatus("正在结束手机通话…");
   try {
-    await window.settings.stopMobileCall();
+    await api.stopMobileCall();
     hide(mobilePairing);
     mobileQr?.removeAttribute("src");
     if (mobileStart) mobileStart.disabled = false;
@@ -480,3 +484,6 @@ mobileStop?.addEventListener("click", async () => {
   }
 });
 void loadLiveKitSettings();
+
+return () => { disposed = true; stopPairingPoll(); clearTimeout(saveTimer); unsubscribe?.(); clearRecoverySecret(); };
+}

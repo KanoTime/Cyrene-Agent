@@ -6,11 +6,11 @@
 // 也可以配 bearer（如 MiMo /anthropic 端点）。
 import {
   ChatMessage, ChatRequest, ChatResponse, ChatVendorAdapter,
-  HttpRequest, ProviderCapability, StreamChunk, StreamEvent,
+  ChatMessageContent, HttpRequest, ProviderCapability, StreamChunk, StreamEvent,
   TestConnectionResult, ToolCall, ToolExecutionResult, VendorConfig,
 } from "./types";
 import { authHeaderFor } from "./auth";
-import { resolveReasoningCapability } from "../../../shared/reasoning";
+import { applyManualReasoningBody, normalizeManualReasoningConfig, resolveConfiguredReasoningCapability } from "../../../shared/manual-reasoning";
 import { applyReasoningPreference } from "./reasoning";
 import { getTimeoutSettings } from "../../timeout-manager";
 import { resolveAutomaticToolChoicePolicy, resolveToolChoicePolicy } from "./tool-choice-policy";
@@ -26,13 +26,96 @@ interface ContentBlock {
 }
 
 /**
+ * 消息级缓存断点的模型门控（官方显式缓存支持列表，2026-08）：
+ * - Claude：全系支持 content block 上的 cache_control；
+ * - MiniMax：显式缓存仅 M2.x 系列（M2 / M2.1 / M2.5 / M2.7，含 highspeed/Stable 变体）；
+ *   M3 靠被动缓存（服务端自动前缀匹配，无需断点），保守起见不对其发送。
+ */
+function supportsMessageCacheBreakpoint(adapterId: string, model: string): boolean {
+  if (adapterId === "claude") return true;
+  if (adapterId === "minimax") return /^minimax-m2(?:$|[.-])/i.test(model.trim());
+  return false;
+}
+
+/** 给一条 wire message 的最后一个 content block 打 ephemeral 缓存断点；返回是否成功。 */
+function markMessageCacheBreakpoint(message: Record<string, unknown>): boolean {
+  if (typeof message.content === "string" && message.content.length > 0) {
+    message.content = [{
+      type: "text",
+      text: message.content,
+      cache_control: { type: "ephemeral" },
+    }];
+    return true;
+  }
+  if (Array.isArray(message.content) && message.content.length > 0) {
+    // 浅拷贝 block 数组再打标记，避免污染 rawAssistant 等持久化引用
+    const blocks = (message.content as ContentBlock[]).map(block => ({ ...block }));
+    blocks[blocks.length - 1].cache_control = { type: "ephemeral" };
+    message.content = blocks;
+    return true;
+  }
+  return false;
+}
+
+/** Anthropic image source 白名单（官方协议仅支持这四种 media_type）。 */
+const ANTHROPIC_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+/**
+ * OpenAI 风格 content → Anthropic content blocks。
+ * - text 块照搬；
+ * - image_url 块：data URL → source.type=base64；http(s) URL → source.type=url
+ *   （原生协议两者都支持）；
+ * - data URL 的 media_type 不在 Anthropic 白名单时降级为文本占位块，避免 400。
+ */
+function toAnthropicContent(content: ChatMessageContent): string | ContentBlock[] {
+  if (typeof content === "string") return content;
+  const blocks: ContentBlock[] = [];
+  let imageBase64Count = 0;
+  let imageUrlCount = 0;
+  let imageDowngradedCount = 0;
+  for (const block of content) {
+    if (block.type === "text") {
+      blocks.push({ type: "text", text: block.text });
+    } else if (block.type === "image_url") {
+      const dataMatch = /^data:([^;]+);base64,(.+)$/.exec(block.image_url.url);
+      if (dataMatch) {
+        if (!ANTHROPIC_IMAGE_MEDIA_TYPES.has(dataMatch[1])) {
+          imageDowngradedCount += 1;
+          blocks.push({ type: "text", text: `[图片格式 ${dataMatch[1]} 暂不支持直发，已跳过]` });
+        } else {
+          imageBase64Count += 1;
+          blocks.push({
+            type: "image",
+            source: { type: "base64", media_type: dataMatch[1], data: dataMatch[2] },
+          });
+        }
+      } else {
+        imageUrlCount += 1;
+        blocks.push({
+          type: "image",
+          source: { type: "url", url: block.image_url.url },
+        });
+      }
+    }
+  }
+  // [image-send] 链路日志③：wire 转换统计（无图不打印；含全部历史图片块）。
+  if (imageBase64Count + imageUrlCount + imageDowngradedCount > 0) {
+    console.log(
+      `[image-send] anthropic wire: image 块 ${imageBase64Count} base64 / ${imageUrlCount} url`
+      + (imageDowngradedCount > 0 ? ` / ${imageDowngradedCount} 个 MIME 不在白名单已降级文本` : ""),
+    );
+  }
+  return blocks.length > 0 ? blocks : "";
+}
+
+/**
  * 把统一消息翻译成 Anthropic wire messages。
  * system 抽出来单独返回（Anthropic system 是顶层字段）。
  * 关键：assistant 若带 rawAssistant（上一轮原始 content block 数组）则原样回传，
  * 保证 thinking / tool_use block 完整回灌（MiniMax 多轮强制要求）。
  * tool 结果：Anthropic 用 user 角色的 tool_result block，同轮多个合并到同一条 user message。
  */
-function toWireMessages(messages: ChatMessage[]): {
+function toWireMessages(messages: ChatMessage[], options?: { cacheBreakpoints?: boolean }): {
   system: string | undefined;
   messages: Array<Record<string, unknown>>;
 } {
@@ -46,7 +129,7 @@ function toWireMessages(messages: ChatMessage[]): {
   const wire: Array<Record<string, unknown>> = [];
   for (const m of messages.filter(x => x.role !== "system")) {
     if (m.role === "user") {
-      wire.push({ role: "user", content: m.content ?? "" });
+      wire.push({ role: "user", content: toAnthropicContent(m.content ?? "") });
     } else if (m.role === "assistant") {
       if (m.rawAssistant !== undefined) {
         wire.push({ role: "assistant", content: m.rawAssistant });
@@ -81,6 +164,16 @@ function toWireMessages(messages: ChatMessage[]): {
       }
     }
   }
+  if (options?.cacheBreakpoints) {
+    // 从尾部向前给两条消息打断点（连同 system 断点共 3 个，低于 Claude 4 个上限）：
+    // - 最后一条：滚动断点，下一轮请求把它整体当作可复用前缀（工具循环逐轮命中）；
+    // - 倒数第二条：兜底断点——ChatLoop 尾部注入 runtime_context 时最后一条每轮都变，
+    //   真正稳定的"历史末尾"在倒数第二条。
+    let marked = 0;
+    for (let i = wire.length - 1; i >= 0 && marked < 2; i -= 1) {
+      if (markMessageCacheBreakpoint(wire[i])) marked += 1;
+    }
+  }
   return { system, messages: wire };
 }
 
@@ -89,7 +182,10 @@ export class AnthropicAdapter implements ChatVendorAdapter {
   constructor(public readonly id: string, public capability: ProviderCapability) {}
 
   buildRequest(req: ChatRequest, cfg: VendorConfig): HttpRequest {
-    const { system, messages } = toWireMessages(req.messages);
+    // system 断点覆盖"tools + system"前缀；消息级断点按模型门控（见 supportsMessageCacheBreakpoint）
+    const useMessageBreakpoints = this.capability.cacheStrategy === "cache_control"
+      && supportsMessageCacheBreakpoint(this.id, req.model);
+    const { system, messages } = toWireMessages(req.messages, { cacheBreakpoints: useMessageBreakpoints });
     const body: Record<string, unknown> = {
       model: req.model,
       max_tokens: getVendorRuntimeSettings().disableMaxToken ? undefined : req.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -113,31 +209,13 @@ export class AnthropicAdapter implements ChatVendorAdapter {
         description: t.description,
         input_schema: t.parameters,
       }));
-      if (req.toolChoiceOverride) {
-        // Action Gate 专用：直接指定 tool_choice wire 值，绕过 resolveToolChoicePolicy
-        switch (req.toolChoiceOverride.kind) {
-          case "named":
-            body.tool_choice = { type: "tool", name: req.toolChoiceOverride.toolName };
-            break;
-          case "required":
-            body.tool_choice = { type: "any" };
-            break;
-          case "auto":
-            body.tool_choice = { type: "auto" };
-            break;
-          case "none":
-            body.tool_choice = { type: "none" };
-            break;
-          case "omit":
-            // 不发 tool_choice 字段
-            break;
-        }
-      } else if (req.toolChoiceIntent) {
+      if (req.toolChoiceIntent) {
         const policy = resolveToolChoicePolicy({
           providerId: this.capability.id,
           model: cfg.model,
           transport: this.transport,
           reasoning: cfg.reasoning ?? { mode: "auto" },
+          manualReasoning: cfg.manualReasoning,
           requestedToolName: req.toolChoiceIntent.toolName,
           supportedModes: this.capability.toolChoiceModes,
         });
@@ -149,6 +227,7 @@ export class AnthropicAdapter implements ChatVendorAdapter {
         model: cfg.model,
         transport: this.transport,
         reasoning: cfg.reasoning ?? { mode: "auto" },
+        manualReasoning: cfg.manualReasoning,
         supportedModes: this.capability.toolChoiceModes,
       }) === "auto") {
         body.tool_choice = { type: "auto" };
@@ -171,7 +250,8 @@ export class AnthropicAdapter implements ChatVendorAdapter {
       };
     }
     // 推理控制：按 (providerId, model) 解析 capability，调用 applyReasoningPreference 转换 body。
-    const reasoningCap = resolveReasoningCapability(this.capability.id, cfg.model);
+    const manualReasoning = normalizeManualReasoningConfig(cfg.manualReasoning);
+    const reasoningCap = resolveConfiguredReasoningCapability(this.capability.id, cfg.model, manualReasoning);
     const finalBody = applyReasoningPreference(
       body,
       cfg.reasoning ?? { mode: "auto" },
@@ -180,8 +260,10 @@ export class AnthropicAdapter implements ChatVendorAdapter {
         hasTools: Boolean(req.tools?.length),
         providerId: this.capability.id,
         model: cfg.model,
+        ignoreThinkingOverride: Boolean(manualReasoning),
       },
     );
+    const wireBody = applyManualReasoningBody(finalBody, manualReasoning, cfg.reasoning ?? { mode: "auto" });
     return {
       url: resolveApiEndpoint(cfg.baseUrl, "anthropic").url,
       method: "POST",
@@ -190,7 +272,7 @@ export class AnthropicAdapter implements ChatVendorAdapter {
         ...authHeaderFor(this.capability, cfg.apiKey, "anthropic"),
         "anthropic-version": ANTHROPIC_VERSION,
       },
-      body: JSON.stringify(finalBody),
+      body: JSON.stringify(wireBody),
     };
   }
 
@@ -198,7 +280,7 @@ export class AnthropicAdapter implements ChatVendorAdapter {
     const data = raw as {
       content?: ContentBlock[];
       stop_reason?: string;
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
     };
     const blocks = data.content ?? [];
     let text = "";
@@ -241,7 +323,16 @@ export class AnthropicAdapter implements ChatVendorAdapter {
 
     // 提取 token 用量（Anthropic 协议: input_tokens/output_tokens）
     const usage = data.usage
-      ? { input: data.usage.input_tokens ?? 0, output: data.usage.output_tokens ?? 0 }
+      ? {
+          input: data.usage.input_tokens ?? 0,
+          output: data.usage.output_tokens ?? 0,
+          ...(typeof data.usage.cache_read_input_tokens === "number"
+            ? { cachedInput: data.usage.cache_read_input_tokens }
+            : {}),
+          ...(typeof data.usage.cache_creation_input_tokens === "number"
+            ? { cacheCreation: data.usage.cache_creation_input_tokens }
+            : {}),
+        }
       : undefined;
 
     return { assistantMessage, text, thinking, toolCalls, finishReason, raw, usage };
@@ -257,9 +348,9 @@ export class AnthropicAdapter implements ChatVendorAdapter {
     let parsed: {
       type?: string;
       error?: { message?: unknown };
-      message?: { usage?: { input_tokens?: number; output_tokens?: number } };
+      message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
       delta?: { type?: string; text?: string; thinking?: string; partial_json?: string; stop_reason?: string };
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
     };
     try {
       parsed = JSON.parse(event.data);
@@ -279,6 +370,12 @@ export class AnthropicAdapter implements ChatVendorAdapter {
           usage: {
             input: startUsage.input_tokens ?? 0,
             output: startUsage.output_tokens ?? 0,
+            ...(typeof startUsage.cache_read_input_tokens === "number"
+              ? { cachedInput: startUsage.cache_read_input_tokens }
+              : {}),
+            ...(typeof startUsage.cache_creation_input_tokens === "number"
+              ? { cacheCreation: startUsage.cache_creation_input_tokens }
+              : {}),
           },
         } : null;
       }
@@ -298,6 +395,12 @@ export class AnthropicAdapter implements ChatVendorAdapter {
         if (parsed.usage) chunk.usage = {
           input: parsed.usage.input_tokens ?? 0,
           output: parsed.usage.output_tokens ?? 0,
+          ...(typeof parsed.usage.cache_read_input_tokens === "number"
+            ? { cachedInput: parsed.usage.cache_read_input_tokens }
+            : {}),
+          ...(typeof parsed.usage.cache_creation_input_tokens === "number"
+            ? { cacheCreation: parsed.usage.cache_creation_input_tokens }
+            : {}),
         };
         return Object.keys(chunk).length > 0 ? chunk : null;
       }

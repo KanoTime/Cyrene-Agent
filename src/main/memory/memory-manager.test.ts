@@ -1,7 +1,7 @@
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { MemoryCandidate } from "./memory-types"
 
 const electronMock = vi.hoisted(() => ({
@@ -20,6 +20,12 @@ vi.mock("electron", () => ({
 }))
 
 vi.mock("../rag/index", () => ragMock)
+
+// memoryStore.save() 会 fire-and-forget 动态加载 exporter；这里隔离该外围副作用，
+// 避免 vi.resetModules() 与尚未 settle 的循环动态 import 在 Vitest 5 下竞争。
+vi.mock("./obsidian-exporter", () => ({
+  notifyMemoryChanged: vi.fn(),
+}))
 
 function readTraceEvents(): Array<Record<string, unknown>> {
   const tracePath = path.join(electronMock.userDataDir, "characters", "test", "memory", "memory-trace.log")
@@ -40,6 +46,10 @@ describe("MemoryManager L2 sync", () => {
     vi.resetModules()
     const state = await import("../character/character-state")
     state.configureActiveCharacterState(state.resolveCharacterStateLayout(electronMock.userDataDir, "test"))
+  })
+
+  afterEach(async () => {
+    await vi.dynamicImportSettled()
   })
 
   it("creates L2 first, syncs it to RAG with l2Id metadata, then marks it synced", async () => {

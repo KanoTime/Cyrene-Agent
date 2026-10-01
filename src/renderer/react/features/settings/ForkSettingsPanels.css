@@ -1,0 +1,440 @@
+
+.fork-settings-panel .character-overview,.fork-settings-panel .character-notice,.fork-settings-panel .character-package-row {
+  border: 1px solid rgba(255, 182, 220, 0.18);
+  background: rgba(255, 255, 255, 0.045);
+  border-radius: 16px;
+}
+.fork-settings-panel .character-overview,.fork-settings-panel .character-package-row,.fork-settings-panel .character-section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.fork-settings-panel .character-overview { align-items: center; padding: 18px 20px; }
+.fork-settings-panel .character-overview > div,.fork-settings-panel .character-package-row__main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.fork-settings-panel .character-overview__eyebrow,.fork-settings-panel .character-package-row__meta,.fork-settings-panel .character-section-heading p,.fork-settings-panel .character-import-status,.fork-settings-panel .character-empty { color: var(--rb-text-muted); font: var(--rb-text-small); }
+.fork-settings-panel .character-notice { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding: 13px 16px; }
+.fork-settings-panel .character-section-heading { align-items: end; margin: 24px 2px 10px; }
+.fork-settings-panel .character-section-heading h2,.fork-settings-panel .character-section-heading p { margin: 0; }
+.fork-settings-panel .character-package-list { display: flex; flex-direction: column; gap: 8px; }
+.fork-settings-panel .character-archive-list { display: flex; flex-direction: column; gap: 8px; }
+.fork-settings-panel .character-package-row { align-items: flex-start; padding: 14px 16px; }
+.fork-settings-panel .character-archive-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 182, 220, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.fork-settings-panel .character-archive-row__impact { margin: 4px 0 0; color: var(--rb-text-muted); font: var(--rb-text-micro); }
+.fork-settings-panel .character-package-row__title,.fork-settings-panel .character-package-row__badges,.fork-settings-panel .character-package-row__capabilities { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.fork-settings-panel .character-package-row__capabilities { margin-top: 5px; }
+.fork-settings-panel .character-count,.fork-settings-panel .character-badge,.fork-settings-panel .character-capability { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: rgba(255,255,255,.06); color: var(--rb-text-muted); font: var(--rb-text-micro); }
+.fork-settings-panel .character-badge--active,.fork-settings-panel .character-badge--healthy,.fork-settings-panel .character-import-status.is-success { color: #bbf7d0; }
+.fork-settings-panel .character-badge--warning,.fork-settings-panel .character-badge--unhealthy,.fork-settings-panel .character-package-row__diagnostic,.fork-settings-panel .character-import-status.is-error { color: #fecdd3; }
+.fork-settings-panel .character-empty { padding: 28px 16px; text-align: center; border: 1px dashed rgba(255,182,220,.18); border-radius: 16px; }
+.fork-settings-panel .character-import-status { min-height: 20px; margin: 10px 2px 0; }
+.fork-settings-panel .character-package-row__badges { justify-content: flex-end; max-width: 290px; }
+.fork-settings-panel .character-switch-btn {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(244, 114, 182, 0.52);
+  border-radius: 9px;
+  background: rgba(244, 114, 182, 0.14);
+  color: var(--rb-text-strong);
+  font: var(--rb-text-small-em);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+.fork-settings-panel .character-switch-btn:hover:not(:disabled) { border-color: rgba(244, 114, 182, 0.84); background: rgba(244, 114, 182, 0.22); }
+.fork-settings-panel .character-switch-btn:disabled { cursor: not-allowed; opacity: 0.58; }
+.fork-settings-panel .character-switch-btn:focus-visible { outline: 2px solid rgba(244, 114, 182, 0.9); outline-offset: 3px; }
+.fork-settings-panel .character-switch-reason { flex-basis: 100%; color: #fecdd3; font: var(--rb-text-micro); text-align: right; }
+.fork-settings-panel .character-uninstall-btn,.fork-settings-panel .character-archive-delete-btn {
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 9px;
+  font: var(--rb-text-small-em);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+.fork-settings-panel .character-uninstall-btn { border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.04); color: var(--rb-text-muted); }
+.fork-settings-panel .character-uninstall-btn:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.32); background: rgba(255, 255, 255, 0.08); color: var(--rb-text-strong); }
+.fork-settings-panel .character-archive-delete-btn { flex: 0 0 auto; border: 1px solid rgba(251, 113, 133, 0.42); background: rgba(244, 63, 94, 0.09); color: #fecdd3; }
+.fork-settings-panel .character-archive-delete-btn:hover:not(:disabled) { border-color: rgba(251, 113, 133, 0.72); background: rgba(244, 63, 94, 0.16); }
+.fork-settings-panel .character-uninstall-btn:disabled,.fork-settings-panel .character-archive-delete-btn:disabled { cursor: not-allowed; opacity: 0.55; }
+.fork-settings-panel .character-uninstall-btn:focus-visible,.fork-settings-panel .character-archive-delete-btn:focus-visible { outline: 2px solid rgba(244, 114, 182, 0.9); outline-offset: 3px; }
+  .fork-settings-panel .character-package-row { flex-direction: column; }
+  .fork-settings-panel .character-archive-row { align-items: flex-start; flex-direction: column; }
+  .fork-settings-panel .character-package-row__badges { justify-content: flex-start; max-width: none; }
+  .fork-settings-panel .character-switch-reason { text-align: left; }
+  .fork-settings-panel .character-switch-btn { transition: none; }
+  .fork-settings-panel .character-uninstall-btn,.fork-settings-panel .character-archive-delete-btn { transition: none; }
+
+.fork-settings-panel .save-status {
+  font: var(--rb-text-small);
+  color: rgba(235, 229, 245, 0.54);
+}
+
+.fork-settings-panel .save-status.is-ok {
+  color: #86efac;
+}
+
+.fork-settings-panel .save-status.is-error {
+  color: #fda4af;
+}
+.fork-settings-panel .plugin-config .tts-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.fork-settings-panel .plugin-config .tts-field label {
+  min-width: 64px;
+  font-size: 12px;
+  color: var(--rb-text-muted);
+}
+.fork-settings-panel .plugin-config .tts-field input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 182, 220, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(254, 247, 255, 0.9);
+  font-size: 13px;
+}
+.fork-settings-panel .plugin-config .tts-field input:focus {
+  outline: none;
+  border-color: rgba(255, 182, 220, 0.5);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fork-settings-panel .tts-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.fork-settings-panel .tts-field label {
+  flex: 0 0 100px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--rb-text-muted);
+}
+
+.fork-settings-panel .tts-field input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 182, 220, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(254, 247, 255, 0.9);
+  font-size: 13px;
+}
+
+.fork-settings-panel .tts-field input:focus {
+  outline: none;
+  border-color: rgba(255, 182, 220, 0.5);
+  background: rgba(255, 255, 255, 0.08);
+}
+.fork-settings-panel .tts-field select {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 182, 220, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(254, 247, 255, 0.9);
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, rgba(255, 182, 220, 0.6) 50%),
+                    linear-gradient(135deg, rgba(255, 182, 220, 0.6) 50%, transparent 50%);
+  background-position: calc(100% - 16px) center, calc(100% - 11px) center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 32px;
+}
+
+.fork-settings-panel .tts-field select:hover {
+  border-color: rgba(255, 182, 220, 0.3);
+  background-color: rgba(255, 110, 199, 0.12);
+}
+
+.fork-settings-panel .tts-field select:focus {
+  outline: none;
+  border-color: rgba(255, 182, 220, 0.5);
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.fork-settings-panel .tts-field select option {
+  background: rgba(38, 28, 60, 0.98);
+  color: rgba(254, 247, 255, 0.9);
+  padding: 8px;
+}
+
+.fork-settings-panel .tts-hint {
+  margin-top: 20px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 192, 230, 0.06);
+  border: 1px solid rgba(255, 182, 220, 0.12);
+  font-size: 12px;
+  color: rgba(235, 229, 245, 0.5);
+  line-height: 1.6;
+}
+.fork-settings-panel .mobile-call-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.fork-settings-panel .mobile-call-actions .save-status {
+  min-height: 20px;
+}
+
+.fork-settings-panel .mobile-call-pairing {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(236, 72, 153, 0.28);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.fork-settings-panel .mobile-call-pairing[hidden] {
+  display: none;
+}
+
+.fork-settings-panel .mobile-call-pairing img {
+  width: 130px;
+  height: 130px;
+  padding: 6px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.fork-settings-panel .mobile-call-pairing__content {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 7px;
+}
+
+.fork-settings-panel .mobile-call-pairing__content strong {
+  color: var(--rb-text-default);
+  font-size: 13px;
+}
+
+.fork-settings-panel .mobile-call-pairing__content span {
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+
+.fork-settings-panel .device-pairing-card {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid rgba(236, 72, 153, 0.24);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(236, 72, 153, 0.12), transparent 42%),
+    rgba(255, 255, 255, 0.035);
+}
+
+.fork-settings-panel .device-pairing-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.fork-settings-panel .device-pairing-card__header strong,.fork-settings-panel .device-pairing-divider strong {
+  color: var(--rb-text-default);
+  font-size: 14px;
+}
+
+.fork-settings-panel .device-pairing-card__header p {
+  max-width: 580px;
+  margin: 5px 0 0;
+  color: var(--rb-text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.fork-settings-panel .device-pairing-state {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: var(--rb-text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+}
+
+.fork-settings-panel .device-pairing-state.is-ready {
+  border-color: rgba(74, 222, 128, 0.28);
+  color: rgba(187, 247, 208, 0.95);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.fork-settings-panel .device-pairing-state.is-error {
+  border-color: rgba(248, 113, 113, 0.3);
+  color: rgba(254, 202, 202, 0.96);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.fork-settings-panel .device-pairing-invitation {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(236, 72, 153, 0.28);
+  border-radius: 14px;
+  background: rgba(15, 10, 28, 0.24);
+}
+
+.fork-settings-panel .device-pairing-invitation[hidden],.fork-settings-panel .device-pairing-review[hidden],.fork-settings-panel .owner-bootstrap-panel[hidden],.fork-settings-panel .owner-recover-panel[hidden],.fork-settings-panel .owner-recovery-panel[hidden] {
+  display: none;
+}
+
+.fork-settings-panel .owner-bootstrap-panel,.fork-settings-panel .owner-recover-panel,.fork-settings-panel .owner-recovery-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(129, 140, 248, 0.28);
+  border-radius: 14px;
+  background: rgba(99, 102, 241, 0.07);
+}
+
+.fork-settings-panel .owner-bootstrap-panel > strong,.fork-settings-panel .owner-recover-panel > strong,.fork-settings-panel .owner-recovery-panel > strong {
+  color: var(--rb-text-default);
+  font-size: 14px;
+}
+
+.fork-settings-panel .owner-bootstrap-panel > p,.fork-settings-panel .owner-recover-panel > p,.fork-settings-panel .owner-recovery-panel > p {
+  margin: 0;
+  color: var(--rb-text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.fork-settings-panel .owner-bootstrap-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.55fr);
+  gap: 10px;
+}
+
+.fork-settings-panel .owner-bootstrap-grid__wide {
+  grid-column: 1 / -1;
+}
+
+.fork-settings-panel .owner-bootstrap-grid label,.fork-settings-panel .owner-recovery-panel label {
+  display: grid;
+  gap: 6px;
+  color: var(--rb-text-muted);
+  font-size: 11px;
+}
+
+.fork-settings-panel .owner-bootstrap-grid input,.fork-settings-panel .owner-recovery-panel input {
+  min-width: 0;
+}
+
+.fork-settings-panel .owner-recovery-panel code {
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border-radius: 9px;
+  color: rgba(255, 238, 249, 0.98);
+  background: rgba(236, 72, 153, 0.14);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  user-select: text;
+}
+  .fork-settings-panel .owner-bootstrap-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fork-settings-panel .owner-bootstrap-grid__wide {
+    grid-column: auto;
+  }
+
+.fork-settings-panel .device-pairing-invitation img {
+  width: 130px;
+  height: 130px;
+  padding: 6px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.fork-settings-panel .device-pairing-invitation__content {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+
+.fork-settings-panel .device-pairing-invitation__content strong {
+  color: var(--rb-text-default);
+  font-size: 13px;
+}
+
+.fork-settings-panel .device-pairing-invitation code,.fork-settings-panel .device-pairing-review code {
+  width: fit-content;
+  padding: 7px 10px;
+  border-radius: 9px;
+  color: rgba(255, 238, 249, 0.98);
+  background: rgba(236, 72, 153, 0.14);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  letter-spacing: 0.08em;
+}
+
+.fork-settings-panel .device-pairing-review {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(250, 204, 21, 0.32);
+  border-radius: 14px;
+  background: rgba(250, 204, 21, 0.07);
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+
+.fork-settings-panel .device-pairing-review > strong {
+  color: var(--rb-text-default);
+  font-size: 14px;
+}
+
+.fork-settings-panel .device-pairing-review__eyebrow {
+  color: rgba(254, 240, 138, 0.92);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.fork-settings-panel .device-pairing-divider {
+  display: grid;
+  gap: 4px;
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fork-settings-panel .device-pairing-divider span {
+  color: var(--rb-text-muted);
+  font-size: 12px;
+}
+.fork-settings-panel { --text-main: var(--text-primary); --text-muted: var(--text-secondary); margin: 20px 0; }
+.fork-settings-panel [hidden] { display: none !important; }
+.fork-settings-panel button { border-radius: 8px; padding: 8px 12px; cursor: pointer; background: var(--surface-secondary); color: inherit; border: 1px solid var(--border-color); }
+.fork-settings-panel input { width: 100%; background: var(--surface-primary); color: inherit; border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; }

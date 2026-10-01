@@ -1,6 +1,4 @@
-import type { SceneIndex } from "../scene-embedder";
 import { buildAlwaysOnContext, buildMemoryInjection } from "../orchestrator";
-import { getSceneEmbeddingProvider } from "../rag/embedding";
 import { buildToneInjection } from "../orchestrator/tone-injector";
 import { buildSkillCatalog, skillRegistry } from "../skills";
 import { resolveSlashActivation } from "../skills/slash-activation";
@@ -8,16 +6,12 @@ import { resolveChatContextTimezone } from "../chat-time-context";
 import { getDateLocale } from "../locale-context";
 import { loadPromptFile } from "../prompts/prompt-loader";
 import { loadUserProfile } from "../settings-store";
+import { loadGeneralSettings } from "../settings/settings-facade";
 import { searchMemoryEntries } from "../rag";
 import { memoryStore } from "../memory/memory-store";
 import { l2DmaeManager } from "../memory/l2-dmae-manager";
 import { getActiveCharacterText } from "../character/active-character";
 import { composeCharacterSystemPrompt } from "../character/character-text-context";
-
-export interface CallPromptBuilderContext {
-  /** 场景嵌入索引，由主进程在后台刷新，可能为 null。 */
-  sceneEmbeddingIndex: SceneIndex | null;
-}
 
 /**
  * 构建通话（Call）模式专用 system prompt。
@@ -25,7 +19,6 @@ export interface CallPromptBuilderContext {
  * 注意：本函数会修改传入的 messages 数组以处理 /命令命中但未启用的情况。
  */
 export async function buildCallSystemPrompt(
-  ctx: CallPromptBuilderContext,
   userText: string,
   messages: Array<{ role: "user" | "assistant"; content: string }>,
 ): Promise<string> {
@@ -68,17 +61,14 @@ export async function buildCallSystemPrompt(
   });
 
   // ⑤ Skill 约束（resolveSlashActivation 会原地修改 messages）
-  const skillCatalog = buildSkillCatalog(skillRegistry.getEnabled());
-  const skillActivation = resolveSlashActivation(messages);
+  // Call 模式按 work 模式过滤 skill，并尊重 skill-模式覆盖层。
+  const skillCatalog = buildSkillCatalog(
+    skillRegistry.getEnabledForMode("work", loadGeneralSettings().skillModeOverrides),
+  );
+  const skillActivation = resolveSlashActivation(messages, "work", loadGeneralSettings().skillModeOverrides);
 
-  // ⑥ 语气注入
-  let toneInjection = "";
-  const sceneProvider = getSceneEmbeddingProvider();
-  if (sceneProvider && ctx.sceneEmbeddingIndex) {
-    try {
-      toneInjection = await buildToneInjection(userText, messages, sceneProvider, ctx.sceneEmbeddingIndex);
-    } catch { /* ignore */ }
-  }
+  // ⑥ 语气注入（通用语气规则）
+  const toneInjection = buildToneInjection();
 
   return timeStr + "\n\n" +
     (alwaysOnContext ? alwaysOnContext + "\n\n" : "") +

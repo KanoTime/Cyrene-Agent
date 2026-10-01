@@ -1,4 +1,6 @@
-import { VolcanoAsrStream, getAsrConfig } from "./volcano-asr-engine";
+import { AliyunAsrStream } from "./aliyun-asr-engine";
+import { getAsrConfig } from "./asr-config";
+import { createAsrStream } from "./asr-dispatcher";
 import { localAsrWorker } from "./local-asr-worker-manager";
 import { resamplePcm16Mono } from "./pcm-utils";
 import type { AsrCallbacks, AsrConfig, AsrSession, PcmAudio } from "./types";
@@ -48,10 +50,10 @@ class LocalAsrSession implements AsrSession {
 
 class AliyunAsrSession implements AsrSession {
   private finals: string[] = [];
-  private readonly stream: VolcanoAsrStream;
+  private readonly stream: AliyunAsrStream;
 
   constructor(private readonly config: AsrConfig, callbacks: AsrCallbacks) {
-    this.stream = new VolcanoAsrStream(
+    this.stream = new AliyunAsrStream(
       (text) => callbacks.onPartial?.(text),
       (text) => { if (text.trim()) this.finals.push(text.trim()); callbacks.onFinal?.(text); },
       (error) => callbacks.onError?.(error),
@@ -59,7 +61,7 @@ class AliyunAsrSession implements AsrSession {
   }
 
   async start(): Promise<void> {
-    await this.stream.start(this.config.appKey!, this.config.accessKeyId!, this.config.accessKeySecret!, this.config.language);
+    await this.stream.start(this.config.appKey!, this.config.accessKeyId!, this.config.accessKeySecret!, this.config.language ?? "zh");
   }
 
   sendAudio(frame: Buffer): void { this.stream.sendAudio(frame); }
@@ -74,16 +76,22 @@ class AliyunAsrSession implements AsrSession {
 }
 
 export function requireAsrConfig(): AsrConfig {
-  const config = getAsrConfig();
+  const config = getAsrConfig() as AsrConfig | null;
   if (!config || config.engine === "off") throw new Error("ASR 未启用");
   if (config.engine === "aliyun" && (!config.appKey || !config.accessKeyId || !config.accessKeySecret)) {
     throw new Error("阿里云 ASR 凭据未配置完整");
   }
+  if ((config.engine === "mossland" || config.engine === "minimax") && !config.apiKey?.trim()) throw new Error("ASR API Key 未配置");
   return config;
 }
 
 export function createAsrSession(callbacks: AsrCallbacks = {}, config = requireAsrConfig()): AsrSession {
-  return config.engine === "local" ? new LocalAsrSession(config, callbacks) : new AliyunAsrSession(config, callbacks);
+  if (config.engine === "local") return new LocalAsrSession(config, callbacks);
+  if (config.engine === "mossland" || config.engine === "minimax") {
+    const stream = createAsrStream({ engine: config.engine, apiKey: config.apiKey! }, callbacks.onPartial ?? (() => {}), callbacks.onFinal ?? (() => {}));
+    return { start: () => stream.start(), sendAudio: frame => stream.sendAudio(frame), finish: async () => (await stream.stop()) ?? "", stop: () => { void stream.stop(); }, dispose: () => { void stream.stop(); } };
+  }
+  return new AliyunAsrSession(config, callbacks);
 }
 
 export async function transcribePcm(audio: PcmAudio, config = requireAsrConfig(), signal?: AbortSignal): Promise<string> {

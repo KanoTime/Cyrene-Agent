@@ -91,7 +91,24 @@ export function loadRecentHistory(sessionId: string, limit: number): HistoryEntr
   }
 }
 
-/** 启动时所有 session 文件预读 (可选, dispatcher 用不到, 给将来 Phase 4 调试 UI 留接口). */
+/** 旧版历史迁移：sessionId 键控从 senderId 改为 chatId（QQ 群聊需要按会话聚合）后，
+ *  飞书 p2p 的 chatId(oc_xxx) 与 senderId(ou_xxx) 属于不同 ID 空间，老用户升级后
+ *  按新键找不到旧滑窗文件。这里一次性把旧文件 copy 到新键（保留原文件兜底），
+ *  已存在新文件时不覆盖，保证幂等。 */
+export function migrateHistory(fromSessionId: string, toSessionId: string): void {
+  if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) return;
+  const from = filePath(fromSessionId);
+  const to = filePath(toSessionId);
+  try {
+    if (!fs.existsSync(from) || fs.existsSync(to)) return;
+    fs.mkdirSync(dir(), { recursive: true });
+    fs.copyFileSync(from, to);
+  } catch (err) {
+    console.warn(LOG, "migrateHistory 失败:", fromSessionId, "->", toSessionId, err instanceof Error ? err.message : err);
+  }
+}
+
+/** 启动时所有 session 文件预读 (可选, dispatcher 用不到, 预留给将来的调试 UI). */
 export function reloadAllHistory(): Map<string, HistoryEntry[]> {
   const out = new Map<string, HistoryEntry[]>();
   try {
@@ -99,7 +116,7 @@ export function reloadAllHistory(): Map<string, HistoryEntry[]> {
     for (const name of fs.readdirSync(dir())) {
       if (!name.endsWith(".jsonl")) continue;
       const sid = name.replace(/\.jsonl$/, "").replace(/_/g, ":");
-      // 不尝试反推回原 sessionId, 这里只是占位接口, Phase 4 可优化
+      // 不尝试反推回原 sessionId, 这里只是占位接口, 后续可优化
       out.set(sid, loadRecentHistory(sid, MAX_FILE_LINES));
     }
   } catch {

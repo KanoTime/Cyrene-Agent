@@ -2207,7 +2207,6 @@ export function createDefaultCharacterRuntime(
       soul: "prompts/soul.md",
       avatar: "assets/icon-presets/cyrene-sun.png",
       canonQuotes: "prompts/canon_quotes.md",
-      toneRules: "prompts/tone-rules.md",
       stylesDirectory: "prompts/styles",
       scenesDirectory: "skills/cyrene-original-voice/references",
       phoneIdentity: "prompts/phone_identity.md",

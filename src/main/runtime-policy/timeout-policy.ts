@@ -17,12 +17,13 @@
 
 export type RuntimeTimeoutStage =
   | "memory-llm"
-  | "native-function-calling"
   | "tool-execution"
   | "tts-minimax"
   | "tts-gptsovits"
   | "tts-custom-cloud"
   | "tts-mossland"
+  | "asr-mossland"
+  | "asr-minimax"
   | "external-http"
   | "vision-caption"
   | "call-management";
@@ -50,10 +51,6 @@ const STAGE_DEFAULTS: Record<RuntimeTimeoutStage, TimeoutPolicy> = {
     // memory-judge.ts, memory-compressor.ts：30s
     totalMs: 30_000,
   },
-  "native-function-calling": {
-    // function-calling.ts PER_ROUND_TIMEOUT_MS：75s（推理模型带 thinking，30s 偏紧）
-    totalMs: 75_000,
-  },
   "tool-execution": {
     // built-in-tools.ts SHELL_TIMEOUT_MS：5min
     totalMs: 5 * 60_000,
@@ -73,6 +70,14 @@ const STAGE_DEFAULTS: Record<RuntimeTimeoutStage, TimeoutPolicy> = {
   "tts-mossland": {
     // mossland-engine.ts DEFAULT_TIMEOUT_MS：30s
     totalMs: 30_000,
+  },
+  "asr-mossland": {
+    // mossland-asr-engine.ts 同步上传一轮语音并等待完整转写：30s
+    totalMs: 30_000,
+  },
+  "asr-minimax": {
+    // MiniMax 同步上传一轮语音并等待完整转写：2min，覆盖较长音频的处理时间
+    totalMs: 120_000,
   },
   "external-http": {
     // life-tools.ts 翻译等外部 HTTP 调用：30s

@@ -1,3 +1,4 @@
+import { logger, LogTag } from "../logger";
 // ChannelManager —— 渠道注册表 + 生命周期管理。
 //
 // 设计原则：
@@ -23,10 +24,14 @@ export class ChannelManager {
   private startedAdapters = new Set<ChannelId>();
   private readonly wechatScheduler = new WechatFairMessageScheduler({ maxConcurrency: 2 });
 
-  /** 注册 adapter（必须在 startAll 之前调用） */
+  has(id: ChannelId): boolean {
+    return this.adapters.has(id);
+  }
+
+  /** 注册 adapter（必须在 startAll 之前调用；重复 id 一律拒绝） */
   register(adapter: ChannelAdapter): void {
     if (this.adapters.has(adapter.id)) {
-      console.warn(LOG, `渠道 ${adapter.id} 已注册，覆盖旧实例`);
+      throw new Error(`渠道 ${adapter.id} 已注册，禁止覆盖现有实例`);
     }
     this.adapters.set(adapter.id, adapter);
   }
@@ -43,6 +48,8 @@ export class ChannelManager {
   /** 启动所有已注册 adapter（失败的跳过、记 log） */
   async startAll(): Promise<void> {
     for (const adapter of this.adapters.values()) {
+      // 跳过已启动的 adapter（插件注册渠道场景：registerChannelAdapter 已 startOne）
+      if (this.startedAdapters.has(adapter.id)) continue;
       try {
         // 每次 start 前重新注入 handler（防止 setDispatcher 之前 adapter 已经被外部注入 null）
         if (this.dispatchFn) {
@@ -55,6 +62,36 @@ export class ChannelManager {
         console.error(LOG, `渠道启动失败 [${adapter.id}]:`, err instanceof Error ? err.message : err);
       }
     }
+  }
+
+  /** 注销 adapter：若已启动先 stop，再移除（运行时禁用插件渠道用） */
+  async unregister(id: ChannelId): Promise<boolean> {
+    const adapter = this.adapters.get(id);
+    if (!adapter) return false;
+    if (this.startedAdapters.has(id)) {
+      try {
+        await adapter.stop();
+      } catch (err) {
+        console.warn(LOG, `渠道停止失败 [${id}]:`, err instanceof Error ? err.message : err);
+      }
+      this.startedAdapters.delete(id);
+    }
+    this.adapters.delete(id);
+    logger.info(LogTag.Channels, `unregistered: ${id}`);
+    return true;
+  }
+
+  /** 启动单个 adapter（运行时启用插件渠道用） */
+  async startOne(id: ChannelId): Promise<void> {
+    const adapter = this.adapters.get(id);
+    if (!adapter) return;
+    if (this.startedAdapters.has(id)) return;
+    if (this.dispatchFn) {
+      setAdapterHandler(adapter, this.makeAdapterHandler(id));
+    }
+    await adapter.start();
+    this.startedAdapters.add(id);
+    logger.info(LogTag.Channels, `started: ${id} (${adapter.displayName})`);
   }
 
   /** 关闭所有已启动的 adapter */
@@ -129,31 +166,12 @@ export class ChannelManager {
         console.warn(LOG, `收到入站消息但 dispatcher 未注册 [${channel}]`);
         return null;
       }
-      let outgoing: OutgoingMessage | null = null;
       try {
-        outgoing = await this.dispatchFn(msg);
+        return await this.dispatchFn(msg);
       } catch (err) {
         console.error(LOG, `dispatcher 处理失败 [${channel}]:`, err);
         return null;
       }
-      // dispatcher 已经算好了回复，现在调 adapter.send() 真发出去
-      // （之前漏了这一步，导致回复算出来但不发，agent 静默无响应）
-      if (outgoing) {
-        const adapter = this.adapters.get(channel);
-        if (adapter && adapter.send) {
-          try {
-            const result = await adapter.send(outgoing);
-            if (!result.ok) {
-              console.warn(LOG, `adapter.send 失败 [${channel}]:`, result.error);
-            }
-          } catch (err) {
-            console.error(LOG, `adapter.send 抛错 [${channel}]:`, err);
-          }
-        } else {
-          console.warn(LOG, `找不到 adapter 或 adapter 不支持 send [${channel}]`);
-        }
-      }
-      return outgoing;
   }
 }
 

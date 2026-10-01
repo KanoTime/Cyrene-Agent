@@ -23,16 +23,25 @@ export interface MusicProfile {
 }
 
 export interface MusicTrack {
+  /** 32-hex encrypted id — the one all API calls require (play/like/playlist ops). */
   id: string;
+  /** Explicit alias of `id` (OpenAPI dual-id contract; renderer Track uses this name). */
+  encryptedId?: string;
+  /** Numeric original id — for user-visible web links only, never for API calls. */
+  originalId?: number;
   name: string;
   artists: string[];
   album?: string;
   durationMs?: number;
   coverUrl?: string;
+  /** 仅缓存池曲目：netease = 边播边存下来的，imported = 用户本地导入的。 */
+  source?: "netease" | "imported";
 }
 
 export interface MusicPlaylist {
+  /** 32-hex encrypted playlist id (API ops). */
   id: string;
+  originalId?: number;
   name: string;
   coverUrl?: string;
   trackCount: number;
@@ -58,10 +67,6 @@ export interface MusicSelectionSet {
   createdAt: number;
   expiresAt: number;
   conversationId: string;
-  resolutionRunId?: string;
-  resolutionPurpose?: "discover" | "play";
-  presentedAt?: number;
-  presentedTrackIds?: string[];
   tracks: MusicTrack[];
 }
 
@@ -70,29 +75,6 @@ export interface PlaybackDispatchResult {
   resourceType: "song" | "playlist";
   resourceId: string;
   errorCode?: string;
-}
-
-export interface CandidatePlaybackRequest {
-  provider: string;
-  setId: string;
-  trackId: string;
-  conversationId: string;
-  runId?: string;
-}
-
-/** Tool Runtime only. Never expose these Provider parameters to the Agent or CITA package. */
-export interface MusicCandidateRefPayload {
-  provider: string;
-  setId: string;
-  trackId: string;
-  conversationId: string;
-}
-
-/** Tool Runtime only. */
-export interface MusicSetRefPayload {
-  provider: string;
-  setId: string;
-  conversationId: string;
 }
 
 export class MusicInputError extends Error {

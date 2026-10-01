@@ -1,13 +1,12 @@
-// CyreneAgent —— 把两阶段 FC 循环包进 AG-UI 的 AbstractAgent。
+// CyreneAgent —— 把两条 Agent 循环包进 AG-UI 的 AbstractAgent。
 //
-// 第一期重构：
-// - 持有 runWithEvents 入口，按 agentRuntime 选择 runLangGraphAgentLoop 或 runTwoPhaseFcLoop。
-// - 工具阶段只携带 tool_system + tools schema；Soul 阶段只携带 soul_systemBase + 工具结果摘要，不携带 tools。
-// - runWithEvents 把 TwoPhaseEvent 包装成 AG-UI BaseEvent 转发给渲染端。
+// - 持有 runWithEvents 入口：Chat 使用 chat-loop，其余模式使用 CyreneHarness。
+// - Harness 单循环：每轮携带同一份 stablePrefix（人设+工具规则）+ tools schema + transcript；
+//   工具结果以 role:tool 消息写回 transcript。
+// - runWithEvents 把 AgentLoopEvent 包装成 AG-UI BaseEvent 转发给渲染端。
 //
 // 设计要点：
-// - FC 循环仍是 stream:false 一次性拿全文（不碰 LLM 层），拿到全文后切成 delta 逐个发
-//   TEXT_MESSAGE_CONTENT，这就是"流式感"的来源——标准 AG-UI 做法。
+// - Chat 循环流式输出（SDK 流 + 非流式兜底）；Harness 每轮流式调用 LLM。
 // - run() 不做副作用（不写记忆、不推断表情）。那些在桥层 runAgent 完成后做，
 //   保持 agent 纯粹只管"产出事件流"。
 // - 错误用 observer.error() 抛，桥层捕获。
@@ -16,28 +15,67 @@ import { EventType, type BaseEvent } from "@ag-ui/core";
 import { AgentRuntimeError } from "./agent-runtime-error";
 import { AgentExecutionError, type RunPhase } from "./run-execution-status";
 import { Observable } from "rxjs";
-import { toolRegistry, type ToolDefinition } from "./tool-registry";
+import { toolRegistry, type ToolDefinition } from "./tools/registry/tool-registry";
 import type { ToolCallResult, ToolExecutionOutcome } from "./types";
 import { checkPermission, type ToolRiskLevel } from "../permission";
 import { getAdapterForConfig, type ChatMessage } from "./vendors";
-import { contextRefRegistry, extractLastUserQuery, type ToolContext } from "./tool-context";
-import {
-  runTwoPhaseFcLoop,
-  type TwoPhaseEvent,
-  type TwoPhaseFcResult,
-} from "./two-phase-fc-loop";
-import { getTimeoutSettings } from "../timeout-manager";
-import { runLangGraphAgentLoop } from "./langgraph-agent-loop";
+import { contextRefRegistry, extractLastUserQuery, type ToolContext } from "./tools/registry/tool-context";
 import { runChatLoop } from "./chat-loop";
+import type { RunCapabilities } from "./run-capabilities";
+import { runHarnessWithAdapter } from "./harness-adapter";
+
+/** Skill 路由条目（类型本地定义，不再依赖 task-router 模块） */
+export interface SkillRouteInfo {
+  id: string;
+  description: string;
+  defaultExecutionMode?: "direct" | "plan";
+}
+
+/**
+ * 两个 Agent loop 共同使用的结果形状。
+ */
+export interface AgentLoopResult {
+  reply: string;
+  toolResults: import("./types").ToolCallResult[];
+  completionReason: "no_tool" | "timeout" | "max_rounds" | "tool_error";
+  totalUsage?: { input: number; output: number };
+  modelFailure?: import("../../shared/model-error").ModelFailureInfo;
+  /**
+   * Canonical 终态结算（exactly-once，见 run-settlement.ts）。
+   * 由 harness-adapter 根据 HarnessResult.terminateReason 填充；
+   * CyreneAgent.runWithEvents 据此决定 RUN_FINISHED.result 的形状。
+   * 未设置时由 CyreneAgent 通过 completionReason 推断（兼容旧调用方）。
+   */
+  terminal?: CyreneRunTerminalResult;
+}
+
+/** 两个 Agent loop 共用的展示事件。 */
+export interface AgentLoopEvent {
+  type: string;
+  messageId?: string;
+  role?: string;
+  delta?: string;
+  toolCallId?: string;
+  toolCallName?: string;
+  stepName?: string;
+  totalUsage?: unknown;
+  content?: string;
+  status?: string | import("../../shared/model-retry").ModelRetryStatus;
+  snapshot?: unknown;
+  taskPlan?: unknown;
+  /** 上下文容量快照（chat-loop 发射；type 为 "context_usage"）。 */
+  contextUsage?: import("../../shared/context-usage").ContextUsageSnapshot;
+}
+
 import type { SocialAtom } from "../social-context/types";
-import { ExecutionLedgerStore } from "./execution-ledger";
+import { ExecutionLedgerStore, type ExecutionLedger } from "./execution-ledger";
 import { perf } from "../perf-trace";
 import { debugLog, flowLog } from "../agent-log";
 import type { ApprovedStyleSampling } from "./vendors/style-sampling";
 import { requestUserClarification } from "../user-choice";
-import type { TrustedAskUserProfile } from "../../shared/ask-clarification";
-import type { SkillRouteInfo } from "./task-router";
 import type { ConversationMode } from "../../shared/chat-types";
+import type { CyreneRunTerminalResult } from "../../shared/run-terminal";
+import { executeToolDefinition } from "./tools/registry/tool-executor";
 
 const executionLedgers = new ExecutionLedgerStore();
 
@@ -46,10 +84,13 @@ export interface AgentLoopSettings {
   baseUrl: string;
   model: string;
   apiKey: string;
-  explicitTransport?: "openai" | "anthropic" | "auto";
+  explicitTransport?: "openai" | "anthropic" | "responses" | "auto";
   reasoning?: import("../../shared/reasoning").ReasoningPreference;
+  manualReasoning?: import("../../shared/manual-reasoning").ManualReasoningConfig;
   /** 用户设置的模型上下文窗口（Token）。用于非 code 模式的对话压缩触发阈值。 */
   contextWindowTokens: number;
+  /** 主模型请求的额外重试次数；旧调用回退到 5。 */
+  modelRequestMaxRetries?: number;
 }
 
 export type AgentExecutionMode = "work" | "chat";
@@ -57,50 +98,71 @@ export type AgentExecutionMode = "work" | "chat";
 /** CyreneAgent.run() 需要的输入——桥层构造好后塞进 input.state 或 forwardedProps。 */
 export interface CyreneRunOptions {
   settings: AgentLoopSettings;
-  /** 原始消息（不含 system）。FC 循环按阶段动态注入。 */
+  /** 本 Run 快照的 Harness 安全工具并发上限。 */
+  maxParallelToolCalls?: number;
+  /**
+   * Canonical runId。
+   * - 由 AG-UI bridge 在 IPC 入口创建，并通过本字段一路传给 Agent、Harness adapter、ToolContext、所有 AG-UI 事件。
+   * - 非 bridge 调用方允许不传：CyreneAgent.runWithEvents 会 fallback 生成一次。
+   * - 一旦本字段被设置，下游（runHarnessWithAdapter / ToolContext / RUN_STARTED.runId）必须使用同一值，
+   *   不得再各自生成 harness-${Date.now()} 等本地 ID。
+   */
+  runId?: string;
+  /** 原始消息（不含 system）。system 由 chat-loop / harness-adapter 按 promptLayers 组装，不随消息持久化。 */
   messages: ChatMessage[];
   conversationId?: string;
   /** CITA 保留的用户原始 Query；旧调用方未传时从最后一条 user 消息读取。 */
   originalQuery?: string;
-  /** CITA 生成的上下文化理解，供 Action Gate 显式使用。 */
+  /** CITA 生成的上下文化理解，供模型上下文拼装显式使用。 */
   contextualizedQuery?: string;
   /** 独立 CITA 证据块；原始 user 消息不会被替换。 */
   citaContextBlock?: string;
-  /** CITA 本地校验后允许 Action Gate 引用的不透明引用集合。 */
+  /** CITA 本地校验后允许模型引用的不透明引用集合。 */
   trustedRefs?: string[];
-  /** 临时回退开关；默认使用 LangGraph Runtime。 */
-  agentRuntime?: "langgraph" | "legacy";
-  /** Chat 跳过 CITA/Action Gate/Native FC；默认 Work。 */
+  /** Chat 跳过 CITA/Native FC；默认 Work。 */
   executionMode?: AgentExecutionMode;
-  /** 原始 UI 模式（work / daily / learn / chat / code），供工具做模式隔离。 */
+  /** 原始 UI 模式（work / learn / chat / code），供工具做模式隔离。 */
   conversationMode?: ConversationMode;
   timeoutMs: number;
   /** 可选：本次 run 的工具集合。未传时使用当前所有已启用工具。 */
   tools?: ToolDefinition[];
+  /** 本轮冻结的模式能力；bridge 创建的 Run 必须提供。 */
+  capabilities?: RunCapabilities;
+  /** Harness 是否公布需要桌面交互卡片的内置工具；默认开启。 */
+  harnessInteractiveTools?: boolean;
+  /** 工具权限结算方式；手机端全部开启使用 allow_all 跳过逐项审批。 */
+  permissionMode?: "normal" | "allow_all";
   /** 直发图片被主模型接口拒绝时，懒加载 caption fallback 消息并重试。 */
   imageCaptionFallback?: () => Promise<ChatMessage[]>;
-  /** 工具阶段使用的 system prompt（仅含工具调度规则 + 自动生成的工具目录）。 */
+  /** 工具规则与目录 system prompt（进入 harness stablePrefix）。 */
   toolSystemContent: string;
-  /** Soul 阶段使用的基础 system prompt（人设 + 环境/记忆/关系/附件）。 */
+  /** toolSystemContent 中 Skill 目录段（skillCatalog + 自动注入 skill 上下文）的独立副本，
+   *  供上下文容量快照把"技能"从"工具"里拆出来单独计量；不参与请求拼装。 */
+  skillLayerContent?: string;
+  /** 人设基础 system prompt（仅人设/渠道；环境/记忆/关系/附件在 soulRuntimeContext，随请求尾部注入）。 */
   soulSystemBaseContent: string;
-  /** 只应用到 Soul 最终自然语言回复，禁止影响 CITA、Action Gate 与 Native FC。 */
+  /** 每次请求才附加给 Soul 的可变运行时上下文；不参与稳定缓存前缀。 */
+  soulRuntimeContext?: string;
+  /** Plan Mode 时注入的 cyrene-plan-mode skill 正文；可变，不参与稳定缓存前缀，
+   *  在 harness runtimeParts 里拼，避免进/出 plan mode 打断 stablePrefix 缓存。 */
+  planSkillContext?: string;
+  /** 只应用到 Soul 最终自然语言回复，禁止影响 CITA 与 Native FC。 */
   soulSampling?: ApprovedStyleSampling;
-  /** 不带时间戳前缀的 messages，给 Action Gate 用。未传时回退到 messages。 */
+  /** 不带时间戳前缀的 messages，给 CITA 等决策层用。未传时回退到 messages。 */
   cleanMessages?: ChatMessage[];
-  /** Native FC 专用 system prompt（从 native_fc_system.md 读取）。 */
-  nativeFcSystemContent?: string;
-  /** Action Gate 专用 system prompt（从 action_gate_system.md 读取）。 */
-  actionGateSystemPrompt?: string;
   /** [RESPONSE_CONTEXT] 文本，从 CITA 结果生成，给 Soul 动态追加。 */
   responseContext?: string;
   /** 本地主进程生成的可信默认城市、桌面等运行环境信息。 */
   runtimeEnvironmentContext?: string;
-  /** Ask Soul 专用轻量提示词。 */
-  askSystemContent?: string;
-  /** Ask Soul 只使用称呼、昵称和性别约束。 */
-  trustedAskUserProfile?: TrustedAskUserProfile;
+  /** 上一次异常中断 Run 的只读 Todo/执行检查点；只用于帮助模型恢复方向。 */
+  recoveryContext?: string;
+  /** 会话轨迹投影出的待办与未决副作用，作为新 Harness 的执行状态恢复。 */
+  initialHarnessState?: Pick<import("./harness/types").AgentState, "todoItems" | "uncertainEffects">;
   /** 由 AG-UI bridge 注入，确保 Ask 卡片回到实际发起本轮的渲染窗口。 */
-  requestUserClarification?: (card: import("../../shared/ask-clarification").AskClarificationCard) => Promise<import("../../shared/ask-clarification").AskUserAnswer>;
+  requestUserClarification?: (
+    card: import("../../shared/ask-clarification").AskClarificationCard,
+    signal?: AbortSignal,
+  ) => Promise<import("../../shared/ask-clarification").AskUserAnswer>;
   /** 仅 Chat：异步社交原子抽取所需的已校验证据元数据。 */
   socialContext?: {
     enabled: true;
@@ -110,8 +172,14 @@ export interface CyreneRunOptions {
     retrievedAtoms: SocialAtom[];
     now: number;
   };
-  /** Task Router 可用 Skill 列表（feature flag 开启时使用）。Router 不依赖该字段是否存在。 */
+  /** 可用 Skill 列表（feature flag 开启时使用）。Skill 路由层不依赖该字段是否存在。 */
   availableSkills?: SkillRouteInfo[];
+  /**
+   * ExecutionLedger：同进程工具去重缓存（设计稿 v3 §5.5.1.1，
+   * 指 docs/design/2026-08-08-cyreneHarnessloopdesign.md）。
+   * CyreneAgent 内部默认从 ExecutionLedgerStore 取，调用方一般不用传。
+   */
+  executionLedger?: ExecutionLedger;
   /**
    * 可信工作区根目录（来自 Conversation Workspace Binding）。
    * Work 工具和 run_verification 必须使用此目录。
@@ -120,22 +188,78 @@ export interface CyreneRunOptions {
   resolvedWorkspaceRoot?: string;
   /** 传给声明 needsContext 工具的当前运行身份，例如渠道 sessionId。 */
   toolContextMetadata?: Record<string, unknown>;
+  /**
+   * 外部取消信号。
+   * - 由 AG-UI bridge 创建的 AbortController 注入，AGUI_CANCEL 调用 abort()。
+   * - CyreneAgent.runWithEvents 把它连接到内部 abortController（first-source-wins）。
+   * - 一旦 abort，markAbort("user_cancelled") 触发，harness 收到 signal.aborted 后返回 cancelled。
+   */
+  signal?: AbortSignal;
+  /**
+   * 工具结果确定后的只读观察回调（透传给 harness 的 onToolFinished）。
+   * 只携带稳定元数据供插件事件旁路使用，不参与执行决策。
+   */
+  onToolFinished?: (event: import("./harness/types").HarnessToolFinishedEvent) => void;
+  /**
+   * 插话轮询（AG-UI bridge 注入，透传给 harness）：
+   * 返回待插入当前运行的用户消息；harness 在每轮模型请求前与最终结算前调用。
+   * Chat 无工具链路是单请求运行，不消费该回调。
+   */
+  pollRunAdjustments?: () => Promise<import("./harness/types").RunAdjustmentMessage[]> | undefined;
+  /**
+   * Run 级轨迹提交端（CTA Phase 1）：canonical 消息权威落盘。
+   * 桌面链路由上游创建并注入；缺省（渠道/插件/测试）不写轨迹。
+   */
+  transcriptSink?: import("./transcript-sink").TranscriptSink;
 }
 
-/** FC 循环最终结果（供桥层做副作用用）。 */
+/** Agent run 最终结果（供桥层做副作用用）。 */
 export interface CyreneRunResult {
   reply: string;
   toolResults: ToolCallResult[];
   totalUsage?: { input: number; output: number };
+  modelFailure?: import("../../shared/model-error").ModelFailureInfo;
   soulPhaseReason?: "no_tool" | "max_rounds" | "timeout" | "tool_error";
   executionMode?: AgentExecutionMode;
   socialContext?: CyreneRunOptions["socialContext"];
+  /**
+   * Canonical 终态结算（exactly-once，见 run-settlement.ts）。
+   * 桥层据此决定是否跑成功收尾副作用、是否走 RUN_ERROR 兜底等。
+   * 未设置时视为 success（兼容旧调用方）。
+   */
+  terminal?: CyreneRunTerminalResult;
 }
 
 const LOG_PREFIX = "[CyreneAgent]";
 
-export function resolveAgentRuntime(runtime: CyreneRunOptions["agentRuntime"]): "langgraph" | "legacy" {
-  return runtime === "legacy" ? "legacy" : "langgraph";
+/**
+ * 生成 fallback runId（仅在调用方未通过 CyreneRunOptions.runId 注入时使用）。
+ * Bridge 必须传 options.runId，确保 ack.runId 与 RUN_STARTED.runId 一致。
+ */
+function createRunId(): string {
+  return `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * 把 AgentLoopResult.completionReason 映射为 canonical 终态结算。
+ * - no_tool / tool_error → success（harness 正常返回，已产出 final answer）
+ * - max_rounds → timeout, reason="max_rounds"
+ * - timeout → timeout, reason="timeout"
+ *
+ * 注意：cancelled 不经由 completionReason 上报（catch 块单独处理）。
+ */
+function terminalFromCompletionReason(
+  completionReason: "no_tool" | "max_rounds" | "timeout" | "tool_error" | undefined,
+): CyreneRunTerminalResult {
+  switch (completionReason) {
+    case "max_rounds":
+      return { status: "timeout", reason: "max_rounds", externalEffectsMayContinue: true };
+    case "timeout":
+      return { status: "timeout", reason: "timeout", externalEffectsMayContinue: true };
+    default:
+      // 普通成功：无 unresolved uncertainty。
+      return { status: "success", externalEffectsMayContinue: false };
+  }
 }
 
 export function resolveExecutionMode(mode: unknown): AgentExecutionMode {
@@ -144,20 +268,24 @@ export function resolveExecutionMode(mode: unknown): AgentExecutionMode {
 }
 
 /**
- * 把 TwoPhaseEvent 包装成 AG-UI BaseEvent。
+ * 把 AgentLoopEvent 包装成 AG-UI BaseEvent。
  */
-export function toAguiEvent(event: TwoPhaseEvent): BaseEvent {
+export function toAguiEvent(event: AgentLoopEvent): BaseEvent {
   switch (event.type) {
     case "step_started":
       return { type: EventType.STEP_STARTED, stepName: event.stepName };
     case "step_finished":
       return { type: EventType.STEP_FINISHED, stepName: event.stepName };
-    case "tool_call_start":
+    case "tool_call_start": {
+      // 查注册表补中文展示名；查不到不填，前端回退原始 ID
+      const registryTool = toolRegistry.getById(event.toolCallName ?? "");
       return {
         type: EventType.TOOL_CALL_START,
         toolCallId: event.toolCallId,
         toolCallName: event.toolCallName,
+        toolCallDisplayName: registryTool?.name,
       };
+    };
     case "tool_call_args":
       return {
         type: EventType.TOOL_CALL_ARGS,
@@ -195,16 +323,28 @@ export function toAguiEvent(event: TwoPhaseEvent): BaseEvent {
       return { type: EventType.REASONING_MESSAGE_CONTENT, messageId: event.messageId, delta: event.delta };
     case "reasoning_message_end":
       return { type: EventType.REASONING_MESSAGE_END, messageId: event.messageId };
-    case "task_plan_update":
-      return { type: EventType.CUSTOM, name: "cyrene.taskPlan", value: event.snapshot };
-    case "compressing_context":
-      return { type: EventType.CUSTOM, name: "cyrene.compressingContext", value: { text: "正在压缩上下文…" } };
+    case "context_usage":
+      // 上下文容量快照：与 harness-adapter 的同名 CUSTOM 事件对齐。
+      return {
+        type: EventType.CUSTOM,
+        name: "cyrene.context.usage",
+        value: event.contextUsage,
+      } as BaseEvent;
+    case "model_retry":
+      return {
+        type: EventType.CUSTOM,
+        name: "cyrene.model.retry",
+        value: event.status,
+      } as BaseEvent;
+    default:
+      // v3: 未知事件类型转为 CUSTOM 占位，不再抛错
+      return { type: EventType.CUSTOM, name: "cyrene.unknown", value: event } as BaseEvent;
   }
 }
 
 /**
  * 执行一个工具调用，封装权限检查 + toolRegistry 调用 + 异常转 output。
- * 由 runTwoPhaseFcLoop 通过 executeTool 注入回调调用。
+ * 由 Harness 工具调度通过 executeTool 注入回调调用。
  */
 async function executeToolCall(
   tc: { id: string; name: string; arguments: string },
@@ -240,47 +380,13 @@ async function executeToolCall(
     args,
     risk,
     contextMetadata: ctx?.metadata,
+    runId: ctx?.runId,
   });
   if (!perm.allowed) {
     return failed("E_PERMISSION_DENIED", perm.reason || "权限不足");
   }
 
-  try {
-    const output = await tool.execute(args, tool.needsContext ? ctx : undefined);
-    // 检查工具返回的 JSON 是否明确标记为业务失败
-    // 只认 success === false，不认 error 字段（避免误判包含 error 描述的成功结果）
-    if (typeof output === "string") {
-      try {
-        const parsed = JSON.parse(output);
-        if (parsed && typeof parsed === "object" && parsed.success === false) {
-          const errorMsg = parsed.error || "工具执行失败";
-          const errorCode = parsed.errorCode || "E_TOOL_BUSINESS_FAILED";
-          return {
-            status: "failed",
-            errorCode,
-            output: typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg),
-            terminal: true,
-            retryable: parsed.retryable === true,
-          };
-        }
-      } catch {
-        // 不是 JSON，正常返回
-      }
-    }
-    return {
-      status: "succeeded",
-      output,
-    };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    const explicitCode = typeof err === "object" && err !== null && "code" in err
-      && typeof (err as { code?: unknown }).code === "string"
-      ? String((err as { code: string }).code)
-      : undefined;
-    const messageToken = errMsg.split(" ", 1)[0].split(":", 1)[0];
-    const errorCode = explicitCode ?? (messageToken.startsWith("E_") ? messageToken : "E_TOOL_EXECUTION_FAILED");
-    return failed(errorCode, errMsg);
-  }
+  return executeToolDefinition(tool, args, ctx);
 }
 
 /**
@@ -295,16 +401,24 @@ export class CyreneAgent extends AbstractAgent {
   lastResult?: CyreneRunResult;
 
   /**
-   * 跑 FC 循环并返回事件流。桥层订阅这个流转发给渲染进程。
+   * 跑 Agent 循环并返回事件流。桥层订阅这个流转发给渲染进程。
    * 传入的 options 会原样跑——settings/messages/timeout 都在这里。
    */
   runWithEvents(options: CyreneRunOptions): Observable<BaseEvent> {
     const threadId = this.threadId;
-    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const conversationId = options.conversationId ?? "default";
+    // canonical runId。Bridge 必须通过 options.runId 注入，
+    // 保证 ack.runId / RUN_STARTED.runId / Harness adapter / ToolContext 全链路一致。
+    // 非 bridge 调用方未传时由 createRunId() fallback 生成一次。
+    // 不要写回 options.runId——若调用方复用同一 options 对象跑第二次，
+    // 会污染旧 ID。构造本轮局部副本，原始 options 保持不变。
+    const runId = options.runId ?? createRunId();
+    const runOptions: CyreneRunOptions = {
+      ...options,
+      runId,
+      executionLedger: options.executionLedger ?? executionLedgers.forScope(runId),
+    };
+    const conversationId = runOptions.conversationId ?? "default";
     const abortController = new AbortController();
-    const timeoutSettings = getTimeoutSettings();
-
     // first-source-wins：谁先触发 abort，谁就是最终分类
     let abortSource: AbortSource | undefined;
     const markAbort = (source: AbortSource) => {
@@ -315,6 +429,18 @@ export class CyreneAgent extends AbstractAgent {
 
     return new Observable<BaseEvent>((subscriber) => {
       let cancelled = false;
+      let finished = false;
+      const onExternalAbort = () => markAbort("user_cancelled");
+      const detachExternalAbort = () => {
+        runOptions.signal?.removeEventListener("abort", onExternalAbort);
+      };
+
+      // 把外部 signal 连接到内部 controller（first-source-wins）。
+      if (runOptions.signal?.aborted) {
+        onExternalAbort();
+      } else {
+        runOptions.signal?.addEventListener("abort", onExternalAbort, { once: true });
+      }
 
       (async () => {
         try {
@@ -324,36 +450,41 @@ export class CyreneAgent extends AbstractAgent {
           const adapter = getAdapterForConfig(options.settings);
           adapterTimer.end();
 
-          const onEvent = (event: TwoPhaseEvent) => {
+          const onEvent = (event: AgentLoopEvent) => {
             if (cancelled) return;
             subscriber.next(toAguiEvent(event));
           };
           const executionMode = resolveExecutionMode(options.executionMode);
-          const runtime = resolveAgentRuntime(options.agentRuntime);
+          // Chat 工具增强：chat 会话在设置里勾选了工具（options.tools 非空）时
+          // 改走 CyreneHarness（native function calling）；否则维持无工具 ChatLoop。
+          const chatToolCount = (options.tools ?? []).length;
+          const chatWithTools = executionMode === "chat" && chatToolCount > 0;
           debugLog(
-            `${LOG_PREFIX} executionMode=${executionMode} agentRuntime=${runtime} provider=${options.settings.provider} model=${options.settings.model}`,
+            `${LOG_PREFIX} executionMode=${executionMode} loop=${executionMode === "chat" && !chatWithTools ? "chat" : "harness"} provider=${options.settings.provider} model=${options.settings.model}`,
           );
           const enabledToolCount = executionMode === "chat"
-            ? 0
+            ? chatToolCount
             : (options.tools ?? toolRegistry.getEnabledTools()).filter((tool) => tool.enabled).length;
           flowLog("── 新请求 ─────────────────────────");
           flowLog(`1. 准备上下文：${executionMode === "chat" ? "Chat" : "Work"} 模式，模型 ${options.settings.model}，${enabledToolCount} 个工具可用`);
           flowLog(`2. 理解用户请求：${executionMode === "chat" ? "Chat 模式无需工具上下文" : `完成，可信引用 ${(options.trustedRefs ?? []).length} 个`}`);
 
-          let result: TwoPhaseFcResult;
-          if (executionMode === "chat") {
+          let result: AgentLoopResult;
+          if (executionMode === "chat" && !chatWithTools) {
             flowLog("3. Chat 模式：生成回复");
             result = await perf.track("chat_loop", () => runChatLoop({
               settings: options.settings,
               adapter,
               messages: options.messages,
               soulSystemBaseContent: options.soulSystemBaseContent,
+              runtimeContext: [options.soulRuntimeContext, options.citaContextBlock, options.responseContext].filter(Boolean).join("\n\n---\n\n"),
               soulSampling: options.soulSampling,
               timeoutMs: options.timeoutMs,
               imageCaptionFallback: options.imageCaptionFallback,
               onEvent,
               signal: abortController.signal,
               mode: options.conversationMode,
+              transcriptSink: options.transcriptSink,
             }));
           } else {
             const executeTool = (tc: Parameters<typeof executeToolCall>[0], runnableToolIds: Set<string>) => executeToolCall(tc, runnableToolIds, {
@@ -361,75 +492,58 @@ export class CyreneAgent extends AbstractAgent {
               conversationId: options.conversationId ?? "default",
               runId,
               contextRefs: contextRefRegistry,
+              signal: abortController.signal,
               resolvedWorkspaceRoot: options.resolvedWorkspaceRoot,
               mode: options.conversationMode,
               ...(options.toolContextMetadata ? { metadata: options.toolContextMetadata } : {}),
+              allowedSkillIds: options.capabilities?.skillIds,
             });
-            const commonOptions = {
-              settings: options.settings,
-              adapter,
-              messages: options.messages,
-              tools: options.tools ?? toolRegistry.getEnabledTools(),
-              toolSystemContent: options.toolSystemContent,
-              soulSystemBaseContent: options.soulSystemBaseContent,
-              soulSampling: options.soulSampling,
-              cleanMessages: options.cleanMessages,
-              nativeFcSystemContent: options.nativeFcSystemContent,
-              actionGateSystemPrompt: options.actionGateSystemPrompt,
-              responseContext: options.responseContext,
-              runtimeEnvironmentContext: options.runtimeEnvironmentContext,
-              askSystemContent: options.askSystemContent,
-              trustedAskUserProfile: options.trustedAskUserProfile,
-              conversationId: options.conversationId ?? "default",
-              runId,
-              requestUserClarification: options.requestUserClarification ?? requestUserClarification,
-              timeoutMs: options.timeoutMs,
-              executeTool,
-              onEvent,
-              signal: abortController.signal,
-              markAbort,
-              availableSkills: options.availableSkills ?? [],
-              mode: options.conversationMode,
-            };
             const conversationId = options.conversationId ?? "default";
-            const executionLedger = executionLedgers.forScope(`${conversationId}:messages-${options.messages.length}`);
-            result = runtime === "langgraph"
-              ? await perf.track("langgraph_agent_loop", () => runLangGraphAgentLoop({
-                ...commonOptions,
-                originalQuery: options.originalQuery ?? extractLastUserQuery(options.messages),
-                contextualizedQuery: options.contextualizedQuery ?? options.originalQuery ?? extractLastUserQuery(options.messages),
-                citaContextBlock: options.citaContextBlock ?? "",
-                trustedRefs: options.trustedRefs ?? [],
-                imageCaptionFallback: options.imageCaptionFallback,
-                executionLedger,
-                perCallTimeoutMs: timeoutSettings.perRoundTimeout,
-                resolvedWorkspaceRoot: options.resolvedWorkspaceRoot,
-              }))
-              : await perf.track("legacy_agent_loop", () => runTwoPhaseFcLoop({
-                ...commonOptions,
-                imageCaptionFallback: options.imageCaptionFallback,
-                perRoundTimeoutMs: timeoutSettings.perRoundTimeout,
-                forceSummaryTimeoutMs: timeoutSettings.forceSummaryTimeout,
-                mode: options.conversationMode,
-              }));
+            // Work / Learn / Code 统一通过 CyreneHarness。
+            // 传 runOptions（含 canonical runId），不传原始 options。
+            result = await perf.track("harness_loop", () => runHarnessWithAdapter(
+              runOptions,
+              abortController.signal,
+              (baseEvent: BaseEvent) => {
+                if (!cancelled) subscriber.next(baseEvent);
+              },
+            ));
           }
 
           this.lastResult = {
             reply: result.reply,
             toolResults: result.toolResults,
             totalUsage: result.totalUsage,
-            soulPhaseReason: result.soulPhaseReason,
+            soulPhaseReason: result.completionReason,
             executionMode,
             socialContext: options.socialContext,
+            ...(result.modelFailure ? { modelFailure: result.modelFailure } : {}),
+            // 优先使用 harness-adapter 上报的 terminal；否则按 completionReason 推断
+            terminal: result.terminal ?? terminalFromCompletionReason(result.completionReason),
           };
           flowLog("── 本轮完成 ────────────────────────");
 
           if (cancelled) return;
+          // timeout 属系统侧未完成（非用户取消）：写 runtime_error interruption 边界。
+          // Harness 路径已在 adapter 内按 runStore 闭合过，这里幂等重写不产生重复条目
+          if (this.lastResult.terminal?.status === "timeout") {
+            try {
+              await options.transcriptSink?.closeInterruption({ reason: "runtime_error", runSession: null });
+            } catch (closureError) {
+              console.error(LOG_PREFIX, "transcript timeout closure failed:", closureError);
+            }
+          }
+          // success / timeout 都通过 RUN_FINISHED.result 上报 canonical 终态。
+          // Bridge 据此决定是否跑 sticker / memory 等成功收尾副作用。
           subscriber.next({
             type: EventType.RUN_FINISHED,
             threadId,
             runId,
+            result: this.lastResult.terminal,
+            ...(this.lastResult.modelFailure ? { metadata: { cyreneModelFailure: this.lastResult.modelFailure } } : {}),
           });
+          finished = true;
+          detachExternalAbort();
           subscriber.complete();
         } catch (err) {
           if (cancelled) return;
@@ -442,22 +556,69 @@ export class CyreneAgent extends AbstractAgent {
           );
           console.error(LOG_PREFIX, `run 失败 [${classification.source}]:`, classification.diagnostics);
           if (classification.source === "user_cancelled") {
+            // 权威轨迹：取消边界先于终态事件落盘。
+            // ChatLoop 无工具调用，runSession 传空只写 interruption 边界；
+            // Harness 路径已在 adapter 内按 runStore 状态闭合，这里幂等不重复。
+            try {
+              await options.transcriptSink?.closeInterruption({ reason: "user_cancel", runSession: null });
+            } catch (closureError) {
+              // 闭合失败不得伪装成取消成功：按运行时错误上报
+              console.error(LOG_PREFIX, "transcript interruption closure failed:", closureError);
+              subscriber.next({
+                type: EventType.RUN_FINISHED,
+                threadId,
+                runId,
+                result: {
+                  status: "runtime_error",
+                  reason: "transcript_interruption_closure_failed",
+                  externalEffectsMayContinue: true,
+                },
+              });
+              finished = true;
+              detachExternalAbort();
+              subscriber.complete();
+              return;
+            }
+            // 取消走 RUN_FINISHED + result.status="cancelled"，
+            // 不伪装成 AG-UI interrupt，也不写 outcome。
             subscriber.next({
               type: EventType.RUN_FINISHED,
               threadId,
               runId,
+              result: {
+                status: "cancelled",
+                reason: "user_cancelled",
+                externalEffectsMayContinue: true,
+              },
             });
+            finished = true;
+            detachExternalAbort();
             subscriber.complete();
             return;
           }
-          const safeErr = new Error(classification.userMessage);
+          // 权威轨迹：运行失败（含 ChatLoop 抛错）同样写 runtime_error interruption
+          // 边界，下一轮上下文能区分「系统没完成」与「用户主动取消」；
+          // 闭合失败只记日志——终态本身就是失败，不再改写
+          try {
+            await options.transcriptSink?.closeInterruption({ reason: "runtime_error", runSession: null });
+          } catch (closureError) {
+            console.error(LOG_PREFIX, "transcript failure closure failed:", closureError);
+          }
+          const safeErr = new AgentRuntimeError("E_MODEL_REQUEST_FAILED", classification.userMessage, {
+            ...(classification.modelFailure ? { modelFailure: classification.modelFailure } : {}),
+          });
+          finished = true;
+          detachExternalAbort();
           subscriber.error(safeErr);
         }
       })();
 
       return () => {
         cancelled = true;
-        markAbort("user_cancelled");
+        detachExternalAbort();
+        if (!finished && !abortController.signal.aborted) {
+          markAbort("upstream_cleanup");
+        }
       };
     });
   }
@@ -492,6 +653,7 @@ export interface AbortDiagnostic {
   phase: AbortPhase;
   userMessage: string;
   diagnostics: Record<string, unknown>;
+  modelFailure?: import("../../shared/model-error").ModelFailureInfo;
 }
 
 /** 分类 abort/error 来源，返回用户安全消息和诊断信息 */
@@ -564,6 +726,7 @@ export function classifyRunError(
       phase,
       userMessage,
       diagnostics,
+      ...(err.modelFailure ? { modelFailure: err.modelFailure } : {}),
     };
   }
 

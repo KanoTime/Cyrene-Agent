@@ -8,7 +8,22 @@
 import type { WebContents } from "electron";
 
 /** 渠道 id 联合类型。新增渠道时在此扩展。 */
-export type ChannelId = "wechat" | "feishu";
+export type ChannelId = "wechat" | "feishu" | "qq" | "qqbot";
+
+export type ChannelChatType = "private" | "group";
+
+export interface ChannelMention {
+  userId: string;
+  name?: string;
+  isBot?: boolean;
+}
+
+export interface ChannelReplyContext {
+  messageId: string;
+  senderId?: string;
+  senderName?: string;
+  text?: string;
+}
 
 export interface ChannelConversationIdentity {
   channel: ChannelId;
@@ -58,6 +73,10 @@ export interface IncomingMessage {
   connectionAccountId?: string;
   /** 用于 session、历史、记忆和权限隔离的结构化身份。 */
   conversationIdentity?: ChannelConversationIdentity;
+  /** 私聊或群聊。旧渠道未声明时按 private 处理。 */
+  chatType?: ChannelChatType;
+  /** 平台原始消息 ID。 */
+  messageId?: string;
   /** 平台原始 sender id。dispatcher 会 sha256 截断成 16 字符作为 sessionId。 */
   senderId: string;
   /** 显示名（昵称/open_id alias），用于日志/UI。 */
@@ -68,6 +87,9 @@ export interface IncomingMessage {
   threadId?: string;
   text: string;
   attachments?: ChannelAttachment[];
+  mentions?: ChannelMention[];
+  /** 最多展开一层的引用消息。 */
+  reply?: ChannelReplyContext;
   at: Date;
   /** 原始 payload，调试用，不序列化。 */
   _raw?: unknown;
@@ -95,9 +117,15 @@ export interface OutgoingMessage {
   connectionAccountId?: string;
   /** 原入站消息的结构化对话身份。 */
   conversationIdentity?: ChannelConversationIdentity;
+  chatType?: ChannelChatType;
   /** 回复给谁（私聊 = senderId；群聊 = chatId） */
   targetId: string;
   threadId?: string;
+  /** 群聊回复元数据，由平台 adapter 翻译为 reply / at 消息段。 */
+  replyContext?: {
+    messageId: string;
+    mentionUserId?: string;
+  };
   parts: OutgoingPart[];
 }
 
@@ -111,8 +139,8 @@ export interface ChannelStatus {
   detail?: Record<string, unknown>;
 }
 
-/** ChannelAdapter 内部 onMessage handler 的签名。
- *  返回 null 表示该消息被忽略（权限/限速/不在 allow list），adapter 不会再回信。 */
+/** 渠道适配器入站消息回调的签名。
+ *  回调内部负责完整的智能体执行与响应发送；返回值仅供观测和测试，适配器不得再次发送。 */
 export type MessageHandler = (
   msg: IncomingMessage,
 ) => Promise<OutgoingMessage | null>;

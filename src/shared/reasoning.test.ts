@@ -26,9 +26,30 @@ describe("MODEL_REASONING_RULES — 规则匹配优先级", () => {
     expect(cap.control).toBe("toggle");
   });
 
+  // qwen3.8 全系（max/flash/2.4t-a95b 开源版，官方 2026-08 文档）：混合思考模式，
+  // enable_thinking 可开关；Chat Completions 无 effort 档位 → 纯 toggle 命中系列规则
+  test("Qwen qwen3.8-max / qwen3.8-flash / qwen3.8-2.4t-a95b → 命中 /^qwen3/ 系列 toggle", () => {
+    for (const model of ["qwen3.8-max", "qwen3.8-flash", "qwen3.8-2.4t-a95b"]) {
+      const cap = resolveReasoningCapability("qwen", model);
+      expect(cap.control).toBe("toggle");
+      expect(cap.requestStyle).toBe("qwen-enable-thinking");
+      expect(cap.supportsDisable).toBe(true);
+    }
+  });
+
   test("Qwen qwen-max-thinking 命中 /-thinking$/ → fixed-on", () => {
     const cap = resolveReasoningCapability("qwen", "qwen-max-thinking");
     expect(cap.control).toBe("fixed-on");
+  });
+
+  test("Kimi kimi-k3 → effort 控制 + openai-effort 风格 + 强制思考 + auto 映射 high", () => {
+    const cap = resolveReasoningCapability("kimi", "kimi-k3");
+    expect(cap.control).toBe("effort");
+    expect(cap.requestStyle).toBe("openai-effort");
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    expect(cap.defaultEffort).toBe("high");
+    expect(cap.supportsDisable).toBe(false);
+    expect(cap.autoEffort).toBe("high");
   });
 
   test("Kimi kimi-k2.6 命中精确 K2.6 正则", () => {
@@ -77,12 +98,44 @@ describe("MODEL_REASONING_RULES — 规则匹配优先级", () => {
 // ── B. 9 家全部存在性 ──────────────────────────────────────
 
 describe("MODEL_REASONING_RULES — 9 家全部存在性", () => {
-  test("chatgpt gpt-5.6 → effort + openai-effort + supportedEfforts 含 max", () => {
+  test("chatgpt gpt-6-astra → effort 五档 + supportsDisable=false + supportsProMode（2026-09-03 新旗舰）", () => {
+    const cap = resolveReasoningCapability("chatgpt", "gpt-6-astra");
+    expect(cap.control).toBe("effort");
+    expect(cap.requestStyle).toBe("openai-effort");
+    expect(cap.supportedEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // 官方迁移说明：不支持 none 档 → UI 不显示"关闭"，off 折叠为 on 落 defaultEffort
+    expect(cap.supportsDisable).toBe(false);
+    // 官方迁移指南：pro mode 与 5.6 一致继续支持
+    expect(cap.supportsProMode).toBe(true);
+  });
+
+  test("chatgpt gpt-6-sol → effort 五档 + 可关闭（none 档）+ supportsProMode（2026-09-22 发布）", () => {
+    const cap = resolveReasoningCapability("chatgpt", "gpt-6-sol");
+    expect(cap.control).toBe("effort");
+    expect(cap.requestStyle).toBe("openai-effort");
+    expect(cap.supportedEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // 官方模型页：effort 支持 none → 可关闭，与 Astra（不支持 none）不同
+    expect(cap.supportsDisable).toBe(true);
+    expect(cap.supportsProMode).toBe(true);
+  });
+
+  test("chatgpt gpt-6-luna → 与 Sol 同规则（专属条目优先于 Astra 的 ^gpt-6）", () => {
+    const cap = resolveReasoningCapability("chatgpt", "gpt-6-luna");
+    expect(cap.control).toBe("effort");
+    // 若被 ^gpt-6（Astra）规则先吞，supportsDisable 会是 false
+    expect(cap.supportsDisable).toBe(true);
+    expect(cap.defaultEffort).toBe("medium");
+  });
+
+  test("chatgpt gpt-5.6 → effort + openai-effort + supportedEfforts 含 max + supportsProMode", () => {
     const cap = resolveReasoningCapability("chatgpt", "gpt-5.6");
     expect(cap.control).toBe("effort");
     expect(cap.requestStyle).toBe("openai-effort");
     expect(cap.supportedEfforts).toContain("max");
     expect(cap.supportsDisable).toBe(true);
+    // Responses API reasoning.mode:"pro"（gpt-5.6-sol 别名同规则）
+    expect(cap.supportsProMode).toBe(true);
+    expect(resolveReasoningCapability("chatgpt", "gpt-5.6-sol").supportsProMode).toBe(true);
   });
 
   test("chatgpt gpt-5 → effort + supportedEfforts 含 minimal", () => {
@@ -123,16 +176,56 @@ describe("MODEL_REASONING_RULES — 9 家全部存在性", () => {
     expect(cap.requestStyle).toBe("anthropic-adaptive");
   });
 
-  test("deepseek deepseek-v4-pro → toggle-effort + thinking-type + [high,max]", () => {
-    const cap = resolveReasoningCapability("deepseek", "deepseek-v4-pro");
+  test("deepseek deepseek-flash（V4.1 Flash，2026-09-10）→ toggle-effort + thinking-type + [low,high,max] + autoEffort=high", () => {
+    const cap = resolveReasoningCapability("deepseek", "deepseek-flash");
     expect(cap.control).toBe("toggle-effort");
-    expect(cap.supportedEfforts).toEqual(["high", "max"]);
+    // 官方思考模式文档：effort 原生 low/high/max 三档；medium/xhigh 映射为 high、minimal 映射为 low
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    expect(cap.autoEffort).toBe("high");
+    expect(cap.requestStyle).toBe("thinking-type");
+    expect(cap.supportsDisable).toBe(true);
   });
 
-  test("glm glm-5.2 → toggle-effort + [high,max]", () => {
+  test("deepseek deepseek-v4-pro → 命中统一规则（旧名官方路由到 V4.1 Flash）", () => {
+    const cap = resolveReasoningCapability("deepseek", "deepseek-v4-pro");
+    expect(cap.control).toBe("toggle-effort");
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    expect(cap.autoEffort).toBe("high");
+  });
+
+  test("deepseek deepseek-v4-flash-vision-exp（2026-08-21 视觉实验版）→ 命中统一规则", () => {
+    const cap = resolveReasoningCapability("deepseek", "deepseek-v4-flash-vision-exp");
+    expect(cap.control).toBe("toggle-effort");
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    expect(cap.autoEffort).toBe("high");
+    expect(cap.requestStyle).toBe("thinking-type");
+  });
+
+  test("glm glm-5.2 → toggle-effort + 可关闭 + autoEffort=high", () => {
     const cap = resolveReasoningCapability("glm", "glm-5.2");
     expect(cap.control).toBe("toggle-effort");
-    expect(cap.supportedEfforts).toEqual(["high", "max"]);
+    expect(cap.supportedEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(cap.supportsDisable).toBe(true);
+    expect(cap.autoEffort).toBe("high");
+  });
+
+  test("glm glm-5.3 → toggle-effort + 强制思考（不可关闭）+ [low,high,max] + autoEffort=high", () => {
+    const cap = resolveReasoningCapability("glm", "glm-5.3");
+    expect(cap.control).toBe("toggle-effort");
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    // 官方文档 2026-08-26：GLM-5.3 不再支持关闭思考（thinking.type=disabled 报错）
+    expect(cap.supportsDisable).toBe(false);
+    // auto 不发字段 ≡ 服务端默认 max → 显式映射 high
+    expect(cap.autoEffort).toBe("high");
+  });
+
+  test("glm glm-5.3-flash → 与 5.3 同规则（z.ai 文档：FLASH 同为强制思考，首个原生图片输入的 GLM-5）", () => {
+    const cap = resolveReasoningCapability("glm", "glm-5.3-flash");
+    expect(cap.control).toBe("toggle-effort");
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    expect(cap.supportsDisable).toBe(false);
+    expect(cap.autoEffort).toBe("high");
+    expect(cap.requestStyle).toBe("thinking-type");
   });
 
   test("glm glm-4.7 → toggle only", () => {
@@ -189,6 +282,15 @@ describe("MODEL_REASONING_RULES — 9 家全部存在性", () => {
     const cap = resolveReasoningCapability("mimo", "mimo-v2.5-pro");
     expect(cap.control).toBe("toggle");
     expect(cap.requestStyle).toBe("thinking-type");
+  });
+
+  test("mimo v2.6 全系（pro/flash/pro-ultraspeed）→ 复用 v2 系列 toggle（2026-09-22 发布，与 2.5 同控制面）", () => {
+    for (const model of ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.6-pro-ultraspeed"]) {
+      const cap = resolveReasoningCapability("mimo", model);
+      expect(cap.control).toBe("toggle");
+      expect(cap.requestStyle).toBe("thinking-type");
+      expect(cap.supportsDisable).toBe(true);
+    }
   });
 
   test("doubao seed 2.1 → toggle + thinking-type", () => {
@@ -253,6 +355,18 @@ describe("normalizeReasoningPreference — 白名单", () => {
       expect(normalizeReasoningPreference({ mode: "on", effort: e }))
         .toEqual({ mode: "on", effort: e });
     }
+  });
+
+  test("proMode=true → 保留", () => {
+    expect(normalizeReasoningPreference({ mode: "on", proMode: true }))
+      .toEqual({ mode: "on", proMode: true });
+  });
+
+  test("proMode 非法（字符串/null）→ 丢弃 proMode，其余保留", () => {
+    expect(normalizeReasoningPreference({ mode: "on", effort: "high", proMode: "yes" }))
+      .toEqual({ mode: "on", effort: "high" });
+    expect(normalizeReasoningPreference({ mode: "on", proMode: null }))
+      .toEqual({ mode: "on" });
   });
 });
 
@@ -328,9 +442,9 @@ describe("resolveEffectiveReasoning", () => {
     expect(result.effort).toBeUndefined();
   });
 
-  test("toggle-effort + supportsDisable=false + { mode: 'off' } → { mode: 'off' }（第三轮修订：mode !== on 直接返回，supportsDisable 由 applyReasoningPreference 拦截）", () => {
+  test("toggle-effort + supportsDisable=false + { mode: 'off' } → 默认档位", () => {
     expect(resolveEffectiveReasoning({ mode: "off" }, toggleEffortNoDisableCap))
-      .toEqual({ mode: "off" });
+      .toEqual({ mode: "on", effort: "high" });
   });
 
   test("toggle-effort + { mode: 'on', effort: 'max' } + supportedEfforts=[high] → { mode: 'on', effort: 'high' }", () => {
@@ -358,9 +472,9 @@ describe("resolveEffectiveReasoning", () => {
       .toEqual({ mode: "on", effort: "high" });
   });
 
-  test("toggle + { mode: 'auto', effort: 'high' } → { mode: 'auto' }（mode !== on 不保留 effort）", () => {
+  test("toggle + 旧 auto 偏好 → 开启且清除旧 effort", () => {
     expect(resolveEffectiveReasoning({ mode: "auto", effort: "high" }, toggleCap))
-      .toEqual({ mode: "auto" });
+      .toEqual({ mode: "on" });
   });
 
   test("toggle + { mode: 'off', effort: 'high' } → { mode: 'off' }（mode !== on 不保留 effort）", () => {
@@ -368,9 +482,9 @@ describe("resolveEffectiveReasoning", () => {
       .toEqual({ mode: "off" });
   });
 
-  test("preference 缺省 → 按 { mode: 'auto' } 处理", () => {
+  test("preference 缺省 → 可调模型默认开启", () => {
     expect(resolveEffectiveReasoning(undefined, toggleCap))
-      .toEqual({ mode: "auto" });
+      .toEqual({ mode: "on" });
   });
 
   test("saved 与 effective 不同步：saved 仍保留原 effort", () => {
@@ -387,6 +501,39 @@ describe("resolveEffectiveReasoning", () => {
     // saved 不动
     expect(saved).toEqual({ mode: "on", effort: "max" });
   });
+
+  // ── proMode（Responses API reasoning.mode="pro"，gpt-5.6 系列）──
+
+  const proCap: ReasoningCapability = {
+    control: "effort",
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultEffort: "medium",
+    requestStyle: "openai-effort",
+    supportsDisable: true,
+    supportsProMode: true,
+  };
+
+  test("supportsProMode + {on, proMode:true} → 保留 proMode", () => {
+    expect(resolveEffectiveReasoning({ mode: "on", proMode: true }, proCap))
+      .toEqual({ mode: "on", effort: "medium", proMode: true });
+  });
+
+  test("supportsProMode + {on, effort:'high', proMode:true} → effort 与 proMode 共存", () => {
+    expect(resolveEffectiveReasoning({ mode: "on", effort: "high", proMode: true }, proCap))
+      .toEqual({ mode: "on", effort: "high", proMode: true });
+  });
+
+  test("capability 不支持（supportsProMode 未声明）→ proMode 丢弃", () => {
+    expect(resolveEffectiveReasoning({ mode: "on", proMode: true }, toggleEffortCap))
+      .toEqual({ mode: "on", effort: "high" });
+  });
+
+  test("旧 auto 与 off 偏好均丢弃 proMode", () => {
+    expect(resolveEffectiveReasoning({ mode: "auto", proMode: true }, proCap))
+      .toEqual({ mode: "on", effort: "medium" });
+    expect(resolveEffectiveReasoning({ mode: "off", proMode: true }, proCap))
+      .toEqual({ mode: "off" });
+  });
 });
 
 // ── E. 规则表数据完整性 ──────────────────────────────────────
@@ -395,7 +542,7 @@ describe("MODEL_REASONING_RULES — 数据完整性", () => {
   test("所有 providerId 与 capabilities.ts 的 id 一致", () => {
     const known = new Set([
       "chatgpt", "claude", "deepseek", "glm", "kimi",
-      "qwen", "minimax", "mimo", "doubao",
+      "qwen", "minimax", "mimo", "doubao", "grok", "gemini",
     ]);
     const providerIds = new Set(MODEL_REASONING_RULES.map(r => r.providerId));
     for (const id of providerIds) {
@@ -479,5 +626,47 @@ describe("foldReasoning — 持久化折叠（用户第三轮修订 #4）", () =
     // 顶层 settings.reasoning 存在 → hasTopLevelReasoning=true
     // → foldReasoning(topLevel, undefined, true)
     expect(foldReasoning(topLevel, existing, true)).toEqual({ mode: "on", effort: "low" });
+  });
+});
+
+describe("resolveReasoningCapability — 厂商/模型家族错配时按模型名推断", () => {
+  test("I1 自定义端点托管 glm-5.3-flash（方舟 coding plan 场景）→ 命中 glm-5.3 强制思考规则", () => {
+    const cap = resolveReasoningCapability("unknown", "glm-5.3-flash");
+    expect(cap.control).toBe("toggle-effort");
+    expect(cap.requestStyle).toBe("thinking-type");
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    expect(cap.supportsDisable).toBe(false);
+    expect(cap.autoEffort).toBe("high");
+  });
+
+  test("I2 自定义端点托管 glm-5.3 → 同一规则", () => {
+    const cap = resolveReasoningCapability("unknown", "glm-5.3");
+    expect(cap.control).toBe("toggle-effort");
+  });
+
+  test("I3 托管 doubao-seed 系列 → 命中豆包 toggle 规则", () => {
+    const cap = resolveReasoningCapability("unknown", "doubao-seed-2-1-pro-260628");
+    expect(cap.control).toBe("toggle");
+    expect(cap.supportsDisable).toBe(true);
+  });
+
+  test("I4 未识别模型名 → 保持 UNKNOWN 兜底（control=none）", () => {
+    const cap = resolveReasoningCapability("unknown", "some-homemade-endpoint-model");
+    expect(cap.control).toBe("none");
+    expect(cap.requestStyle).toBe("none");
+  });
+
+  test("I5 厂商家族无真实规则 + 模型名也未识别 → 仍 UNKNOWN（不误匹配）", () => {
+    const cap = resolveReasoningCapability("glm", "not-a-real-glm-model");
+    expect(cap.control).toBe("none");
+    expect(cap.requestStyle).toBe("none");
+  });
+
+  test("I6 家族错配回归：豆包档案跑 glm-5.3-flash（方舟 coding plan 真实场景）→ 按模型名命中 glm 规则", () => {
+    const cap = resolveReasoningCapability("doubao", "glm-5.3-flash");
+    expect(cap.control).toBe("toggle-effort");
+    expect(cap.requestStyle).toBe("thinking-type");
+    expect(cap.supportedEfforts).toEqual(["low", "high", "max"]);
+    expect(cap.supportsDisable).toBe(false);
   });
 });

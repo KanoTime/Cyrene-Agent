@@ -44,8 +44,15 @@ export class AnthropicEventNormalizer {
       case "message_stop":
       case "ping":
         return [];
-      case "error":
-        throw new ProviderProtocolError("E_UNSUPPORTED_STREAM_EVENT", "Anthropic stream returned an error event");
+      case "error": {
+        const payload = isRecord(event.error) ? event.error : undefined;
+        throw new ProviderProtocolError("E_UNSUPPORTED_STREAM_EVENT", "Anthropic stream returned an error event", {
+          vendorCode: payload ? nonEmptyString(payload.code) : undefined,
+          vendorType: payload ? nonEmptyString(payload.type) : undefined,
+          status: typeof event.status === "number" ? event.status : undefined,
+          requestId: nonEmptyString(event.request_id),
+        });
+      }
       default:
         return [];
     }
@@ -126,8 +133,14 @@ export class AnthropicEventNormalizer {
     if (!isRecord(value)) return [];
     const inputTokens = typeof value.input_tokens === "number" ? value.input_tokens : undefined;
     const outputTokens = typeof value.output_tokens === "number" ? value.output_tokens : undefined;
-    return inputTokens !== undefined || outputTokens !== undefined
-      ? [{ type: "usage", inputTokens, outputTokens }]
+    const cachedInputTokens = typeof value.cache_read_input_tokens === "number"
+      ? value.cache_read_input_tokens
+      : undefined;
+    const cacheCreationTokens = typeof value.cache_creation_input_tokens === "number"
+      ? value.cache_creation_input_tokens
+      : undefined;
+    return inputTokens !== undefined || outputTokens !== undefined || cachedInputTokens !== undefined || cacheCreationTokens !== undefined
+      ? [{ type: "usage", inputTokens, outputTokens, ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}), ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}) }]
       : [];
   }
 }
@@ -168,7 +181,9 @@ function terminalMismatch(
   if (normalizedFinishReason(live.finishReason) !== normalizedFinishReason(terminal.finishReason)) {
     differences.push("finish_reason");
   }
-  if (
+  if (live.usage && !terminal.usage) {
+    differences.push("usage_missing_in_terminal");
+  } else if (
     live.usage && terminal.usage &&
     (live.usage.input !== terminal.usage.input || live.usage.output !== terminal.usage.output)
   ) {
@@ -208,6 +223,27 @@ function terminalMismatch(
   };
 }
 
+/**
+ * Field-wise merge: terminal 优先，terminal 缺的字段用 live（流式采集）补。
+ * 避免 Anthropic 兼容接口 finalMessage 不返回 cachedInput/cacheCreation 时流式结果被丢弃。
+ */
+function mergeUsage(
+  live: { input: number; output: number; cachedInput?: number; cacheCreation?: number } | undefined,
+  terminal: { input: number; output: number; cachedInput?: number; cacheCreation?: number } | undefined,
+): { input: number; output: number; cachedInput?: number; cacheCreation?: number } | undefined {
+  if (!live && !terminal) return undefined;
+  if (!live) return terminal;
+  if (!terminal) return live;
+  const cachedInput = terminal.cachedInput ?? live.cachedInput;
+  const cacheCreation = terminal.cacheCreation ?? live.cacheCreation;
+  return {
+    input: terminal.input,
+    output: terminal.output,
+    ...(cachedInput !== undefined ? { cachedInput } : {}),
+    ...(cacheCreation !== undefined ? { cacheCreation } : {}),
+  };
+}
+
 export function reconcileAnthropicTerminal(
   live: StreamAccumulatorSnapshot,
   finalMessage: unknown,
@@ -218,5 +254,5 @@ export function reconcileAnthropicTerminal(
   validateTerminalToolCalls(terminal.toolCalls);
   const mismatch = terminalMismatch(live, terminal);
   if (mismatch) onDiagnostic?.(mismatch.diagnostic);
-  return terminal;
+  return { ...terminal, usage: mergeUsage(live.usage, terminal.usage) };
 }

@@ -51,12 +51,13 @@ const MODEL_SAMPLING_RULES: readonly ModelSamplingRule[] = [
   },
   {
     providerId: "glm",
-    modelPattern: /^glm-(?:5\.[12]|5-turbo|4\.7)$/i,
+    modelPattern: /^glm-(?:5\.[123]|5-turbo|4\.7)$/i,
     diversity: true,
   },
   {
     providerId: "deepseek",
-    modelPattern: /^deepseek-v4-(?:pro|flash)$/i,
+    // V4.1 Flash（deepseek-flash）与 V4 旧名；思考模式下 temperature 不生效，需关闭思考
+    modelPattern: /^deepseek-(?:v4-(?:pro|flash)|flash)$/i,
     diversity: true,
     requiresReasoningOff: true,
   },

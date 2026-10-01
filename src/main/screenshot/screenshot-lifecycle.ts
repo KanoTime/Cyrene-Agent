@@ -1,9 +1,10 @@
 import * as path from "node:path";
 import * as fs from "fs";
 import { spawn } from "node:child_process";
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage } from "electron";
+import { app, BrowserWindow, globalShortcut, nativeImage } from "electron";
 import { randomUUID } from "crypto";
 import { IPC } from "../../shared/ipc-channels";
+import { createIpcScope, type IpcScope } from "../application/ipc-scope";
 import { ElectronScreenshotHelperClient } from "./helper-client";
 import { resolveScreenshotHelperPath } from "./helper-path";
 import {
@@ -18,13 +19,28 @@ export type { ScreenshotService };
 export interface ScreenshotLifecycleOptions {
   initialHotkey: string;
   getReactChatWindow: () => BrowserWindow | null;
-  captureMainWindow: () => Promise<Electron.NativeImage | null>;
+  capturePetWindow: () => Promise<Electron.NativeImage | null>;
+  /** 传入共享 scope 以便退出时统一注销；缺省时使用独立 scope。 */
+  ipc?: IpcScope;
 }
 
 const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
 
 function getScreenshotDirectory(): string {
   return path.join(app.getPath("userData"), "screenshots");
+}
+
+/**
+ * 确保 helper 的输出目录存在。
+ * WIC InitializeFromFilename 不会创建父目录：目录缺失时打开 `<uuid>.png.tmp`
+ * 直接报 0x80070003（ERROR_PATH_NOT_FOUND）。mkdir recursive 幂等，重复调用无害。
+ */
+async function ensureScreenshotDirectory(directory: string): Promise<void> {
+  try {
+    await fs.promises.mkdir(directory, { recursive: true });
+  } catch (error) {
+    console.error("[Screenshot] 创建截图目录失败:", directory, error);
+  }
 }
 
 async function saveScreenshotPasteTemp(
@@ -49,7 +65,8 @@ async function saveScreenshotPasteTemp(
 export function initializeScreenshotService(
   options: ScreenshotLifecycleOptions,
 ): ScreenshotService {
-  const { getReactChatWindow, captureMainWindow } = options;
+  const { getReactChatWindow, capturePetWindow } = options;
+  const ipc = options.ipc ?? createIpcScope();
   const screenshotDirectory = getScreenshotDirectory();
 
   const validateInsert = (data: ScreenshotInsertData): ScreenshotInsertData => {
@@ -89,6 +106,9 @@ export function initializeScreenshotService(
     screenshotDirectory,
     logger: console,
   });
+  // 启动即建目录 + 记录实际输出目录（排查 0x80070003 类路径问题）。
+  void ensureScreenshotDirectory(screenshotDirectory);
+  console.log("[Screenshot] helper output-dir =", screenshotDirectory);
 
   const service = createScreenshotService({
     client,
@@ -104,27 +124,30 @@ export function initializeScreenshotService(
     },
   });
 
-  ipcMain.handle(IPC.SCREENSHOT_START, (event) =>
-    service.startFromChatButton((data) => {
+  ipc.handle(IPC.SCREENSHOT_START, async (event) => {
+    // 请求前兜底重建目录：清理软件可能删掉 AppData 下的子目录，
+    // helper 的 WIC 编码不会自建父目录（0x80070003）。
+    await ensureScreenshotDirectory(screenshotDirectory);
+    return service.startFromChatButton((data) => {
       if (!event.sender.isDestroyed()) {
         event.sender.send(IPC.SCREENSHOT_INSERT, validateInsert(data));
       }
-    }),
-  );
-  ipcMain.handle(IPC.SCREENSHOT_SAVE_TEMP, (_event, base64: string, mime: string) =>
+    });
+  });
+  ipc.handle(IPC.SCREENSHOT_SAVE_TEMP, (_event, base64: string, mime: string) =>
     saveScreenshotPasteTemp(base64, mime),
   );
-  ipcMain.handle(IPC.SCREENSHOT_HOTKEY_CAPTURE_START, () => {
+  ipc.handle(IPC.SCREENSHOT_HOTKEY_CAPTURE_START, () => {
     service.suspendHotkey();
     return true;
   });
-  ipcMain.handle(IPC.SCREENSHOT_HOTKEY_CAPTURE_END, () => {
+  ipc.handle(IPC.SCREENSHOT_HOTKEY_CAPTURE_END, () => {
     service.resumeHotkey();
     return true;
   });
 
-  ipcMain.handle("debug:screenshot", async () => {
-    const image = await captureMainWindow();
+  ipc.handle("debug:screenshot", async () => {
+    const image = await capturePetWindow();
     if (!image) return null;
     const png = image.toPNG();
     const outPath = path.join(app.getPath("temp"), "cyrene-screenshot.png");

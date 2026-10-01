@@ -1,18 +1,19 @@
+import newIconUrl from "../../assets/new.png?url";
+import { useTranslation } from "../../i18n";
+
 interface NewTaskButtonProps {
   label?: string;
   onClick?: () => void;
 }
 
-export function NewTaskButton({ label = "新建任务", onClick }: NewTaskButtonProps) {
+export function NewTaskButton({ label, onClick }: NewTaskButtonProps) {
+  const { t } = useTranslation();
   return (
-    <button className="cy-new-task" onClick={onClick} type="button">
-      <div className="cy-new-task-icon">
-        <svg width="20" height="20" viewBox="0 0 48 48" fill="none">
-          <path d="M24.0605 10L24.0239 38" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M10 24L38 24" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </div>
-      <span className="cy-new-task-label">{label}</span>
+    <button className="cy-side-action" onClick={onClick} type="button">
+      <span className="cy-side-action-icon">
+        <img src={newIconUrl} alt="" width="22" height="22" style={{ objectFit: "contain" }} />
+      </span>
+      <span className="cy-side-action-label">{label ?? t("ui.newButton")}</span>
     </button>
   );
 }

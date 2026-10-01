@@ -1,54 +1,61 @@
-.cy-new-task {
+.cy-side-action {
   display: flex;
   align-items: center;
-  width: 184px;
-  height: 42px;
+  gap: 12px;
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
   background: transparent;
   border: none;
-  border-radius: 12px;
+  border-radius: 8px;
   cursor: pointer;
+  color: var(--rb-text-primary, #1d1d1f);
+  transition: background 0.15s ease;
+}
+
+.cy-side-action:hover {
+  background: #f4f4f5;
+}
+
+.cy-side-action.is-active {
+  background: var(--rb-surface-active, #fde0ed);
+}
+
+.cy-side-action-icon {
   position: relative;
-  overflow: hidden;
-  transition: background 0.15s;
-  padding: 3px;
-}
-
-.cy-new-task:hover {
-  background: #f9fafb;
-}
-
-.cy-new-task-icon {
-  width: 36px;
-  height: 36px;
-  min-width: 36px;
-  background: var(--cy-accent);
-  border-radius: 9px;
+  width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10;
-  transition: width 0.5s ease, min-width 0.5s ease;
-  color: #fff;
-  overflow: hidden;
+  color: #6b6b70;
+  flex-shrink: 0;
 }
 
-.cy-new-task:hover .cy-new-task-icon {
-  width: 100%;
-  min-width: 100%;
+.cy-side-action.is-active .cy-side-action-icon {
+  color: var(--rb-accent, #ff5b8a);
 }
 
-.cy-new-task-label {
-  display: block;
-  padding-left: 40px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #000;
-  line-height: 1;
+.cy-side-action-label {
+  font-size: 13px;
+  font-weight: 500;
   white-space: nowrap;
-  transition: opacity 0.3s ease;
-  letter-spacing: 2px;
 }
 
-.cy-new-task:hover .cy-new-task-label {
-  opacity: 0;
+.cy-side-action--search kbd {
+  margin-left: auto;
+  color: var(--rb-text-secondary, #8e8e93);
+  font: 400 10px/1 var(--rb-font-sans, sans-serif);
+}
+
+/* 侧栏动作按钮的未读红点：不显示数字，贴在图标右上角的小圆点 */
+.cy-side-action-dot {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff3b5c;
+  pointer-events: none;
 }

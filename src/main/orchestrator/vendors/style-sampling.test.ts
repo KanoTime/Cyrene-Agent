@@ -78,6 +78,7 @@ describe("resolveApprovedStyleSampling", () => {
     ["minimax", "MiniMax-M2.7", "on"],
     ["glm", "glm-4.7", "auto"],
     ["glm", "glm-5.2", "on"],
+    ["glm", "glm-5.3", "on"],
   ] as const)("allows diversity only for known %s model %s", (providerId, model, mode) => {
     expect(resolveApprovedStyleSampling({
       providerId,
@@ -193,6 +194,7 @@ describe("resolveApprovedStyleSampling", () => {
     ["minimax", "minimax-m2.5"],
     ["glm", "GLM-5-TURBO"],
     ["deepseek", "DEEPSEEK-V4-FLASH"],
+    ["deepseek", "DEEPSEEK-FLASH"],
     ["mimo", "MIMO-V2.5-PRO"],
   ])("matches exact allowlisted model case-insensitively for %s/%s", (providerId, model) => {
     expect(resolveApprovedStyleSampling({

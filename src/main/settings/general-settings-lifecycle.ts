@@ -1,17 +1,17 @@
 import { app, nativeImage, type Tray } from "electron";
 import { IPC } from "../../shared/ipc-channels";
-import { broadcastToAllWindows } from "../windows/broadcast";
 import type { WindowManager } from "../windows/window-manager";
 import { setGetCurrentAppIconPath } from "../windows/window-state";
-import { normalizeChatAppearance } from "../../shared/chat-appearance";
 import { updateLocaleContext } from "../locale-context";
 import { validateSearchApiKey } from "../orchestrator/search-backend-filter";
 import { addMcpServer, listMcpServers, removeMcpServer } from "../orchestrator/mcp-manager";
 import { getAppIconPath } from "../app-icon";
-import { syncBuiltInToolToggles } from "../orchestrator/tool-registration";
+import { syncBuiltInToolToggles } from "../orchestrator/tools/registry/tool-registration";
 import { loadModelSettings, getPublicModelConfig } from "./model-settings";
 import type { GeneralSettings } from "./general-settings";
 import type { UiIcon } from "../../shared/ui-icon";
+import { syncLaunchAtLogin } from "./launch-at-login";
+import { CURRENT_DISCLAIMER_VERSION } from "../../shared/disclaimer";
 
 export interface GeneralSettingsLifecycleDependencies {
   get windowManager(): WindowManager | null;
@@ -24,12 +24,41 @@ export interface GeneralSettingsLifecycleDependencies {
 /** MiniMax 搜索 MCP Server 的固定 ID。 */
 const MINIMAX_SEARCH_MCP_ID = "minimax-web-search";
 
-export function applyGeneralSettings(settings: GeneralSettings, deps: GeneralSettingsLifecycleDependencies): void {
-  deps.windowManager?.setMainWindowAlwaysOnTop(settings.petAlwaysOnTop);
-  if (settings.petVisible) deps.windowManager?.showMainWindow();
-  else deps.windowManager?.hideMainWindow();
-  // app.setLoginItemSettings 是全局副作用，由调用方在 index.ts 执行。
-  deps.windowManager?.applyMainWindowZoom(settings.petZoom);
+export function applyGeneralSettings(
+  settings: GeneralSettings,
+  deps: GeneralSettingsLifecycleDependencies,
+  before?: GeneralSettings,
+): void {
+  // 启动时完整应用；保存设置时只应用变化项，保留托盘临时隐藏等窗口状态。
+  if (!before || before.petAlwaysOnTop !== settings.petAlwaysOnTop) {
+    deps.windowManager?.setPetWindowAlwaysOnTop(settings.petAlwaysOnTop);
+  }
+  const disclaimerAccepted = settings.disclaimerAcceptedVersion === undefined
+    || settings.disclaimerAcceptedVersion === CURRENT_DISCLAIMER_VERSION;
+  const disclaimerAcceptanceChanged = before?.disclaimerAcceptedVersion !== settings.disclaimerAcceptedVersion;
+  if (!disclaimerAccepted) {
+    deps.windowManager?.hidePetWindow();
+  } else if (!before || before.petVisible !== settings.petVisible || disclaimerAcceptanceChanged) {
+    if (settings.petVisible) deps.windowManager?.showPetWindow();
+    else deps.windowManager?.hidePetWindow();
+  }
+  const wasDisclaimerAccepted = !before
+    || before.disclaimerAcceptedVersion === undefined
+    || before.disclaimerAcceptedVersion === CURRENT_DISCLAIMER_VERSION;
+  if (!wasDisclaimerAccepted && disclaimerAccepted) {
+    setTimeout(() => {
+      deps.windowManager?.closeOnboardingWindow?.();
+      void deps.windowManager?.openReactChatWindow().catch((error) => {
+        console.error("[Cyrene] failed to open workspace after disclaimer acceptance:", error);
+      });
+    }, 0);
+  }
+  if (!before || before.launchAtLogin !== settings.launchAtLogin) {
+    syncLaunchAtLogin(settings.launchAtLogin, app);
+  }
+  if (!before || before.petZoom !== settings.petZoom) {
+    deps.windowManager?.applyPetWindowZoom(settings.petZoom);
+  }
 }
 
 export function applyUiIcon(iconSetting: UiIcon, deps: GeneralSettingsLifecycleDependencies): void {
@@ -113,7 +142,7 @@ export function handleGeneralSettingsChanged(
   after: GeneralSettings,
   deps: GeneralSettingsLifecycleDependencies,
 ): void {
-  applyGeneralSettings(after, deps);
+  applyGeneralSettings(after, deps, before);
   syncBuiltInToolToggles(after);
   if (before.language !== after.language || before.asrLanguage !== after.asrLanguage) {
     updateLocaleContext({
@@ -127,20 +156,6 @@ export function handleGeneralSettingsChanged(
   }
   if (before.uiThemeRadius !== after.uiThemeRadius) {
     deps.windowManager?.broadcast(IPC.UI_THEME_RADIUS_CHANGED, after.uiThemeRadius);
-  }
-  if (before.windowCornerRadius !== after.windowCornerRadius) {
-    deps.windowManager?.broadcast(IPC.UI_WINDOW_CORNER_RADIUS_CHANGED, after.windowCornerRadius);
-  }
-  if (JSON.stringify(before.uiFont) !== JSON.stringify(after.uiFont)) {
-    deps.windowManager?.broadcast(IPC.UI_FONT_CHANGED, after.uiFont);
-  }
-  const prevAppearance = normalizeChatAppearance(before);
-  const nextAppearance = normalizeChatAppearance(after);
-  if (
-    prevAppearance.chatLineHeight !== nextAppearance.chatLineHeight
-    || prevAppearance.assistantBubbleEnabled !== nextAppearance.assistantBubbleEnabled
-  ) {
-    broadcastToAllWindows(IPC.CHAT_TYPOGRAPHY_CHANGED, nextAppearance);
   }
   if (before.uiIcon !== after.uiIcon) {
     applyUiIcon(after.uiIcon, deps);

@@ -1,14 +1,22 @@
 // 厂商工具调用适配层 —— 统一类型
-// 调度层（function-calling.ts）只依赖这里的统一结构，绝不出现 if (provider === "xxx")。
+// 调度层（CyreneHarness）只依赖这里的统一结构，绝不出现 if (provider === "xxx")。
 // 协议事实来源：docs/vendors/tool-calling-matrix.md
 
 import type { ReasoningPreference } from "../../../shared/reasoning";
+import type { ManualReasoningConfig } from "../../../shared/manual-reasoning";
+import type { PromptLayerMetadata } from "../prompt-layers";
+import type { ProviderCapability, Transport } from "../../../shared/vendor-registry/types";
 
-export type Transport = "openai" | "anthropic";
-export type AuthStyle = "bearer" | "x-api-key";
-export type ThinkingField = "reasoning_content" | "thinking" | "reasoning_details" | null;
-export type CacheStrategy = "prompt_cache_key" | "cache_control" | "auto" | "none";
-export type TestStrategy = "text" | "text+tool";
+// 厂商能力系类型已迁入 shared/vendor-registry/types（厂商注册表的类型事实源）；
+// 此处 re-export 保持既有 import 路径（./types）不变，调用方零改动。
+export type {
+  Transport,
+  AuthStyle,
+  ThinkingField,
+  CacheStrategy,
+  TestStrategy,
+  ProviderCapability,
+} from "../../../shared/vendor-registry/types";
 
 /** 调度层传入适配器的厂商运行时配置（结构兼容 main/index.ts 的 ModelSettings）。 */
 export interface VendorConfig {
@@ -26,6 +34,8 @@ export interface VendorConfig {
    * commit 2 落地后由 ModelSettings 顶层镜像字段填充；commit 1 期间为可选。
    */
   reasoning?: ReasoningPreference;
+  /** 当前模型在档案中显式配置的推理规则。 */
+  manualReasoning?: ManualReasoningConfig;
 }
 
 export type OpenAIContentBlock =
@@ -58,6 +68,17 @@ export interface ChatMessage {
   thinking?: string;
   /** Anthropic 多轮必须原样回传 assistant.content block 数组；OpenAI transport 不读。 */
   rawAssistant?: unknown;
+  /** 仅供本地 transcript / UI 使用；Adapter 序列化时不得发送。 */
+  visibility?: "user" | "internal";
+  /** 仅供本地持久化和去重使用；Adapter 序列化时不得发送。 */
+  internal?: {
+    kind: "run_start" | "state_delta" | "recovery";
+    revision: number;
+    digest: string;
+    id: string;
+    runId: string;
+    createdAt: number;
+  };
 }
 
 export interface ToolSpec {
@@ -87,35 +108,18 @@ export type StructuredOutputRequest =
       schema?: object;
     };
 
-/**
- * Action Gate 专用：直接指定 tool_choice wire 值，绕过 resolveToolChoicePolicy。
- * Native FC 不设此字段，仍走 toolChoiceIntent + resolveToolChoicePolicy。
- *
- * `none` 和 `omit` 的区别：
- * - `none`：明确发送"禁止调用工具"（wire: tool_choice: "none"）
- * - `omit`：请求里完全不出现 tool_choice 字段
- */
-export type ToolChoiceOverride =
-  | { kind: "named"; toolName: string }
-  | { kind: "required" }
-  | { kind: "auto" }
-  | { kind: "none" }
-  | { kind: "omit" };
-
 export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
   tools?: ToolSpec[];
   /** Runtime semantic intent; the active Adapter maps it to named/required/any/auto/omitted wire syntax. */
   toolChoiceIntent?: { mode: "must_call"; toolName: string };
-  /** Action Gate 专用：直接指定 tool_choice wire 值，绕过 resolveToolChoicePolicy。 */
-  toolChoiceOverride?: ToolChoiceOverride;
   temperature?: number;
   topP?: number;
   frequencyPenalty?: number;
   repetitionPenalty?: number;
   stream?: boolean;
-  /** CITA/Action Gate only. Native FC keeps using real tools instead. */
+  /** CITA only. Native FC keeps using real tools instead. */
   structuredOutput?: StructuredOutputRequest;
   /**
    * 非流式调用时的 max_tokens 上限（OpenAI wire: `max_tokens`；Anthropic wire 覆盖默认 4096）。
@@ -124,6 +128,8 @@ export interface ChatRequest {
   maxTokens?: number;
   /** 透传到请求体顶层的厂商扩展字段（如 Kimi 的 prompt_cache_key）。 */
   extraBody?: Record<string, unknown>;
+  /** 仅供本地缓存键与诊断使用，Adapter 不得将该字段直接发给厂商。 */
+  promptLayers?: PromptLayerMetadata;
 }
 
 /**
@@ -157,7 +163,7 @@ export interface StreamChunk {
   error?: string;
   deltaToolCalls?: ToolCall[];
   done?: boolean;
-  usage?: { input: number; output: number; cachedInput?: number };
+  usage?: { input: number; output: number; cachedInput?: number; cacheCreation?: number };
 }
 
 /** 适配器解析后的统一响应，调度层只看这个。 */
@@ -175,7 +181,7 @@ export interface ChatResponse {
   structuredValue?: unknown;
   /** API 返回的 token 用量（OpenAI: prompt_tokens/completion_tokens；Anthropic: input_tokens/output_tokens）。
    *  未上报时为 undefined，由调用方兜底。 */
-  usage?: { input: number; output: number; cachedInput?: number };
+  usage?: { input: number; output: number; cachedInput?: number; cacheCreation?: number };
 }
 
 export interface HttpRequest {
@@ -195,37 +201,6 @@ export interface TestConnectionResult {
   latency: number;
   sample?: string;
   error?: string;
-}
-
-/**
- * 厂商能力表的一条记录。是 vendor adapter 的"事实来源"，
- * 避免 function-calling.ts 里散落 if (provider === "kimi")。
- */
-export interface ProviderCapability {
-  id: string;
-  displayName: string;
-  transport: Transport;
-  baseUrl: string;
-  authStyle: AuthStyle;
-  /** Anthropic-compatible endpoints sometimes require a different auth header. */
-  anthropicAuthStyle?: AuthStyle;
-  defaultModel: string;
-  supportsTools: boolean;
-  supportsThinking: boolean;
-  thinkingField: ThinkingField;
-  cacheStrategy: CacheStrategy;
-  testStrategy: TestStrategy;
-  /** 是否支持视觉（图片）输入。非多模态模型禁止走 read_image。 */
-  supportsVision: boolean;
-  /** Supported must-call wire policies; Adapter maps required to OpenAI required / Anthropic any. */
-  toolChoiceModes?: ReadonlyArray<"named" | "required" | "auto" | "omit">;
-  /**
-   * 视觉模型的 OpenAI 兼容 baseUrl。仅当主聊天走 Anthropic 入口、视觉需走 OpenAI 入口时才需要标
-   * （如 MiniMax 主配 /anthropic，视觉要走 /v1）。不标 = 视觉用主配置 baseUrl。
-   */
-  visionBaseUrl?: string;
-  /** UI 是否允许选择（Claude 等 Anthropic adapter 未就绪前先禁用）。 */
-  disabled?: boolean;
 }
 
 /** 调度层只看到这一层接口。 */

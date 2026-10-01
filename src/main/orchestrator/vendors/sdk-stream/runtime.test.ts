@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRuntimeError } from "../../agent-runtime-error";
 import { AnthropicAdapter } from "../anthropic-adapter";
 import { OpenAICompatAdapter } from "../openai-adapter";
+import { ResponsesAdapter } from "../responses-adapter";
 import type { ChatRequest, ProviderCapability, VendorConfig } from "../types";
 import { streamChatWithSdk, type SdkStreamRuntimeDeps } from "./runtime";
 import type { UnifiedStreamDelta } from "./types";
@@ -51,6 +52,19 @@ const anthropicConfig: VendorConfig = {
   explicitTransport: "anthropic",
 };
 
+const responsesCapability: ProviderCapability = {
+  ...openAICapability,
+  transport: "responses",
+};
+
+const responsesConfig: VendorConfig = {
+  provider: "OpenAI",
+  baseUrl: "https://api.openai.com/v1",
+  model: "model-test",
+  apiKey: "sk-test",
+  explicitTransport: "responses",
+};
+
 async function* iterableOf(...values: unknown[]): AsyncIterable<unknown> {
   for (const value of values) yield value;
 }
@@ -80,6 +94,7 @@ describe("streamChatWithSdk", () => {
           },
         );
       },
+      responses: unusedFactory,
       anthropic: unusedFactory,
     };
 
@@ -112,11 +127,50 @@ describe("streamChatWithSdk", () => {
     });
   });
 
+  it("promotes leading <think> content from text deltas into reasoning without leaking it into the answer", async () => {
+    const adapter = new OpenAICompatAdapter("chatgpt", openAICapability);
+    const seen: UnifiedStreamDelta[] = [];
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: async () => iterableOf(
+        { choices: [{ delta: { content: "<thi" }, finish_reason: null }] },
+        { choices: [{ delta: { content: "nk>先检查项目" }, finish_reason: null }] },
+        { choices: [{ delta: { content: "结构</think>找到结果" }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+      ),
+      responses: unusedFactory,
+      anthropic: unusedFactory,
+    };
+
+    const response = await streamChatWithSdk({
+      adapter,
+      request,
+      config: openAIConfig,
+      timeoutMs: 1_000,
+      onDelta: (delta) => seen.push(delta),
+    }, deps);
+
+    expect(seen
+      .filter((delta) => delta.type === "reasoning_delta")
+      .map((delta) => delta.delta)
+      .join(""))
+      .toBe("先检查项目结构");
+    expect(seen
+      .filter((delta) => delta.type === "text_delta")
+      .map((delta) => delta.delta)
+      .join(""))
+      .toBe("找到结果");
+    expect(response).toMatchObject({
+      text: "找到结果",
+      thinking: "先检查项目结构",
+    });
+  });
+
   it("delivers Anthropic raw deltas before asking the SDK for finalMessage", async () => {
     const adapter = new AnthropicAdapter("claude", anthropicCapability);
     const order: string[] = [];
     const deps: SdkStreamRuntimeDeps = {
       openAI: unusedFactory,
+      responses: unusedFactory,
       anthropic: async () => ({
         events: iterableOf(
           { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
@@ -159,6 +213,263 @@ describe("streamChatWithSdk", () => {
     ]);
   });
 
+  it("delivers each Anthropic text delta while the provider stream is still open", async () => {
+    const adapter = new AnthropicAdapter("claude", anthropicCapability);
+    let releaseSecondChunk!: () => void;
+    let releaseStreamEnd!: () => void;
+    const secondChunkGate = new Promise<void>((resolve) => { releaseSecondChunk = resolve; });
+    const streamEndGate = new Promise<void>((resolve) => { releaseStreamEnd = resolve; });
+    const seen: string[] = [];
+
+    async function* gatedEvents(): AsyncIterable<unknown> {
+      yield { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } };
+      yield { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "好的伙伴，" } };
+      await secondChunkGate;
+      yield { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "人家先去摸清这边项目的底，" } };
+      await streamEndGate;
+      yield { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "再决定怎么跑测试♪" } };
+      yield { type: "content_block_stop", index: 0 };
+      yield { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } };
+      yield { type: "message_stop" };
+    }
+
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: unusedFactory,
+      responses: unusedFactory,
+      anthropic: async () => ({
+        events: gatedEvents(),
+        finalMessage: async () => ({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 5, output_tokens: 3 },
+          content: [{ type: "text", text: "好的伙伴，人家先去摸清这边项目的底，再决定怎么跑测试♪" }],
+        }),
+      }),
+    };
+
+    const running = streamChatWithSdk({
+      adapter,
+      request,
+      config: anthropicConfig,
+      timeoutMs: 1_000,
+      onDelta: (delta) => {
+        if (delta.type === "text_delta") seen.push(delta.delta);
+      },
+    }, deps);
+
+    await vi.waitFor(() => expect(seen).toEqual(["好的伙伴，"]));
+    releaseSecondChunk();
+    await vi.waitFor(() => expect(seen).toEqual([
+      "好的伙伴，",
+      "人家先去摸清这边项目的底，",
+    ]));
+
+    releaseStreamEnd();
+    await running;
+    expect(seen).toEqual([
+      "好的伙伴，",
+      "人家先去摸清这边项目的底，",
+      "再决定怎么跑测试♪",
+    ]);
+  });
+
+  it("streams Responses deltas and attaches rawAssistant from the terminal event", async () => {
+    const adapter = new ResponsesAdapter("chatgpt", responsesCapability);
+    const seen: UnifiedStreamDelta[] = [];
+    let factoryInput: Parameters<SdkStreamRuntimeDeps["responses"]>[0] | undefined;
+    const output = [
+      { type: "reasoning", summary: [] },
+      { type: "message", content: [{ type: "output_text", text: "answer" }] },
+    ];
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: unusedFactory,
+      responses: async (input) => {
+        factoryInput = input;
+        return iterableOf(
+          { type: "response.reasoning_summary_text.delta", delta: "think" },
+          { type: "response.output_text.delta", delta: "answer" },
+          {
+            type: "response.completed",
+            response: { id: "resp_1", output, usage: { input_tokens: 5, output_tokens: 2 } },
+          },
+        );
+      },
+      anthropic: unusedFactory,
+    };
+
+    const response = await streamChatWithSdk({
+      adapter,
+      request,
+      config: responsesConfig,
+      timeoutMs: 1_000,
+      onDelta: (delta) => seen.push(delta),
+    }, deps);
+
+    expect(factoryInput?.body).toMatchObject({ model: "model-test", stream: true, store: false });
+    expect(factoryInput?.client).toMatchObject({
+      baseURL: "https://api.openai.com/v1",
+      apiKey: "sk-test",
+      maxRetries: 0,
+    });
+    expect(seen).toEqual([
+      { type: "reasoning_delta", delta: "think" },
+      { type: "text_delta", delta: "answer" },
+      { type: "usage", inputTokens: 5, outputTokens: 2 },
+      { type: "finish", reason: "stop" },
+    ]);
+    expect(response).toMatchObject({
+      text: "answer",
+      thinking: "think",
+      finishReason: "stop",
+      usage: { input: 5, output: 2 },
+    });
+    expect(response.assistantMessage.rawAssistant).toEqual(output);
+  });
+
+  it("captures response.incomplete as a terminal event (max_output_tokens → length)", async () => {
+    const adapter = new ResponsesAdapter("chatgpt", responsesCapability);
+    const output = [{ type: "message", content: [{ type: "output_text", text: "partial" }] }];
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: unusedFactory,
+      responses: async () => iterableOf(
+        { type: "response.output_text.delta", delta: "partial" },
+        {
+          type: "response.incomplete",
+          response: {
+            output,
+            incomplete_details: { reason: "max_output_tokens" },
+            usage: { input_tokens: 3, output_tokens: 1 },
+          },
+        },
+      ),
+      anthropic: unusedFactory,
+    };
+
+    const response = await streamChatWithSdk({
+      adapter,
+      request,
+      config: responsesConfig,
+      timeoutMs: 1_000,
+    }, deps);
+
+    expect(response).toMatchObject({ text: "partial", finishReason: "length", usage: { input: 3, output: 1 } });
+    expect(response.assistantMessage.rawAssistant).toEqual(output);
+  });
+
+  it("fails the Responses stream when it ends without a terminal event", async () => {
+    const adapter = new ResponsesAdapter("chatgpt", responsesCapability);
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: unusedFactory,
+      responses: async () => iterableOf(
+        { type: "response.output_text.delta", delta: "partial" },
+      ),
+      anthropic: unusedFactory,
+    };
+
+    await expect(streamChatWithSdk({
+      adapter,
+      request,
+      config: responsesConfig,
+      timeoutMs: 1_000,
+    }, deps)).rejects.toMatchObject({
+      code: "E_MODEL_RESPONSE_PARSE_FAILED",
+      message: expect.stringContaining("未收到终态事件"),
+    });
+  });
+
+  it("fails when a Responses terminal event has no output array", async () => {
+    const adapter = new ResponsesAdapter("chatgpt", responsesCapability);
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: unusedFactory,
+      responses: async () => iterableOf({ type: "response.completed", response: { id: "resp_1" } }),
+      anthropic: unusedFactory,
+    };
+
+    await expect(streamChatWithSdk({
+      adapter,
+      request,
+      config: responsesConfig,
+      timeoutMs: 1_000,
+    }, deps)).rejects.toMatchObject({
+      code: "E_MODEL_RESPONSE_PARSE_FAILED",
+      message: expect.stringContaining("缺少 output 项"),
+    });
+  });
+
+  it("closes unclosed Responses tool calls on finish and replays them via rawAssistant", async () => {
+    const adapter = new ResponsesAdapter("chatgpt", responsesCapability);
+    const output = [
+      { type: "function_call", call_id: "call_1", name: "get_weather", arguments: '{"city":"BJ"}' },
+    ];
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: unusedFactory,
+      responses: async () => iterableOf(
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "function_call", call_id: "call_1", name: "get_weather", arguments: "" },
+        },
+        { type: "response.function_call_arguments.delta", output_index: 0, delta: '{"city"' },
+        { type: "response.function_call_arguments.delta", output_index: 0, delta: ':"BJ"}' },
+        {
+          type: "response.completed",
+          response: { output, usage: { input_tokens: 8, output_tokens: 4 } },
+        },
+      ),
+      anthropic: unusedFactory,
+    };
+
+    const response = await streamChatWithSdk({
+      adapter,
+      request,
+      config: responsesConfig,
+      timeoutMs: 1_000,
+    }, deps);
+
+    expect(response.toolCalls).toEqual([
+      { id: "call_1", name: "get_weather", arguments: '{"city":"BJ"}' },
+    ]);
+    expect(response.assistantMessage.rawAssistant).toEqual(output);
+  });
+
+  it("does not create a request deadline when timeoutMs is zero", async () => {
+    vi.useFakeTimers();
+    const adapter = new OpenAICompatAdapter("chatgpt", openAICapability);
+    const deps: SdkStreamRuntimeDeps = {
+      openAI: async () => ({
+        [Symbol.asyncIterator]() {
+          let sent = false;
+          return {
+            next: () => new Promise<IteratorResult<unknown>>((resolve) => {
+              setTimeout(() => {
+                if (sent) resolve({ done: true, value: undefined });
+                else {
+                  sent = true;
+                  resolve({
+                    done: false,
+                    value: { choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] },
+                  });
+                }
+              }, 10);
+            }),
+          };
+        },
+      }),
+      responses: unusedFactory,
+      anthropic: unusedFactory,
+    };
+
+    const pending = streamChatWithSdk({
+      adapter,
+      request,
+      config: openAIConfig,
+      timeoutMs: 0,
+    }, deps);
+
+    await vi.advanceTimersByTimeAsync(20);
+
+    await expect(pending).resolves.toMatchObject({ text: "ok" });
+  });
+
   it("turns only the runtime-owned deadline into E_MODEL_REQUEST_TIMEOUT", async () => {
     vi.useFakeTimers();
     const adapter = new OpenAICompatAdapter("chatgpt", openAICapability);
@@ -176,6 +487,7 @@ describe("streamChatWithSdk", () => {
           },
         };
       },
+      responses: unusedFactory,
       anthropic: unusedFactory,
     };
     const pending = streamChatWithSdk({
@@ -215,6 +527,7 @@ describe("streamChatWithSdk", () => {
           },
         };
       },
+      responses: unusedFactory,
       anthropic: unusedFactory,
     };
     const pending = streamChatWithSdk({
@@ -240,6 +553,7 @@ describe("streamChatWithSdk", () => {
         capturedSignal = signal;
         return iterableOf({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] });
       },
+      responses: unusedFactory,
       anthropic: unusedFactory,
     };
 

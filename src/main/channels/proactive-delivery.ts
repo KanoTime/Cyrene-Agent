@@ -1,6 +1,10 @@
 import { normalizeMobileMessageSegmentationMode, type MobileMessageSegmentationMode } from "../../shared/preferences";
 import { splitTextBySentenceBreaks } from "../../shared/message-segmentation";
 import type { ChannelManager } from "./manager";
+import {
+  createChannelDeliveryService,
+  type ChannelDeliveryService,
+} from "./delivery-service";
 import { appendHistory as appendChannelHistory } from "./history-log";
 import { appendLog as appendChannelLog, type LogEntry } from "./message-log";
 import type {
@@ -11,6 +15,9 @@ import type {
 } from "./types";
 
 export type ProactiveMobileChannel = Extract<ChannelId, "wechat" | "feishu">;
+
+// External channel delivery remains legacy until Task 11; CTA local intent
+// persistence must not be presented as channel exactly-once delivery.
 
 export interface RecentProactiveChannelRecipient {
   targetId: string;
@@ -33,6 +40,7 @@ export function createProactiveChannelRecipientRegistry(): ProactiveChannelRecip
   const wechatRecipients = new Map<string, RecentProactiveChannelRecipient>();
   return {
     remember(message, sessionId): void {
+      if (message.channel !== "wechat" && message.channel !== "feishu") return;
       const targetId = message.chatId.trim();
       if (!targetId || !sessionId) return;
       const recipient: RecentProactiveChannelRecipient = {
@@ -89,6 +97,7 @@ interface ProactiveChannelDeliveryInput {
   text: string;
   mobileMessageSegmentation: MobileMessageSegmentationMode;
   manager: Pick<ChannelManager, "getAdapter">;
+  delivery?: ChannelDeliveryService;
   recipientRegistry?: ProactiveChannelRecipientRegistry;
   appendHistory?: typeof appendChannelHistory;
   appendLog?: (entry: Omit<LogEntry, "at">) => void;
@@ -117,6 +126,7 @@ export async function sendProactiveChannelMessage(
       return { kind: "cancelled", reason: "recipient_unavailable" };
     }
   }
+  const delivery = input.delivery ?? createChannelDeliveryService(input.manager);
 
   const mode = normalizeMobileMessageSegmentationMode(input.mobileMessageSegmentation);
   const texts = mode === "on" ? splitTextBySentenceBreaks(input.text) : [input.text.trim()].filter(Boolean);
@@ -136,13 +146,9 @@ export async function sendProactiveChannelMessage(
       ...(recipient.threadId ? { threadId: recipient.threadId } : {}),
       parts: [{ kind: "text", text }],
     };
-    try {
-      const result = await adapter.send(message);
-      if (!result.ok) break;
-      deliveredTexts.push(text);
-    } catch {
-      break;
-    }
+    const result = await delivery.send(message);
+    if (!result.ok) break;
+    deliveredTexts.push(text);
   }
 
   if (deliveredTexts.length === 0) return { kind: "cancelled", reason: "send_failed" };

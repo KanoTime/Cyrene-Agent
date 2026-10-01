@@ -1,12 +1,12 @@
 import { stripLeakedChatTimeContext } from "../chat-time-context";
 import { ChatTimeStreamPrefixFilter } from "../chat-time-stream-filter";
-import { recordUsage } from "../token-usage-store";
+import { recordUsage, recordRequest } from "../token-usage-store";
 import { AgentRuntimeError } from "./agent-runtime-error";
 import type {
   AgentLoopSettings,
-  TwoPhaseEvent,
-  TwoPhaseFcResult,
-} from "./two-phase-fc-loop";
+  AgentLoopEvent,
+  AgentLoopResult,
+} from "./cyrene-agent";
 import type {
   ChatMessage,
   ChatRequest,
@@ -14,26 +14,41 @@ import type {
   ChatResponse,
   VendorConfig,
 } from "./vendors/types";
-import { createSseReader } from "./vendors";
+import type { ModelRetryStatus } from "../../shared/model-retry";
+import { streamChatWithSdk } from "./vendors/sdk-stream/runtime";
+import { classifyModelFailure } from "./vendors/model-error-classifier";
+import { runModelRequestWithRetry, type ModelRetryAttemptInput } from "./vendors/model-retry-runner";
+import { readRetryAfterMs } from "./vendors/model-retry-policy";
+import type { UnifiedStreamDelta } from "./vendors/sdk-stream/types";
 import type { ApprovedStyleSampling } from "./vendors/style-sampling";
 import { getTimeoutSettings } from "../timeout-manager";
-import { compressConversation } from "./context-manager";
+import { resolveModelRequestTimeoutMs } from "./config/model-timeout";
+import { buildContextUsageSnapshot } from "./context-usage";
+import { isExplicitStreamUnsupported } from "./vendors/stream-support";
+import { composePromptLayers } from "./prompt-layers";
+import type { TranscriptSink } from "./transcript-sink";
 
 export interface ChatLoopOptions {
   settings: AgentLoopSettings;
   adapter: ChatVendorAdapter;
   messages: ChatMessage[];
   soulSystemBaseContent: string;
+  /** 每次请求才注入的本轮上下文，不能写回对话历史或稳定前缀。 */
+  runtimeContext?: string;
   soulSampling?: ApprovedStyleSampling;
   timeoutMs: number;
   imageCaptionFallback?: () => Promise<ChatMessage[]>;
-  onEvent?: (event: TwoPhaseEvent) => void;
-  recordUsage?: (input: number, output: number, calls: number) => void;
+  onEvent?: (event: AgentLoopEvent) => void;
+  recordUsage?: (input: number, output: number, calls: number, cachedInput?: number, cacheCreation?: number) => void;
   signal?: AbortSignal;
   /** 非流式降级时的展示节奏；测试可设为 0，生产默认 20ms。 */
   fallbackRevealIntervalMs?: number;
-  /** 当前对话模式，用于上下文压缩保留的最近轮数。 */
+  /** 默认使用官方 SDK；测试可注入可控流实现。 */
+  streamChat?: typeof streamChatWithSdk;
+  /** 当前对话模式：composePromptLayers 按模式选择提示词层组合。 */
   mode?: string;
+  /** 权威轨迹提交端：canonical assistant 落盘（CTA Phase 1）。 */
+  transcriptSink?: TranscriptSink;
 }
 
 class StreamUnavailableError extends Error {
@@ -41,11 +56,6 @@ class StreamUnavailableError extends Error {
     super(message, options);
     this.name = "StreamUnavailableError";
   }
-}
-
-function explicitlyRejectsStreaming(status: number, body: string): boolean {
-  if (status !== 400 && status !== 422) return false;
-  return /(?:stream(?:ing)?[^\r\n]{0,40}(?:not supported|unsupported|must be false|disabled|unavailable)|(?:not supported|unsupported)[^\r\n]{0,40}stream(?:ing)?|only non[- ]?stream|不支持.{0,12}流式|流式.{0,12}不支持)/i.test(body);
 }
 
 function waitForReveal(ms: number, signal?: AbortSignal): Promise<void> {
@@ -94,30 +104,40 @@ function stripToolProtocol(text: string): string {
     .trim();
 }
 
-function withSoulSystem(messages: ChatMessage[], system: string): ChatMessage[] {
-  if (messages[0]?.role === "system") return messages;
-  return [{ role: "system", content: system }, ...messages];
-}
-
-export async function runChatLoop(options: ChatLoopOptions): Promise<TwoPhaseFcResult> {
+export async function runChatLoop(options: ChatLoopOptions): Promise<AgentLoopResult> {
   const startedAt = Date.now();
-  const usageRecorder = options.recordUsage ?? ((input, output, calls) => recordUsage(input, output, calls));
+  const usageRecorder = options.recordUsage ?? ((input, output, calls, cachedInput, cacheCreation) => recordUsage(input, output, calls, cachedInput, options.settings.model, cacheCreation));
   let usedImageCaptionFallback = false;
 
-  const messages = await compressConversation({
-    messages: options.messages,
-    adapter: options.adapter,
-    settings: options.settings,
-    systemContent: options.soulSystemBaseContent,
-    mode: options.mode,
-    onEvent: options.onEvent,
-    signal: options.signal,
-  });
+  const messages = options.messages;
+
+  // 上下文容量快照（preRequest）：请求前。
+  // 消息即实际请求所用的历史（超预算压缩已在 buildAgentRunOptions 阶段
+  // 由 transcript 压缩链路完成，产出直接进入 options.messages），
+  // 不含 composePromptLayers 追加的 runtime_context 尾部（不变量），
+  // runtimeContext 由独立参数计量，避免双重计数。
+  const emitContextUsage = (phase: "preRequest" | "terminal", extraAssistantReply?: string): void => {
+    options.onEvent?.({
+      type: "context_usage",
+      contextUsage: buildContextUsageSnapshot({
+        phase,
+        contextWindowTokens: options.settings.contextWindowTokens,
+        personaContent: options.soulSystemBaseContent,
+        ...(options.runtimeContext ? { runtimeContext: options.runtimeContext } : {}),
+        ...(extraAssistantReply !== undefined
+          ? { messages: [...messages, { role: "assistant" as const, content: extraAssistantReply }] }
+          : { messages }),
+      }),
+    });
+  };
+  emitContextUsage("preRequest");
 
   const timeout = getTimeoutSettings().chatRequestTimeout;
 
   const remainingBudget = (): number => {
     if (options.signal?.aborted) throw new Error("E_SOUL_ONLY_CANCELLED");
+    // 0 表示没有整轮预算；单次请求仍使用局部请求超时。
+    if (options.timeoutMs <= 0 || !Number.isFinite(options.timeoutMs)) return timeout;
     const remaining = options.timeoutMs - (Date.now() - startedAt);
     if (remaining <= 0) throw new Error("E_SOUL_ONLY_TIMEOUT");
     return Math.max(1, Math.min(timeout, remaining));
@@ -130,16 +150,21 @@ export async function runChatLoop(options: ChatLoopOptions): Promise<TwoPhaseFcR
     apiKey: options.settings.apiKey,
     explicitTransport: options.settings.explicitTransport,
     reasoning: options.settings.reasoning,
+    manualReasoning: options.settings.manualReasoning,
   };
 
   const buildRequest = (reqMessages: ChatMessage[], stream: boolean): ChatRequest => ({
     model: options.settings.model,
-    messages: withSoulSystem(reqMessages, options.soulSystemBaseContent),
+    ...composePromptLayers({
+      stablePrefix: options.soulSystemBaseContent,
+      runtimeContext: options.runtimeContext,
+      mode: options.mode,
+    }, reqMessages),
     stream,
     ...(options.soulSampling ?? {}),
   });
 
-  const invokeNonStreaming = async (messages: ChatMessage[]): Promise<ChatResponse> => {
+  const invokeNonStreaming = async (messages: ChatMessage[], signal: AbortSignal): Promise<ChatResponse> => {
     const request: ChatRequest = {
       ...buildRequest(messages, false),
     };
@@ -147,26 +172,46 @@ export async function runChatLoop(options: ChatLoopOptions): Promise<TwoPhaseFcR
     const http = options.adapter.buildRequest(effectiveRequest, options.settings);
     const controller = new AbortController();
     const abort = () => controller.abort();
-    options.signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, remainingBudget());
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; abort(); }, remainingBudget());
     try {
-      const response = await fetch(http.url, {
-        method: "POST",
-        headers: http.headers,
-        body: http.body,
-        signal: controller.signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch(http.url, {
+          method: "POST",
+          headers: http.headers,
+          body: http.body,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        const failure = classifyModelFailure({ provider: options.adapter.id, model: effectiveRequest.model, error });
+        throw new AgentRuntimeError("E_MODEL_REQUEST_FAILED", "模型服务请求失败。", {
+          cause: error,
+          modelFailure: { ...failure, category: timedOut ? "TIMEOUT" : failure.category === "UNKNOWN" ? "NETWORK" : failure.category },
+        });
+      }
       if (!response.ok) {
         const body = await response.text().catch(() => "");
+        // [image-send] 链路日志④：服务端拒绝时打印完整错误体（Anthropic 400 会带具体 reason）。
+        console.error(`[image-send] ChatLoop 请求被拒 HTTP ${response.status}:`, body.slice(0, 500) || "(无响应体)");
+        let errorPayload: unknown;
+        try { errorPayload = JSON.parse(body); } catch { errorPayload = undefined; }
         throw new AgentRuntimeError(
           "E_MODEL_REQUEST_FAILED",
-          `模型请求失败：HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`,
+          `模型请求失败：HTTP ${response.status}`,
+          {
+            modelFailure: classifyModelFailure({ provider: options.adapter.id, model: effectiveRequest.model, status: response.status, error: errorPayload }),
+            retryAfterMs: readRetryAfterMs(response.headers),
+          },
         );
       }
       return options.adapter.parseResponse(await response.json());
     } finally {
       clearTimeout(timer);
-      options.signal?.removeEventListener("abort", abort);
+      signal.removeEventListener("abort", abort);
     }
   };
 
@@ -200,132 +245,120 @@ export async function runChatLoop(options: ChatLoopOptions): Promise<TwoPhaseFcR
     options.onEvent?.({ type: "text_message_end", messageId });
   };
 
-  const invokeStreaming = async (messages: ChatMessage[]): Promise<{
-    text: string;
-    usage?: { input: number; output: number };
-    nonStreamingResponse?: ChatResponse;
+  const invokeStreaming = async (messages: ChatMessage[], attempt: ModelRetryAttemptInput): Promise<{
+    response: ChatResponse;
+    needsReveal: boolean;
   }> => {
     const request = buildRequest(messages, true);
     const effectiveRequest = options.adapter.applyCacheHints?.(request, vendorConfig) ?? request;
-    const http = options.adapter.buildStreamRequest(effectiveRequest, vendorConfig);
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    options.signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, remainingBudget());
-    try {
-      const response = await fetch(http.url, {
-        method: "POST",
-        headers: http.headers,
-        body: http.body,
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        const detail = `HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`;
-        if (explicitlyRejectsStreaming(response.status, body)) {
-          throw new StreamUnavailableError(`流式请求不受支持：${detail}`);
-        }
-        throw new AgentRuntimeError("E_MODEL_REQUEST_FAILED", `模型请求失败：${detail}`);
-      }
-
-      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-      if (contentType.includes("application/json")) {
-        return { text: "", nonStreamingResponse: options.adapter.parseResponse(await response.json()) };
-      }
-      if (!response.body) throw new AgentRuntimeError("E_MODEL_RESPONSE_PARSE_FAILED", "模型流式响应体为空");
-
-      let text = "";
-      const timePrefixFilter = new ChatTimeStreamPrefixFilter();
-      const emitTextDelta = (delta: string) => {
-        if (!delta) return;
-        text += delta;
+    const timePrefixFilter = new ChatTimeStreamPrefixFilter();
+    let text = "";
+    const emitTextDelta = (delta: string) => {
+      if (!delta) return;
+      text += delta;
+      emittedStreamContent = true;
+      attempt.onVisibleDelta();
+      startText();
+      options.onEvent?.({ type: "text_message_content", messageId, delta });
+    };
+    const onDelta = (delta: UnifiedStreamDelta) => {
+      attempt.onStreamActivity();
+      if (delta.type === "reasoning_delta" && delta.delta) {
         emittedStreamContent = true;
-        startText();
+        attempt.onVisibleDelta();
+        startReasoning();
         options.onEvent?.({
-          type: "text_message_content",
-          messageId,
-          delta,
+          type: "reasoning_message_content",
+          messageId: reasoningMessageId,
+          delta: delta.delta,
         });
-      };
-      let usage: { input: number; output: number } | undefined;
-      for await (const event of createSseReader(options.adapter, response.body)) {
-        const chunk = options.adapter.parseStreamEvent(event);
-        if (!chunk) continue;
-        if (chunk.error) {
-          throw new AgentRuntimeError("E_MODEL_REQUEST_FAILED", `模型流式响应错误：${chunk.error}`);
-        }
-        if (chunk.deltaThinking) {
-          emittedStreamContent = true;
-          startReasoning();
-          options.onEvent?.({
-            type: "reasoning_message_content",
-            messageId: reasoningMessageId,
-            delta: chunk.deltaThinking,
-          });
-        }
-        if (chunk.deltaText) {
-          emitTextDelta(timePrefixFilter.push(chunk.deltaText));
-        }
-        if (chunk.usage) {
-          usage = {
-            input: Math.max(usage?.input ?? 0, chunk.usage.input),
-            output: Math.max(usage?.output ?? 0, chunk.usage.output),
-          };
-        }
-        if (chunk.done) break;
+      } else if (delta.type === "text_delta" && delta.delta) {
+        emitTextDelta(timePrefixFilter.push(delta.delta));
       }
+    };
+    try {
+      const response = await (options.streamChat ?? streamChatWithSdk)({
+        adapter: options.adapter,
+        request: effectiveRequest,
+        config: vendorConfig,
+        timeoutMs: remainingBudget(),
+        signal: attempt.signal,
+        onDelta,
+      });
       emitTextDelta(timePrefixFilter.finish());
       if (!text.trim()) {
+        if (response.text.trim()) return { response, needsReveal: true };
         throw new AgentRuntimeError("E_MODEL_RESPONSE_PARSE_FAILED", "模型流式响应没有返回可见文本");
-      }
-      return { text, usage };
-    } catch (error) {
-      if (emittedStreamContent) throw error;
-      if (error instanceof StreamUnavailableError) throw error;
-      if (options.signal?.aborted) throw error;
-      throw error;
-    } finally {
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", abort);
-    }
-  };
-
-  const invokeWithStreamFallback = async (
-    messages: ChatMessage[],
-  ): Promise<{ response: ChatResponse; needsReveal: boolean }> => {
-    try {
-      const streamed = await invokeStreaming(messages);
-      if (streamed.nonStreamingResponse) {
-        return { response: streamed.nonStreamingResponse, needsReveal: true };
       }
       return {
         response: {
-          assistantMessage: { role: "assistant" as const, content: streamed.text },
-          text: streamed.text,
-          toolCalls: [],
-          finishReason: "stop",
-          raw: null,
-          usage: streamed.usage,
-        } satisfies ChatResponse,
+          ...response,
+          text,
+          assistantMessage: { ...response.assistantMessage, content: text },
+        },
         needsReveal: false,
       };
     } catch (error) {
-      if (!(error instanceof StreamUnavailableError) || emittedStreamContent) throw error;
-      return { response: await invokeNonStreaming(messages), needsReveal: true };
+      if (!emittedStreamContent && isExplicitStreamUnsupported(error)) {
+        throw new StreamUnavailableError("流式请求不受支持", { cause: error });
+      }
+      if (error instanceof AgentRuntimeError && error.modelFailure) throw error;
+      if (error instanceof Error && (error.message === "E_SOUL_ONLY_CANCELLED" || error.message === "E_SOUL_ONLY_TIMEOUT")) {
+        throw error;
+      }
+      const modelFailure = classifyModelFailure({ provider: options.adapter.id, model: effectiveRequest.model, error });
+      throw new AgentRuntimeError(
+        "E_MODEL_REQUEST_FAILED",
+        modelFailure.status ? `模型请求失败：HTTP ${modelFailure.status}` : "模型服务请求失败。",
+        {
+        cause: error,
+        modelFailure,
+        retryAfterMs: readRetryAfterMs(error),
+        },
+      );
     }
   };
+
+  let forceNonStreaming = false;
+  const invokeWithStreamFallback = async (messages: ChatMessage[], attempt: ModelRetryAttemptInput) => {
+    if (forceNonStreaming) {
+      return { response: await invokeNonStreaming(messages, attempt.signal), needsReveal: true };
+    }
+    try {
+      return await invokeStreaming(messages, attempt);
+    } catch (error) {
+      if (!(error instanceof StreamUnavailableError) || emittedStreamContent) throw error;
+      forceNonStreaming = true;
+      return { response: await invokeNonStreaming(messages, attempt.signal), needsReveal: true };
+    }
+  };
+
+  const invokeWithRetry = (messages: ChatMessage[]) => runModelRequestWithRetry(
+    (attempt) => invokeWithStreamFallback(messages, attempt),
+    {
+      provider: options.adapter.id,
+      model: options.settings.model,
+      maxRetries: options.settings.modelRequestMaxRetries ?? 5,
+      idleTimeoutMs: resolveModelRequestTimeoutMs(getTimeoutSettings()),
+      signal: options.signal,
+      getRemainingBudgetMs: remainingBudget,
+      onStatus: (status: ModelRetryStatus) => options.onEvent?.({ type: "model_retry", status }),
+    },
+  );
 
   options.onEvent?.({ type: "step_started", stepName: "chat" });
   try {
     let result;
     try {
-      result = await invokeWithStreamFallback(options.messages);
+      result = await invokeWithRetry(options.messages);
     } catch (error) {
-      if (emittedStreamContent || options.signal?.aborted || !options.imageCaptionFallback || usedImageCaptionFallback) {
+      const failure = error instanceof AgentRuntimeError ? error.modelFailure : undefined;
+      const canCaptionFallback = failure?.status === 400 && failure.category === "INVALID_REQUEST";
+      if (emittedStreamContent || options.signal?.aborted || !canCaptionFallback || !options.imageCaptionFallback || usedImageCaptionFallback) {
         throw error;
       }
       usedImageCaptionFallback = true;
-      result = await invokeWithStreamFallback(await options.imageCaptionFallback());
+      result = await invokeWithRetry(await options.imageCaptionFallback());
     }
 
     const response = result.response;
@@ -340,11 +373,22 @@ export async function runChatLoop(options: ChatLoopOptions): Promise<TwoPhaseFcR
       endReasoning();
     }
 
+    recordRequest(options.settings.model);
     if (response.usage) {
-      usageRecorder(response.usage.input, response.usage.output, 1);
+      usageRecorder(response.usage.input, response.usage.output, 1, response.usage.cachedInput, response.usage.cacheCreation);
     }
     const reply = stripLeakedChatTimeContext(stripToolProtocol(response.text))
       || "刚才没有生成正常回复，请再试一次。";
+    // 权威轨迹：归一化后的可见回复作为 canonical assistant 提交。
+    // 不从流式展示文本重建 rawAssistant / thinking / 厂商原始块，原样保留。
+    const canonicalAssistant: ChatMessage = {
+      ...response.assistantMessage,
+      role: "assistant",
+      content: reply,
+    };
+    await options.transcriptSink?.appendAssistant({ message: canonicalAssistant });
+    // 终态快照：把最终回复并入历史口径（与下一轮进入历史的文本一致）。
+    emitContextUsage("terminal", reply);
     if (result.needsReveal) {
       startText();
       await emitFallbackText(
@@ -360,7 +404,7 @@ export async function runChatLoop(options: ChatLoopOptions): Promise<TwoPhaseFcR
       reply,
       toolResults: [],
       totalUsage: response.usage,
-      soulPhaseReason: "no_tool",
+      completionReason: "no_tool",
     };
   } finally {
     endReasoning();

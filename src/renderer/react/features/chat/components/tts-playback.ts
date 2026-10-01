@@ -1,3 +1,4 @@
+import { t } from "../../../i18n";
 import type {
   StartTtsRequest,
   TtsSessionEvent,
@@ -47,7 +48,8 @@ interface StreamingPlayback {
   onCacheKey?: (cacheKey: string, converterVersion: string) => void;
   mediaSource: MediaSource;
   sourceBuffer: SourceBuffer | null;
-  queue: Uint8Array[];
+  // SourceBuffer.appendBuffer 要求 buffer 为 ArrayBuffer（TS 5.7 起泛型区分 ArrayBuffer/SharedArrayBuffer）
+  queue: Uint8Array<ArrayBuffer>[];
   queuedBytes: number;
   ended: boolean;
   started: boolean;
@@ -115,7 +117,7 @@ function createAudio(result: Extract<TtsStartResult, { status: "ready" }>, messa
   };
   audio.onerror = () => {
     if (currentAudio !== audio) return;
-    publish({ messageId, status: "error", error: "语音播放失败" });
+    publish({ messageId, status: "error", error: t("ttsPlayback.playbackFailed") });
   };
   return audio;
 }
@@ -140,7 +142,7 @@ function supportsStreamingPlayback(): boolean {
   return typeof MediaSource !== "undefined" && MediaSource.isTypeSupported("audio/mpeg");
 }
 
-function decodeBase64(base64: string): Uint8Array {
+function decodeBase64(base64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
 }
 
@@ -163,7 +165,7 @@ function flushStream(stream: StreamingPlayback): void {
     try {
       stream.sourceBuffer.appendBuffer(next);
     } catch (error) {
-      failStreamingPlayback(stream, error instanceof Error ? error.message : "流式音频写入失败");
+      failStreamingPlayback(stream, error instanceof Error ? error.message : t("ttsPlayback.streamWriteFailed"));
     }
     return;
   }
@@ -181,7 +183,7 @@ function beginStreamingPlayback(stream: StreamingPlayback): void {
   if (!audio || currentStream !== stream || stream.started) return;
   stream.started = true;
   void playAudio(audio, stream.messageId, stream.estimatedDurationMs).catch((error) => {
-    failStreamingPlayback(stream, error instanceof Error ? error.message : "流式语音播放失败");
+    failStreamingPlayback(stream, error instanceof Error ? error.message : t("ttsPlayback.streamPlaybackFailed"));
   });
 }
 
@@ -216,7 +218,7 @@ function prepareStreamingPlayback(
     browserApis().live2dSpeech?.stopMouth();
     publish({ messageId: stream.messageId, status: "completed" });
   };
-  audio.onerror = () => failStreamingPlayback(stream, "流式语音播放失败");
+  audio.onerror = () => failStreamingPlayback(stream, t("ttsPlayback.streamPlaybackFailed"));
   mediaSource.addEventListener("sourceopen", () => {
     if (currentStream !== stream || stream.fallbackActive) return;
     try {
@@ -230,7 +232,7 @@ function prepareStreamingPlayback(
       stream.sourceBuffer = sourceBuffer;
       flushStream(stream);
     } catch (error) {
-      failStreamingPlayback(stream, error instanceof Error ? error.message : "当前环境不支持流式音频");
+      failStreamingPlayback(stream, error instanceof Error ? error.message : t("ttsPlayback.streamUnsupported"));
     }
   }, { once: true });
   browserApis().live2dSpeech?.prepare();
@@ -244,7 +246,7 @@ function handleStreamingEvent(event: TtsSessionEvent): void {
     if (stream.fallbackActive) return;
     const chunk = decodeBase64(event.base64);
     if (stream.queuedBytes + chunk.byteLength > MAX_STREAM_QUEUE_BYTES) {
-      failStreamingPlayback(stream, "流式音频缓冲超过 12MB，已停止播放");
+      failStreamingPlayback(stream, t("ttsPlayback.streamBufferOverflow"));
       return;
     }
     stream.queue.push(chunk);
@@ -311,7 +313,7 @@ export function stopTtsPlayback(): void {
 export async function startTtsPlayback(request: TtsPlaybackRequest): Promise<void> {
   const api = browserApis().tts;
   if (!api) {
-    if (!request.automatic) publish({ messageId: request.messageId, status: "error", error: "TTS 服务尚未就绪" });
+    if (!request.automatic) publish({ messageId: request.messageId, status: "error", error: t("ttsPlayback.serviceNotReady") });
     return;
   }
 
@@ -323,7 +325,7 @@ export async function startTtsPlayback(request: TtsPlaybackRequest): Promise<voi
     preferredAddress: request.preferredAddress,
   });
   if (!speech.text) {
-    if (!request.automatic) publish({ messageId: request.messageId, status: "error", error: "这条消息没有可朗读的内容" });
+    if (!request.automatic) publish({ messageId: request.messageId, status: "error", error: t("ttsPlayback.noReadableContent") });
     return;
   }
   currentRequestId = requestId;

@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { useTranslation } from "../../../i18n";
 
 interface CopyButtonProps {
   /** 要复制的文本 */
@@ -9,7 +10,9 @@ interface CopyButtonProps {
   color?: string;
 }
 
-async function copyTextToClipboard(text: string): Promise<boolean> {
+/** 复制文本到剪贴板：优先 navigator.clipboard，权限被拒时回落到隐藏 textarea + execCommand。
+ *  供消息复制按钮与文件卡片右键菜单等共用。 */
+export async function copyTextToClipboard(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
@@ -38,6 +41,7 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
 }
 
 export function CopyButton({ text, size = 16, color = "#8e8e93" }: CopyButtonProps) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -55,8 +59,8 @@ export function CopyButton({ text, size = 16, color = "#8e8e93" }: CopyButtonPro
       type="button"
       className="cy-copy-button"
       onClick={handleClick}
-      aria-label="复制"
-      title="复制"
+      aria-label={t("common.copy")}
+      title={t("common.copy")}
       style={{
         position: "relative",
         width: size,

@@ -1,29 +1,25 @@
 import type { BrowserWindow } from "electron";
 import { IPC } from "../../shared/ipc-channels";
 import type { GeneralSettings } from "../settings/general-settings";
-import { loadModelSettings } from "../settings/model-settings";
+import { loadModelSettings, resolveModelSettingsProfile } from "../settings/model-settings";
 import { loadUserProfile } from "../settings-store";
 import {
-  setDelegateSettings,
   setSearchConfig,
   setUserTimezoneConfig,
   setWeatherConfig,
-} from "../orchestrator/built-in-tools";
-import { setEmailConfig } from "../orchestrator/email-tools";
-import { setTravelConfig } from "../orchestrator/travel-tools";
-import { toolRegistry } from "../orchestrator/tool-registry";
+} from "../orchestrator/tools/built-in-tools";
+import { setEmailConfig } from "../orchestrator/tools/email-tools";
+import { setTravelConfig } from "../orchestrator/tools/travel-tools";
+import { toolRegistry } from "../orchestrator/tools/registry/tool-registry";
 import { resolveVendorRuntimeSettings, setVendorRuntimeSettingsGetter } from "../orchestrator/vendors/runtime-settings";
-import { setChoiceCardSender } from "../user-choice";
-import { setAsrConfig } from "../asr/volcano-asr-engine";
+import { setChoiceCardSender, setChoiceDismissSender } from "../user-choice";
+import { setAsrConfig } from "../asr/asr-config";
 import { setCallSettings } from "../call/call-manager";
 import { buildCallSystemPrompt } from "../call/call-prompt-builder";
-import type { SceneIndex } from "../scene-embedder";
 import { reactChatWindow } from "../windows/window-state";
 
 export interface BootstrapConfigContext {
   loadGeneralSettings: () => GeneralSettings;
-  /** 场景嵌入索引 getter，用于通话语气注入。 */
-  getSceneEmbeddingIndex: () => SceneIndex | null;
 }
 
 function getReactChatWindow(): BrowserWindow | null {
@@ -49,13 +45,16 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
     () => loadGeneralSettings().weatherSource,
     () => loadGeneralSettings().amapKey,
     // 天气卡片回调：工具拿到结构化数据后，发 Custom 事件给 react 聊天窗口渲染卡片
-    (card) => {
+    (card, context) => {
       const win = getReactChatWindow();
       if (win) {
         win.webContents.send(IPC.AGUI_EVENT, {
           type: "CUSTOM",
           name: "cyrene.weather",
           value: card,
+          // 天气工具在 Harness 内执行时必须归属到该 run；否则 renderer 的
+          // RunEventGate 会把没有 runId 的卡片事件当作串会话事件丢弃。
+          ...(context?.runId ? { runId: context.runId } : {}),
         });
       }
     },
@@ -73,6 +72,19 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
         type: "CUSTOM",
         name: "cyrene.choice",
         value: cardData,
+      });
+    }
+  });
+
+  // 注入选择卡结算回调：老版 requestUserChoice 超时结算时通知渲染端清卡，
+  // 避免留下「点了没反应」的僵尸卡（与澄清卡的 cyrene.choice.dismiss 同机制）。
+  setChoiceDismissSender((settlement) => {
+    const win = getReactChatWindow();
+    if (win) {
+      win.webContents.send(IPC.AGUI_EVENT, {
+        type: "CUSTOM",
+        name: "cyrene.choice.dismiss",
+        value: settlement,
       });
     }
   });
@@ -102,7 +114,16 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
   // 注入 ASR 配置获取器（通话功能用，实时读 GeneralSettings）
   setAsrConfig(() => {
     const s = loadGeneralSettings();
-    if (s.asrEngine === "off") return null;
+    if (s.asrEngine === "mossland") {
+      return { engine: "mossland", apiKey: s.ttsMosslandKey };
+    }
+    if (s.asrEngine === "minimax") {
+      return { engine: "minimax", apiKey: s.asrMinimaxKey };
+    }
+    if (s.asrEngine === "aliyun") {
+      return { engine: "aliyun", appKey: s.asrAliyunAppKey, accessKeyId: s.asrAliyunAccessKeyId, accessKeySecret: s.asrAliyunAccessKeySecret, language: s.asrLanguage };
+    }
+    if (s.asrEngine !== "local") return null;
     return {
       engine: s.asrEngine,
       language: s.asrLanguage,
@@ -114,13 +135,16 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
       localTimeoutMs: s.asrLocalTimeoutMs,
       localSystemPrompt: s.asrLocalSystemPrompt,
     };
+
   });
 
   // 注入通话模型/TTS 配置获取器
+  // 模型 getter 必须先展开默认档案再取字段：顶层镜像可能指向空壳 provider
+  // （用户只在档案里配了模型），直接读会导致通话报"模型配置缺失"（与 channel bot 读到顶层空壳镜像同病根）。
   setCallSettings(
     () => {
-      const s = loadModelSettings();
-      return { provider: s.provider, baseUrl: s.baseUrl, model: s.model, apiKey: s.apiKey };
+      const s = resolveModelSettingsProfile(loadModelSettings());
+      return { provider: s.provider, baseUrl: s.baseUrl, model: s.model, apiKey: s.apiKey, explicitTransport: s.explicitTransport };
     },
     () => {
       const s = loadGeneralSettings();
@@ -150,11 +174,7 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
     // 通话专用 system prompt 构建器
     async (userText: string) => {
       const messages = [{ role: "user" as const, content: userText }];
-      return buildCallSystemPrompt(
-        { sceneEmbeddingIndex: ctx.getSceneEmbeddingIndex() },
-        userText,
-        messages,
-      );
+      return buildCallSystemPrompt(userText, messages);
     },
     // 天气快捷处理：正则匹配到天气关键词 → 调 weather 工具的 execute
     async (userText: string) => {
@@ -173,9 +193,4 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
     },
   );
 
-  // 注入子代理 LLM 配置（delegate_task 工具用，复用主模型配置）
-  setDelegateSettings(() => {
-    const s = loadModelSettings();
-    return { provider: s.provider, baseUrl: s.baseUrl, model: s.model, apiKey: s.apiKey, contextWindowTokens: s.contextWindowTokens };
-  });
 }

@@ -105,12 +105,14 @@ describe("Character State Root store integration", () => {
       channel: "desktop",
     });
     const { JsonVectorStore } = await import("../rag/vectorstore");
-    new JsonVectorStore(cyrene.ragRoot).addPreparedBatch([{
+    const initialVectors = new JsonVectorStore(cyrene.ragRoot);
+    initialVectors.addPreparedBatch([{
       text: "昔涟秘密：蓝色月桂",
       source: "user_memory",
       embedding: [1, 0],
     }]);
 
+    await initialVectors.flush();
     const lumen = await configureFor("fixture.lumen");
     const lumenChats = await import("../chats/chats-store");
     lumenChats.initialize();
@@ -154,7 +156,7 @@ describe("Character State Root store integration", () => {
       .not.toContain("蓝色月桂");
   });
 
-  it("keeps explicit profile, todos and scheduled tasks readable after changing characters", async () => {
+  it("keeps explicit profile and scheduled tasks readable after changing characters", async () => {
     const configureFor = async (characterId: string) => {
       vi.resetModules();
       const state = await import("./character-state");
@@ -164,11 +166,10 @@ describe("Character State Root store integration", () => {
 
     const cyreneGlobal = await configureFor("cyrene");
     fs.writeFileSync(cyreneGlobal.profileFile, JSON.stringify({ nickname: "Kano", timezone: "Asia/Shanghai" }), "utf8");
-    const cyreneTodos = await import("../orchestrator/todo-store");
-    cyreneTodos.setTodos("work", [{ id: "global-todo", content: "检查角色包", status: "pending" }]);
     const cyreneScheduler = (await import("../scheduler/scheduler-store")).getSchedulerStore();
     cyreneScheduler.addTask({
       title: "全局提醒",
+      workspaceBinding: { workspaceRoot: userDataRoot, displayName: "fixture", boundAt: 1 },
       prompt: "提醒我检查角色包",
       enabled: true,
       schedule: { kind: "daily", timeOfDay: "09:30" },
@@ -179,9 +180,6 @@ describe("Character State Root store integration", () => {
     const lumenGlobal = await configureFor("fixture.lumen");
     expect(lumenGlobal).toEqual(cyreneGlobal);
     expect(JSON.parse(fs.readFileSync(lumenGlobal.profileFile, "utf8"))).toMatchObject({ nickname: "Kano" });
-    const lumenTodos = await import("../orchestrator/todo-store");
-    lumenTodos.loadTodos();
-    expect(lumenTodos.getTodos("work").todos[0]?.id).toBe("global-todo");
     const lumenScheduler = (await import("../scheduler/scheduler-store")).getSchedulerStore();
     lumenScheduler.load();
     expect(lumenScheduler.getTasks()[0]?.title).toBe("全局提醒");

@@ -1,5 +1,5 @@
-import { toolRegistry } from "../../../orchestrator/tool-registry";
-import type { ToolContext } from "../../../orchestrator/tool-context";
+import { toolRegistry } from "../../../orchestrator/tools/registry/tool-registry";
+import type { ToolContext } from "../../../orchestrator/tools/registry/tool-context";
 import type { ChannelConversationIdentity } from "../../types";
 import type { WechatChannelTask, WechatChannelTaskService } from "./wechat-channel-task-service";
 

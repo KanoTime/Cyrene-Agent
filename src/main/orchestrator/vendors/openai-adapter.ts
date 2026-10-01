@@ -6,12 +6,13 @@ import {
   TestConnectionResult, ToolCall, ToolExecutionResult, VendorConfig,
 } from "./types";
 import { authHeaderFor } from "./auth";
-import { resolveReasoningCapability } from "../../../shared/reasoning";
+import { applyManualReasoningBody, normalizeManualReasoningConfig, resolveConfiguredReasoningCapability } from "../../../shared/manual-reasoning";
 import { applyReasoningPreference } from "./reasoning";
 import { getTimeoutSettings } from "../../timeout-manager";
 import { resolveAutomaticToolChoicePolicy, resolveToolChoicePolicy } from "./tool-choice-policy";
 import { getVendorRuntimeSettings } from "./runtime-settings";
 import { resolveApiEndpoint } from "../../../shared/api-endpoint";
+import { buildStableCacheFingerprint } from "../prompt-layers";
 
 /** 把统一消息翻译成 OpenAI wire messages。 */
 function toWireMessages(messages: ChatMessage[]): unknown[] {
@@ -72,6 +73,10 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
       messages: toWireMessages(req.messages),
       stream: req.stream ?? false,
     };
+    // OpenAI 流式协议默认不返回 usage；显式开启 include_usage 让最后一个 chunk 带 usage。
+    if (req.stream) {
+      body.stream_options = { include_usage: true };
+    }
     // temperature 只在调用方显式传时才塞进 body。
     // 不传时让厂商用默认值——不同型号约束不同（如 Kimi k2.6 只允许 1），
     // 硬编码兜底值会在某些模型上报错。
@@ -85,31 +90,13 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
     const tools = toWireTools(req.tools);
     if (tools) {
       body.tools = tools;
-      if (req.toolChoiceOverride) {
-        // Action Gate 专用：直接指定 tool_choice wire 值，绕过 resolveToolChoicePolicy
-        switch (req.toolChoiceOverride.kind) {
-          case "named":
-            body.tool_choice = { type: "function", function: { name: req.toolChoiceOverride.toolName } };
-            break;
-          case "required":
-            body.tool_choice = "required";
-            break;
-          case "auto":
-            body.tool_choice = "auto";
-            break;
-          case "none":
-            body.tool_choice = "none";
-            break;
-          case "omit":
-            // 不发 tool_choice 字段
-            break;
-        }
-      } else if (req.toolChoiceIntent) {
+      if (req.toolChoiceIntent) {
         const policy = resolveToolChoicePolicy({
           providerId: this.capability.id,
           model: cfg.model,
           transport: this.transport,
           reasoning: cfg.reasoning ?? { mode: "auto" },
+          manualReasoning: cfg.manualReasoning,
           requestedToolName: req.toolChoiceIntent.toolName,
           supportedModes: this.capability.toolChoiceModes,
         });
@@ -121,6 +108,7 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
         model: cfg.model,
         transport: this.transport,
         reasoning: cfg.reasoning ?? { mode: "auto" },
+        manualReasoning: cfg.manualReasoning,
         supportedModes: this.capability.toolChoiceModes,
       }) === "auto") {
         body.tool_choice = "auto";
@@ -143,8 +131,9 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
       body.response_format = { type: "json_object" };
     }
     // 推理控制：按 (providerId, model) 解析 capability，调用 applyReasoningPreference 转换 body。
-    // cfg.reasoning 缺省视为 auto（不发送任何字段）。
-    const reasoningCap = resolveReasoningCapability(this.capability.id, cfg.model);
+    // cfg.reasoning 缺省视为旧 auto，由能力表解析为可调模型的默认档位。
+    const manualReasoning = normalizeManualReasoningConfig(cfg.manualReasoning);
+    const reasoningCap = resolveConfiguredReasoningCapability(this.capability.id, cfg.model, manualReasoning);
     const finalBody = applyReasoningPreference(
       body,
       cfg.reasoning ?? { mode: "auto" },
@@ -153,8 +142,10 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
         hasTools: Boolean(req.tools?.length),
         providerId: this.capability.id,
         model: cfg.model,
+        ignoreThinkingOverride: Boolean(manualReasoning),
       },
     );
+    const wireBody = applyManualReasoningBody(finalBody, manualReasoning, cfg.reasoning ?? { mode: "auto" });
     return {
       url: resolveApiEndpoint(cfg.baseUrl, "openai").url,
       method: "POST",
@@ -162,7 +153,7 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
         "Content-Type": "application/json",
         ...authHeaderFor(this.capability, cfg.apiKey, "openai"),
       },
-      body: JSON.stringify(finalBody),
+      body: JSON.stringify(wireBody),
     };
   }
 
@@ -178,7 +169,7 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
     if (jsonStr === "[DONE]") return { done: true };
     let parsed: {
       choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown; thinking?: unknown; reasoning?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
       error?: { message?: unknown };
     };
     try {
@@ -200,6 +191,9 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
       chunk.usage = {
         input: parsed.usage.prompt_tokens ?? 0,
         output: parsed.usage.completion_tokens ?? 0,
+        ...(typeof parsed.usage.prompt_tokens_details?.cached_tokens === "number"
+          ? { cachedInput: parsed.usage.prompt_tokens_details.cached_tokens }
+          : {}),
       };
     }
     // 暂不实现：if (Array.isArray(delta.tool_calls)) chunk.deltaToolCalls = ...
@@ -285,11 +279,22 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
     return next;
   }
 
-  // Kimi：多轮 Agent 强烈建议传 prompt_cache_key（命中后 usage.cached_tokens 体现）。
-  // v1 用"厂商+模型"稳定 key 缓存 system/工具定义；v2 可换成会话级 key。
+  // Kimi：cache key 只反映可缓存前缀和工具定义，绝不包含用户输入、Todo 或 runId。
   applyCacheHints(req: ChatRequest, _cfg: VendorConfig): ChatRequest {
     if (this.capability.cacheStrategy !== "prompt_cache_key") return req;
-    const extraBody = { ...(req.extraBody ?? {}), prompt_cache_key: `cyrene:${this.id}` };
+    const layers = req.promptLayers;
+    const fingerprint = layers
+      ? buildStableCacheFingerprint({
+          provider: this.id,
+          model: req.model,
+          mode: layers.mode,
+          promptVersion: layers.promptVersion,
+          stablePrefix: layers.stablePrefix,
+          sessionPrefix: layers.sessionPrefix,
+          tools: req.tools ?? [],
+        })
+      : "legacy";
+    const extraBody = { ...(req.extraBody ?? {}), prompt_cache_key: `cyrene:${this.id}:${fingerprint}` };
     return { ...req, extraBody };
   }
 

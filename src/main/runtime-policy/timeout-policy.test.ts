@@ -7,12 +7,12 @@ describe("resolveTimeoutPolicy", () => {
   it("returns original default values for all stages", () => {
     const cases: Array<[RuntimeTimeoutStage, number]> = [
       ["memory-llm", 30_000],
-      ["native-function-calling", 75_000],
       ["tool-execution", 300_000],
       ["tts-minimax", 30_000],
       ["tts-gptsovits", 180_000],
       ["tts-custom-cloud", 30_000],
       ["tts-mossland", 30_000],
+      ["asr-mossland", 30_000],
       ["external-http", 30_000],
       ["vision-caption", 30_000],
       ["call-management", 30_000],
@@ -62,12 +62,12 @@ describe("resolveTimeoutPolicy", () => {
   it("known stages are accepted at runtime", () => {
     const stages: RuntimeTimeoutStage[] = [
       "memory-llm",
-      "native-function-calling",
       "tool-execution",
       "tts-minimax",
       "tts-gptsovits",
       "tts-custom-cloud",
       "tts-mossland",
+      "asr-mossland",
       "external-http",
     ];
     for (const stage of stages) {
@@ -80,7 +80,6 @@ describe("getStageTimeoutPolicy", () => {
   it("returns the same object as resolveTimeoutPolicy without override", () => {
     const stages: RuntimeTimeoutStage[] = [
       "memory-llm",
-      "native-function-calling",
       "tts-minimax",
       "tts-gptsovits",
     ];
@@ -89,17 +88,6 @@ describe("getStageTimeoutPolicy", () => {
       const fromResolve = resolveTimeoutPolicy({ stage });
       expect(fromGet).toEqual(fromResolve);
     }
-  });
-});
-
-// Test 5: 真实调用点验证 resolver 的结果被使用
-describe("integration: resolver result is used by callers", () => {
-  it("function-calling PER_ROUND_TIMEOUT_MS uses the policy", async () => {
-    // Dynamically import to check the module-level constant
-    const mod = await import("../orchestrator/function-calling");
-    // We can't directly access PER_ROUND_TIMEOUT_MS, but we can verify
-    // the module loaded without error — meaning the resolver worked.
-    expect(mod.runFunctionCallingLoop).toBeDefined();
   });
 });
 

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
-import { AskUserPanel, PermissionPanel } from "./InteractionPanel";
+import { AskUserPanel, PermissionPanel, PlanApprovalPanel, PopQuizPanel } from "./InteractionPanel";
 import { resolveComposerSlot, type ComposerInteraction } from "./run-presentation";
+import type { PopQuizGradedQuestion, PopQuizSubmission } from "../../../../../shared/pop-quiz";
 import "./RunExperience.css";
 
 export function ComposerSlot({
@@ -10,6 +11,8 @@ export function ComposerSlot({
   onAnswer,
   onIgnore,
   onPermissionDecision,
+  onQuizSubmit,
+  onQuizSkip,
 }: {
   composer: ReactNode;
   interaction?: ComposerInteraction;
@@ -17,6 +20,8 @@ export function ComposerSlot({
   onAnswer?: (interactionId: string, answer: unknown) => void;
   onIgnore?: (interactionId: string) => void;
   onPermissionDecision?: (interactionId: string, allowed: boolean) => void;
+  onQuizSubmit?: (submission: PopQuizSubmission) => Promise<{ ok: boolean; error?: string; graded?: PopQuizGradedQuestion[] }>;
+  onQuizSkip?: (quizId: string) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const slot = resolveComposerSlot(interaction);
 
@@ -27,12 +32,20 @@ export function ComposerSlot({
       </div>
       {interaction?.kind === "ask" && (
         <div className="cy-composer-slot__interaction">
-          <AskUserPanel
-            interaction={interaction}
-            disabled={interactionBusy}
-            onAnswer={(answer) => onAnswer?.(interaction.id, answer)}
-            onIgnore={() => onIgnore?.(interaction.id)}
-          />
+          {interaction.cardMode === "plan_approval" ? (
+            <PlanApprovalPanel
+              interaction={interaction}
+              disabled={interactionBusy}
+              onAnswer={(answer) => onAnswer?.(interaction.id, answer)}
+            />
+          ) : (
+            <AskUserPanel
+              interaction={interaction}
+              disabled={interactionBusy}
+              onAnswer={(answer) => onAnswer?.(interaction.id, answer)}
+              onIgnore={() => onIgnore?.(interaction.id)}
+            />
+          )}
         </div>
       )}
       {interaction?.kind === "permission" && (
@@ -41,6 +54,16 @@ export function ComposerSlot({
             interaction={interaction}
             disabled={interactionBusy}
             onDecision={(allowed) => onPermissionDecision?.(interaction.id, allowed)}
+          />
+        </div>
+      )}
+      {interaction?.kind === "quiz" && (
+        <div className="cy-composer-slot__interaction">
+          <PopQuizPanel
+            interaction={interaction}
+            disabled={interactionBusy}
+            onSubmit={onQuizSubmit}
+            onSkip={onQuizSkip}
           />
         </div>
       )}

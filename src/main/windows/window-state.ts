@@ -14,26 +14,21 @@ import {
  * 配套的 setter 函数，避免 TS2632 编译错误与循环依赖。
  */
 export let reactChatWindow: BrowserWindow | null = null;
-export let sidebarWindow: BrowserWindow | null = null;
-export let tasksWindow: BrowserWindow | null = null;
-export let settingsWindow: BrowserWindow | null = null;
 export let stickerManagerWindow: BrowserWindow | null = null;
 export let callWindow: BrowserWindow | null = null;
+export let musicPlayerWindow: BrowserWindow | null = null;
+export let toastWindow: BrowserWindow | null = null;
 
 export function setReactChatWindow(win: BrowserWindow | null): void {
   reactChatWindow = win;
 }
 
-export function setSidebarWindow(win: BrowserWindow | null): void {
-  sidebarWindow = win;
+export function setToastWindow(win: BrowserWindow | null): void {
+  toastWindow = win;
 }
 
-export function setTasksWindow(win: BrowserWindow | null): void {
-  tasksWindow = win;
-}
-
-export function setSettingsWindow(win: BrowserWindow | null): void {
-  settingsWindow = win;
+export function setMusicPlayerWindow(win: BrowserWindow | null): void {
+  musicPlayerWindow = win;
 }
 
 export function setStickerManagerWindow(win: BrowserWindow | null): void {
@@ -42,6 +37,36 @@ export function setStickerManagerWindow(win: BrowserWindow | null): void {
 
 export function setCallWindowLocal(win: BrowserWindow | null): void {
   callWindow = win;
+}
+
+// 启动阶段控制：在 app startup 完成前，新创建的辅助窗口先不 show，
+// 等主进程发送 STARTUP_READY 后再统一显示，制造“加载完再出现窗口”的效果。
+let startupPhaseActive = true;
+let startupPhaseReady = false;
+const pendingShowWindows = new Set<BrowserWindow>();
+
+export function isStartupPhaseActive(): boolean {
+  return startupPhaseActive;
+}
+
+export function markStartupPhaseReady(): void {
+  if (startupPhaseReady) return;
+  startupPhaseReady = true;
+  startupPhaseActive = false;
+  for (const win of pendingShowWindows) {
+    if (!win.isDestroyed()) {
+      win.show();
+    }
+  }
+  pendingShowWindows.clear();
+}
+
+export function showWindowWhenStartupReady(win: BrowserWindow): void {
+  if (startupPhaseReady || !startupPhaseActive) {
+    win.show();
+    return;
+  }
+  pendingShowWindows.add(win);
 }
 
 /**

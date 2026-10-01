@@ -1,22 +1,33 @@
 // init-channels —— channels 模块的主入口。由 index.ts 在 app.whenReady() 调一次。
 //
-// 当前阶段：
-//   - Phase 0: 骨架 + dispatcher + inbound-server
-//   - Phase 2: 接入 FeishuAdapter（自建飞书应用 + 事件订阅）
+// 已接入渠道：飞书（长连接）、微信（ilink 协议）、QQ（NapCat OneBot）、QQ 机器人（官方网关）。
+// 另含消息日志与渠道安装进度上报。
 //
-// 注意：initChannels 必须晚于 initRAG / initMcpManager / loadModelSettings。
-import { app, BrowserWindow, ipcMain } from "electron";
-import path from "node:path";
+// 生命周期（Task 1 起，显式化）：
+//   - initializeChannels()：注入 dispatcher、注册 adapter、注册 IPC（无网络/定时器副作用）
+//   - startChannels()：启动 inbound-server + 所有 adapter（真正的网络启动）
+//   - shutdownChannels()：停 adapter + inbound-server，并复位两个 flag
+//
+// 注意：startChannels 必须晚于 initRAG / initMcpManager / loadModelSettings。
+import { app, BrowserWindow } from "electron";
 import { IPC } from "../../shared/ipc-channels";
+import { createIpcScope, type IpcScope } from "../application/ipc-scope";
 import {
   loadChannelsSettings,
   saveChannelsSettings,
 } from "./settings-store";
 import { channelManager } from "./manager";
-import { channelDispatcher } from "./dispatcher";
+import type { MessageHandler } from "./types";
+import { getChannelConversationBindingStore } from "./conversation-binding-store";
+import { listSessions, getSession } from "../chats/chats-store";
+import {
+  bindContextConversation,
+  getContextBindingSnapshot,
+  unbindContextConversation,
+} from "./conversation-binding-api";
 import { startInboundServer, stopInboundServer } from "./inbound-server";
 import { FeishuAdapter } from "./adapters/feishu";
-import { ILinkBotAdapter } from "./adapters/wechat/ilink-bot-adapter";
+import path from "node:path";
 import { fetchQrCode } from "./adapters/wechat/ilink-protocol-client";
 import { createQrDataUrl } from "./adapters/wechat/qr";
 import {
@@ -36,11 +47,17 @@ import {
   WechatLoginSessionCoordinator,
   type WechatLoginSessionSnapshot,
 } from "./adapters/wechat/wechat-login-session";
-import { getRecentLog, clearLog } from "./message-log";
+import { ILinkBotAdapter, loadCredentials } from "./adapters/wechat/ilink-bot-adapter";
+import { NapCatAdapter } from "./adapters/qq/napcat-adapter";
+import { resolveQqListenAuthRequirement } from "./adapters/qq/onebot-reverse-ws";
+import { QqBotAdapter } from "./adapters/qqbot/qqbot-adapter";
+import { getRecentLog, clearLog, reloadLogFromDisk } from "./message-log";
+import { logger, LogTag } from "../logger";
 
 const LOG = "[ChannelsInit]";
 
 let initialized = false;
+let started = false;
 let conversationLifecycle: {
   onUserMessage(): void;
   onConversationStarted(): void;
@@ -55,35 +72,59 @@ let wxAdapter: ILinkBotAdapter | null = null;
 let wxLoginSession: WechatLoginSessionCoordinator | null = null;
 let wxTaskService: WechatChannelTaskService | null = null;
 let wxTaskTimer: NodeJS.Timeout | null = null;
+let qqAdapter: NapCatAdapter | null = null;
+let qqBotAdapter: QqBotAdapter | null = null;
 
-/** app.whenReady() 调一次。idempotent。 */
-export async function initChannels(): Promise<void> {
+export interface InitializeChannelsOptions {
+  ipc?: IpcScope;
+  handleIncoming: MessageHandler;
+  reloadDispatcherSettings: () => void;
+}
+
+function getPublicChannelsSettings(): Record<string, unknown> {
+  const settings = loadChannelsSettings();
+  return {
+    ...settings,
+    qq: {
+      ...settings.qq,
+      accessToken: undefined,
+      hasAccessToken: Boolean(settings.qq.accessToken),
+    },
+    qqbot: {
+      ...settings.qqbot,
+      appSecret: undefined,
+      hasAppSecret: Boolean(settings.qqbot.appSecret),
+    },
+  };
+}
+/** 应用启动编排在核心阶段调用一次。只做装配，无网络副作用，并且可重复调用。 */
+export function initializeChannels(options: InitializeChannelsOptions): void {
   if (initialized) return;
   initialized = true;
+  reloadLogFromDisk();
 
-  // 注入 dispatcher 到 manager
+  // 将当前子系统的消息入口注入渠道管理器。
   channelManager.setDispatcher(async (msg) => {
     conversationLifecycle?.onUserMessage();
     conversationLifecycle?.onConversationStarted();
     try {
-      return await channelDispatcher.handleIncoming(msg);
+      return await options.handleIncoming(msg);
     } finally {
       conversationLifecycle?.onConversationEnded();
     }
   });
 
+  // 注册 adapter（不启动，startChannels 时统一 startAll）
+  registerAdapters();
+
   // 注册全局 IPC
-  registerChannelsIpc();
+  registerChannelsIpc(options.ipc, options.reloadDispatcherSettings);
 
-  // 启动 inbound-server
-  try {
-    const handle = await startInboundServer();
-    console.log(LOG, `入站 server 监听 http://127.0.0.1:${handle.port}`);
-  } catch (err) {
-    console.error(LOG, "入站 server 启动失败:", err);
-  }
+  logger.info(LogTag.Channels, "channels module initialized");
+}
 
-  // 注册 adapter
+/** 注册各渠道 adapter。adapter 构造不产生网络副作用，真正的连接在 startChannels。 */
+function registerAdapters(): void {
   const feishuAdapter = new FeishuAdapter();
   channelManager.register(feishuAdapter);
 
@@ -106,16 +147,43 @@ export async function initChannels(): Promise<void> {
   wxLoginSession = createWechatLoginSession(wxAdapter);
   channelManager.register(wxAdapter);
 
+  qqAdapter = new NapCatAdapter(broadcastChannelsStatus);
+  channelManager.register(qqAdapter);
+
+  qqBotAdapter = new QqBotAdapter(broadcastChannelsStatus);
+  channelManager.register(qqBotAdapter);
+}
+
+/** 显式启动：inbound-server + 所有已注册 adapter。必须晚于 initRAG / initMcpManager。idempotent。 */
+export async function startChannels(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw signal.reason;
+  if (started) return;
+  started = true;
+
+  // 启动 inbound-server
+  try {
+    const handle = await startInboundServer();
+    logger.info(LogTag.InboundServer, `listening on http://127.0.0.1:${handle.port}`);
+  } catch (err) {
+    console.error(LOG, "入站 server 启动失败:", err);
+  }
+
+  if (signal?.aborted) {
+    await stopInboundServer();
+    throw signal.reason;
+  }
+
   // 启动所有已注册 adapter
   await channelManager.startAll();
-  await wxTaskService.processDue();
+
+  await wxTaskService?.processDue();
   wxTaskTimer = setInterval(() => {
     void wxTaskService?.processDue().catch((error) =>
       console.warn(LOG, "微信渠道任务检查失败:", error));
   }, 15_000);
   wxTaskTimer.unref?.();
 
-  console.log(LOG, "channels 模块就绪");
+  logger.info(LogTag.Channels, "channels module started");
   broadcastChannelsStatus();
 }
 
@@ -126,39 +194,55 @@ export async function shutdownChannels(): Promise<void> {
   setWechatChannelTaskService(null);
   setChannelPermissionResolver(null);
   await wxLoginSession?.cancel();
+
   await channelManager.stopAll();
   await stopInboundServer();
   initialized = false;
+  started = false;
 }
 
-/** IPC 注册 */
-function registerChannelsIpc(): void {
-  ipcMain.handle(IPC.CHANNELS_GET_CONFIG, () => loadChannelsSettings());
+/** 注册进程间通信处理器。 */
+function registerChannelsIpc(
+  ipcOption: IpcScope | undefined,
+  reloadDispatcherSettings: () => void,
+): void {
+  const ipc = ipcOption ?? createIpcScope();
+  ipc.handle(IPC.CHANNELS_GET_CONFIG, () => getPublicChannelsSettings());
 
-  ipcMain.handle(IPC.CHANNELS_SAVE_CONFIG, (_e, patch: unknown) => {
-    return saveChannelsSettings(patch as Parameters<typeof saveChannelsSettings>[0]);
+  ipc.handle(IPC.CHANNELS_SAVE_CONFIG, (_e, patch: unknown) => {
+    saveChannelsSettings(patch as Parameters<typeof saveChannelsSettings>[0]);
+    reloadDispatcherSettings();
+    return getPublicChannelsSettings();
   });
 
-  ipcMain.handle(IPC.CHANNELS_LIST, () => channelManager.listChannels());
+  ipc.handle(IPC.CHANNELS_LIST, () => channelManager.listChannels());
 
-  ipcMain.handle(IPC.CHANNELS_GET_STATUS, () => channelManager.getAllStatus());
+  ipc.handle(IPC.CHANNELS_GET_STATUS, () => channelManager.getAllStatus());
 
-  ipcMain.handle(IPC.CHANNELS_RESTART, async () => {
+  // QQ 监听鉴权预检：渲染进程看不到网络接口，无法自行判断监听地址是否回环，
+  // 因此「是否需要 Access Token」只能由主进程给出（与启动时的硬校验同一实现）。
+  ipc.handle(IPC.CHANNELS_QQ_RESOLVE_AUTH_REQUIREMENT, (_e, payload: unknown) =>
+    resolveQqListenAuthRequirement(
+      (payload ?? {}) as { listenMode?: unknown; customHost?: unknown },
+    ),
+  );
+
+  ipc.handle(IPC.CHANNELS_RESTART, async () => {
     await channelManager.stopAll();
     await channelManager.startAll();
-    await wxTaskService?.processDue();
     broadcastChannelsStatus();
     return { ok: true };
   });
 
   // ── 微信 IPC (iLink 直连版) ───────────────────────────────────────────────────────
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_RUNTIME_DETECT, () => {
+  ipc.handle(IPC.CHANNELS_WECHAT_RUNTIME_DETECT, () => {
     // iLink Bot API 是腾讯的远程协议，不需本地安装
     return { installed: true, version: "ilink/1.0.0" };
   });
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_LOGIN_START, async () => {
+	  // 扫码登录：Main Process 生成 PNG dataURL，推给 Renderer 显示 <img>
+	    ipc.handle(IPC.CHANNELS_WECHAT_LOGIN_START, async () => {
     if (!wxLoginSession) return { ok: false, error: "微信登录服务未初始化" };
     try {
       return { ok: true, ...(await wxLoginSession.start()) };
@@ -167,12 +251,12 @@ function registerChannelsIpc(): void {
     }
   });
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_LOGIN_CANCEL, async () => {
+  ipc.handle(IPC.CHANNELS_WECHAT_LOGIN_CANCEL, async () => {
     if (!wxLoginSession) return { ok: false, error: "微信登录服务未初始化" };
     return { ok: true, ...(await wxLoginSession.cancel()) };
   });
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_LOGIN_REFRESH, async () => {
+  ipc.handle(IPC.CHANNELS_WECHAT_LOGIN_REFRESH, async () => {
     if (!wxLoginSession) return { ok: false, error: "微信登录服务未初始化" };
     try {
       return { ok: true, ...(await wxLoginSession.refresh()) };
@@ -181,7 +265,7 @@ function registerChannelsIpc(): void {
     }
   });
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_LOGIN_RESULT, async () => {
+  ipc.handle(IPC.CHANNELS_WECHAT_LOGIN_RESULT, async () => {
     if (!wxAdapter) return { connected: false, loginSession: { state: "idle" } };
     const status = wxAdapter.getStatus();
     return {
@@ -192,43 +276,43 @@ function registerChannelsIpc(): void {
     };
   });
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_PAIRING_LIST, () => {
+  ipc.handle(IPC.CHANNELS_WECHAT_PAIRING_LIST, () => {
     // iLink 模式没有 pairing 概念
     return [];
   });
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_PAIRING_APPROVE, () => ({ ok: false, error: "iLink 模式不支持 pairing" }));
+  ipc.handle(IPC.CHANNELS_WECHAT_PAIRING_APPROVE, () => ({ ok: false, error: "iLink 模式不支持 pairing" }));
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_ACCOUNTS_LIST, () => getWechatAccountIpcHandlers().list());
-  ipcMain.handle(IPC.CHANNELS_WECHAT_ACCOUNT_RENAME, (_event, input: { ilinkBotId?: string; label?: string }) =>
+  ipc.handle(IPC.CHANNELS_WECHAT_ACCOUNTS_LIST, () => getWechatAccountIpcHandlers().list());
+  ipc.handle(IPC.CHANNELS_WECHAT_ACCOUNT_RENAME, (_event, input: { ilinkBotId?: string; label?: string }) =>
     getWechatAccountIpcHandlers().rename(input));
-  ipcMain.handle(IPC.CHANNELS_WECHAT_ACCOUNT_SET_ENABLED, (_event, input: { ilinkBotId?: string; enabled?: boolean }) =>
+  ipc.handle(IPC.CHANNELS_WECHAT_ACCOUNT_SET_ENABLED, (_event, input: { ilinkBotId?: string; enabled?: boolean }) =>
     getWechatAccountIpcHandlers().setEnabled(input));
-  ipcMain.handle(IPC.CHANNELS_WECHAT_ACCOUNT_RECONNECT, (_event, ilinkBotId: string) =>
+  ipc.handle(IPC.CHANNELS_WECHAT_ACCOUNT_RECONNECT, (_event, ilinkBotId: string) =>
     getWechatAccountIpcHandlers().reconnect(ilinkBotId));
-  ipcMain.handle(IPC.CHANNELS_WECHAT_ACCOUNT_RESCAN, (_event, ilinkBotId: string) =>
+  ipc.handle(IPC.CHANNELS_WECHAT_ACCOUNT_RESCAN, (_event, ilinkBotId: string) =>
     getWechatAccountIpcHandlers().rescan(ilinkBotId));
-  ipcMain.handle(IPC.CHANNELS_WECHAT_LOGOUT, (_event, ilinkBotId: string) =>
+  ipc.handle(IPC.CHANNELS_WECHAT_LOGOUT, (_event, ilinkBotId: string) =>
     getWechatAccountIpcHandlers().logout(ilinkBotId));
-  ipcMain.handle(IPC.CHANNELS_WECHAT_ACCOUNT_DELETE, (_event, ilinkBotId: string) =>
+  ipc.handle(IPC.CHANNELS_WECHAT_ACCOUNT_DELETE, (_event, ilinkBotId: string) =>
     getWechatAccountIpcHandlers().delete(ilinkBotId));
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_RUNTIME_INSTALL, () => ({
+  ipc.handle(IPC.CHANNELS_WECHAT_RUNTIME_INSTALL, () => ({
     ok: true,
     hint: "iLink Bot API 是云端协议，无需本地安装",
   }));
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_RUNTIME_UPDATE, () => ({ ok: true }));
+  ipc.handle(IPC.CHANNELS_WECHAT_RUNTIME_UPDATE, () => ({ ok: true }));
 
-  ipcMain.handle(IPC.CHANNELS_WECHAT_INSTALL, async () => {
+  ipc.handle(IPC.CHANNELS_WECHAT_INSTALL, async () => {
     if (!wxAdapter) return { ok: false };
     await wxAdapter.stop();
     await wxAdapter.start();
     return { ok: true, phase: "ready" };
   });
 
-  // Phase 2 长连接：测试连接 = 重建 LarkChannel（SDK 内部会自动跑 WSS handshake）
-  ipcMain.handle(IPC.CHANNELS_FEISHU_TEST_CONNECTION, async () => {
+  // 飞书长连接：测试连接 = 重建 LarkChannel（SDK 内部会自动跑 WSS handshake）
+  ipc.handle(IPC.CHANNELS_FEISHU_TEST_CONNECTION, async () => {
     const adapter = channelManager.getAdapter("feishu") as FeishuAdapter | undefined;
     if (!adapter) return { ok: false, error: "飞书 adapter 未注册" };
     const status = adapter.getStatus();
@@ -249,22 +333,78 @@ function registerChannelsIpc(): void {
   });
 
   // 长连接模式不需要 webhook URL —— 这个 IPC 保留但返回 ok 提示用户用长连接
-  ipcMain.handle(IPC.CHANNELS_FEISHU_TEST_WEBHOOK_REACHABLE, async () => {
+  ipc.handle(IPC.CHANNELS_FEISHU_TEST_WEBHOOK_REACHABLE, async () => {
     return {
       ok: true,
       message: "长连接模式不需要公网 URL — SDK 已自动建立 WSS 连接",
     };
   });
 
-  // Phase 3.4：消息日志
-  ipcMain.handle(IPC.CHANNELS_LOG_GET, (_e, limit: unknown) => {
+  ipc.handle(IPC.CHANNELS_QQ_TEST_CONNECTION, async () => {
+    if (!qqAdapter) return { ok: false, error: "QQ adapter 未初始化" };
+    return await qqAdapter.testConnection();
+  });
+
+  // ── QQ 官方机器人 IPC ─────────────────────────────────────────────────────
+  ipc.handle(IPC.CHANNELS_QQBOT_TEST_CONNECTION, async () => {
+    if (!qqBotAdapter) return { ok: false, error: "QQ Bot adapter 未初始化" };
+    return await qqBotAdapter.testConnection();
+  });
+
+  // 消息日志
+  ipc.handle(IPC.CHANNELS_LOG_GET, (_e, limit: unknown) => {
     const n = typeof limit === "number" && limit > 0 ? limit : 100;
     return getRecentLog(n);
   });
-  ipcMain.handle(IPC.CHANNELS_LOG_CLEAR, () => {
+  ipc.handle(IPC.CHANNELS_LOG_CLEAR, () => {
     clearLog();
     return { ok: true };
   });
+
+  ipc.handle(IPC.CHANNELS_CONTEXT_BINDINGS_GET, () => {
+    return getContextBindingSnapshot(getChannelConversationBindingStore(), listSessions());
+  });
+
+  ipc.handle(IPC.CHANNELS_CONTEXT_BIND, (_e, payload: unknown) => {
+    return bindContextConversation(
+      getChannelConversationBindingStore(),
+      payload,
+      (conversationId) => getSession(conversationId) !== null,
+    );
+  });
+
+  ipc.handle(IPC.CHANNELS_CONTEXT_UNBIND, (_e, sessionId: unknown) => {
+    return unbindContextConversation(getChannelConversationBindingStore(), sessionId);
+  });
+}
+
+/** 工具：把所有 BrowserWindow 广播 channels 状态变更（UI 轮询用）。 */
+export function broadcastChannelsStatus(): void {
+  const status = channelManager.getAllStatus();
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send(IPC.CHANNELS_STATUS_CHANGED, status);
+    } catch (err) {
+      console.warn(LOG, "广播失败:", err);
+    }
+  }
+}
+
+/** 工具：把所有 BrowserWindow 广播安装进度。 */
+export function broadcastChannelsInstallProgress(progress: {
+  channel: string;
+  phase: string;
+  pct: number;
+}): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send(IPC.CHANNELS_INSTALL_PROGRESS, progress);
+    } catch (err) {
+      console.warn(LOG, "广播安装进度失败:", err);
+    }
+  }
 }
 
 function createWechatLoginSession(adapter: ILinkBotAdapter): WechatLoginSessionCoordinator {
@@ -345,33 +485,4 @@ function broadcastWechatLoginSession(snapshot: WechatLoginSessionSnapshot): void
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** 工具：把所有 BrowserWindow 广播 channels 状态变更（UI 轮询用）。 */
-export function broadcastChannelsStatus(): void {
-  const status = channelManager.getAllStatus();
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed()) continue;
-    try {
-      win.webContents.send(IPC.CHANNELS_STATUS_CHANGED, status);
-    } catch (err) {
-      console.warn(LOG, "广播失败:", err);
-    }
-  }
-}
-
-/** 工具：把所有 BrowserWindow 广播安装进度。 */
-export function broadcastChannelsInstallProgress(progress: {
-  channel: string;
-  phase: string;
-  pct: number;
-}): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed()) continue;
-    try {
-      win.webContents.send(IPC.CHANNELS_INSTALL_PROGRESS, progress);
-    } catch (err) {
-      console.warn(LOG, "广播安装进度失败:", err);
-    }
-  }
 }

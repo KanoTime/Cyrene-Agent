@@ -5,13 +5,14 @@
 //   const cap = resolveReasoningCapability(this.capability.id, cfg.model);
 //   const finalBody = applyReasoningPreference(body, cfg.reasoning ?? {mode:"auto"}, cap, ctx);
 //
-// 决策树见桌面 2026-07-14-reasoning-control-layer-design.md §6.2。
+// 决策树：resolveEffectiveReasoning 先按能力表归一 preference，本文件再按
+// control × requestStyle 分支注入 wire 字段。
 // 关键不变量：
 //   - 不修改入参 body，返回新对象
-//   - auto 不增加任何字段
+//   - 可调模型的旧 auto 会解析为默认档并显式发送；不可调模型不增加字段
 //   - 不支持的 effort 已在 resolveEffectiveReasoning 退回 defaultEffort
 //     （applyReasoningPreference 信任传入的 preference）
-//   - supportsDisable=false 时 off 不发 reasoning_effort:"none"（修订 #1）
+//   - supportsDisable=false 时，旧 off 偏好在共享解析层回退到默认档
 //   - fixed-on 走 resolveEffectiveReasoning 后 effective.mode 永远 on，
 //     故 applyReasoningPreference 不再判 fixed-on/off → 直接按 on 处理
 //   - 互斥字段防御：每个 requestStyle 只用自己专属字段，路径互不交叉
@@ -28,6 +29,8 @@ export interface ApplyReasoningContext {
   hasTools: boolean;
   providerId: string;
   model: string;
+  /** 单模型手动规则优先于自定义端点的旧全局覆盖。 */
+  ignoreThinkingOverride?: boolean;
 }
 
 export function applyReasoningPreference(
@@ -39,11 +42,11 @@ export function applyReasoningPreference(
   const effective = resolveEffectiveReasoning(
     preference,
     capability,
-    getVendorRuntimeSettings().thinkingOverride,
+    context.ignoreThinkingOverride ? 0 : getVendorRuntimeSettings().thinkingOverride,
   );
   const result: Record<string, unknown> = { ...body };
 
-  // 日志（用户 spec §六 #7）
+  // 日志：只记 requested → effective 的映射结果，便于排查思考档位问题
   const requestedStr = `${preference.mode}/${preference.effort ?? "-"}`;
   const effectiveStr = `${effective.mode}/${effective.effort ?? "-"}`;
   if (requestedStr !== effectiveStr) {
@@ -82,12 +85,12 @@ export function applyReasoningPreference(
     return result;
   }
 
-  // 2. auto：不增加任何字段
+  // 3. 不可调模型保留 auto，不增加任何字段。
   if (effective.mode === "auto") {
     return result;
   }
 
-  // 3. off：按 control + requestStyle 注入关闭字段
+  // 4. off：按 control + requestStyle 注入关闭字段
   if (effective.mode === "off") {
     switch (capability.control) {
       case "toggle":
@@ -111,7 +114,7 @@ export function applyReasoningPreference(
     return result;
   }
 
-  // 4. on：按 control + requestStyle 注入启用字段
+  // 5. on：按 control + requestStyle 注入启用字段
   if (effective.mode === "on") {
     switch (capability.control) {
       case "toggle":
